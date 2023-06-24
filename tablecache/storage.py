@@ -21,10 +21,7 @@ import redis.asyncio as redis
 
 
 class RedisStorage:
-    def __init__(self, table_name, primary_key, *, connect_kwargs=None):
-        self.table_name = table_name
-        self.primary_key = primary_key
-        connect_kwargs = connect_kwargs or {}
+    def __init__(self, **connect_kwargs):
         self._conn_factory = functools.partial(redis.Redis, **connect_kwargs)
 
     async def __aenter__(self):
@@ -35,6 +32,16 @@ class RedisStorage:
         await self._conn.close()
         del self._conn
         return False
+
+    def proxy_table(self, table_name, primary_key):
+        return RedisTable(self._conn, table_name, primary_key)
+
+
+class RedisTable:
+    def __init__(self, conn, table_name, primary_key):
+        self._conn = conn
+        self.table_name = table_name
+        self.primary_key = primary_key
 
     async def put(self, record):
         record_key = record[self.primary_key]

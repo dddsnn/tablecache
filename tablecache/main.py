@@ -40,15 +40,13 @@ async def main():
     asyncio.get_running_loop().add_signal_handler(
         signal.SIGTERM, shutdown, shutdown_event)
     postgres_db = db.PostgresDb(
-        query_string,
-        connect_kwargs={'dsn': 'postgres://postgres:@localhost:5432/postgres'})
-    redis_storage = storage.RedisStorage('t', 'user_id')
+        dsn='postgres://postgres:@localhost:5432/postgres')
+    redis_storage = storage.RedisStorage()
     table_cache = cache.Cache(postgres_db, redis_storage)
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_db)
-        await table_cache.load()
-        print(await table_cache.get(1))
+        table = await table_cache.cache_table('t', query_string, 'user_id')
 
 
 if __name__ == '__main__':

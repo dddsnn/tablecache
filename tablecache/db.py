@@ -21,9 +21,7 @@ import asyncpg
 
 
 class PostgresDb:
-    def __init__(self, query_string, *, connect_kwargs=None):
-        self.query_string = query_string
-        connect_kwargs = connect_kwargs or {}
+    def __init__(self, **connect_kwargs):
         self._pool_factory = functools.partial(
             asyncpg.create_pool, min_size=0, max_size=1, **connect_kwargs)
 
@@ -35,6 +33,15 @@ class PostgresDb:
         await self._pool.close()
         del self._pool
         return False
+
+    def proxy_table(self, query_string):
+        return PostgresTable(self._pool, query_string)
+
+
+class PostgresTable:
+    def __init__(self, pool, query_string):
+        self._pool = pool
+        self.query_string = query_string
 
     async def all(self):
         async with self._pool.acquire() as conn, conn.transaction():

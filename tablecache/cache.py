@@ -21,9 +21,22 @@ class Cache:
         self._db = db
         self._storage = storage
 
+    async def cache_table(self, table_name, query_string, primary_key):
+        db_table = self._db.proxy_table(query_string)
+        storage_table = self._storage.proxy_table(table_name, primary_key)
+        cached_table = Table(db_table, storage_table)
+        await cached_table.load()
+        return cached_table
+
+
+class Table:
+    def __init__(self, db_table, storage_table):
+        self._db_table = db_table
+        self._storage_table = storage_table
+
     async def load(self):
-        async for record in self._db.all():
-            await self._storage.put(record)
+        async for record in self._db_table.all():
+            await self._storage_table.put(record)
 
     async def get(self, key):
-        return await self._storage.get(key)
+        return await self._storage_table.get(key)
