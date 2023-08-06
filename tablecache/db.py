@@ -34,16 +34,21 @@ class PostgresDb:
         del self._pool
         return False
 
-    def proxy_table(self, query_string):
-        return PostgresTable(self._pool, query_string)
+    @property
+    def pool(self):
+        try:
+            return self._pool
+        except AttributeError as e:
+            raise AttributeError(
+                'You have to connect the DB before using it.') from e
 
 
 class PostgresTable:
-    def __init__(self, pool, query_string):
-        self._pool = pool
+    def __init__(self, postgres_db, query_string):
+        self._db = postgres_db
         self.query_string = query_string
 
     async def all(self):
-        async with self._pool.acquire() as conn, conn.transaction():
+        async with self._db.pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_string):
                 yield {k: str(v) for k, v in record.items()}

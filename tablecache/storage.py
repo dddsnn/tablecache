@@ -33,20 +33,25 @@ class RedisStorage:
         del self._conn
         return False
 
-    def proxy_table(self, table_name, primary_key):
-        return RedisTable(self._conn, table_name, primary_key)
+    @property
+    def conn(self):
+        try:
+            return self._conn
+        except AttributeError as e:
+            raise AttributeError(
+                'You have to connect the storage before using it.') from e
 
 
 class RedisTable:
-    def __init__(self, conn, table_name, primary_key):
-        self._conn = conn
+    def __init__(self, redis_storage, table_name, primary_key):
+        self._storage = redis_storage
         self.table_name = table_name
         self.primary_key = primary_key
 
     async def put(self, record):
         record_key = record[self.primary_key]
-        await self._conn.hset(
+        await self._storage.conn.hset(
             f'{self.table_name}:{record_key}', mapping=record)
 
     async def get(self, key):
-        return await self._conn.hgetall(f'{self.table_name}:{key}')
+        return await self._storage.conn.hgetall(f'{self.table_name}:{key}')
