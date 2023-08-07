@@ -44,7 +44,7 @@ class RedisStorage:
 
 class RedisTable:
     def __init__(
-            self, redis_storage, table_name, primary_key_name, *, encoders,
+            self, redis_storage, *, table_name, primary_key_name, encoders,
             decoders, primary_key_encoder=str):
         self._storage = redis_storage
         self.table_name = table_name
