@@ -44,27 +44,43 @@ class RedisStorage:
 
 class RedisTable:
     def __init__(
-            self, redis_storage, table_name, primary_key, *, encoders,
-            decoders):
+            self, redis_storage, table_name, primary_key_name, *, encoders,
+            decoders, primary_key_encoder=str):
         self._storage = redis_storage
         self.table_name = table_name
-        self._primary_key = primary_key.encode()
+        self._primary_key_name = primary_key_name
         self._encoders = encoders
         self._decoders = decoders
+        self._primary_key_encoder = primary_key_encoder
 
     async def put(self, record):
+        try:
+            record_key = record[self._primary_key_name]
+        except KeyError:
+            raise ValueError(f'Record {record} is missing a primary key.')
+        record_key_str = self._record_key_str(record_key)
         encoded_record = self._encode_record(record)
-        record_key = encoded_record[self._primary_key]
+        record_key = encoded_record[self._primary_key_name.encode()]
         await self._storage.conn.hset(
-            f'{self.table_name}:{record_key}', mapping=encoded_record)
+            f'{self.table_name}:{record_key_str}', mapping=encoded_record)
 
-    async def get(self, key):
+    async def get(self, record_key):
+        record_key_str = self._record_key_str(record_key)
         encoded_record = await self._storage.conn.hgetall(
-            f'{self.table_name}:{key}')
+            f'{self.table_name}:{record_key_str}')
         if not encoded_record:
             raise KeyError(
-                f'No record with {self._primary_key.decode()}={key}.')
+                f'No record with {self._primary_key_name}={record_key_str}.')
         return self._decode_record(encoded_record)
+
+    def _record_key_str(self, record_key):
+        try:
+            record_key_str = self._primary_key_encoder(record_key)
+            assert isinstance(record_key_str, str)
+        except Exception as e:
+            raise ValueError(
+                f'Unable to decode record key {record_key} to string.') from e
+        return record_key_str
 
     def _encode_record(self, record):
         encoded_record = {}
