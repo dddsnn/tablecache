@@ -51,7 +51,6 @@ async def main():
     postgres_db = tc.PostgresDb(
         dsn='postgres://postgres:@localhost:5432/postgres')
     redis_storage = tc.RedisStorage()
-    table_cache = tc.Cache(postgres_db, redis_storage)
     db_table = tc.PostgresTable(postgres_db, query_string)
     storage_table = tc.RedisTable(
         redis_storage,
@@ -69,7 +68,8 @@ async def main():
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_db)
-        table = await table_cache.cache_table(db_table, storage_table)
+        table = tc.CachedTable(db_table, storage_table)
+        await table.load()
         print(await table.get(1))
 
 

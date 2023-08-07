@@ -15,6 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-from tablecache.cache import Cache
+from tablecache.cache import CachedTable
 from tablecache.db import PostgresDb, PostgresTable
 from tablecache.storage import RedisStorage, RedisTable

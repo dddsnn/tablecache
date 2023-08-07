@@ -16,18 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 
-class Cache:
-    def __init__(self, db, storage):
-        self._db = db
-        self._storage = storage
-
-    async def cache_table(self, db_table, storage_table):
-        cached_table = Table(db_table, storage_table)
-        await cached_table.load()
-        return cached_table
-
-
-class Table:
+class CachedTable:
     def __init__(self, db_table, storage_table):
         self._db_table = db_table
         self._storage_table = storage_table
