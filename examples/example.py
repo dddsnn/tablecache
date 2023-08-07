@@ -17,15 +17,12 @@
 
 import asyncio
 import contextlib
-import signal
+import pathlib
+import sys
 
-import cache
-import db
-import storage
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
-
-def shutdown(shutdown_event):
-    shutdown_event.set()
+import tablecache as tc
 
 
 def encode_str(s):
@@ -51,15 +48,12 @@ async def main():
         users u
         JOIN users_cities uc USING (user_id)
         JOIN cities c USING (city_id)'''
-    shutdown_event = asyncio.Event()
-    asyncio.get_running_loop().add_signal_handler(
-        signal.SIGTERM, shutdown, shutdown_event)
-    postgres_db = db.PostgresDb(
+    postgres_db = tc.PostgresDb(
         dsn='postgres://postgres:@localhost:5432/postgres')
-    redis_storage = storage.RedisStorage()
-    table_cache = cache.Cache(postgres_db, redis_storage)
-    db_table = db.PostgresTable(postgres_db, query_string)
-    storage_table = storage.RedisTable(
+    redis_storage = tc.RedisStorage()
+    table_cache = tc.Cache(postgres_db, redis_storage)
+    db_table = tc.PostgresTable(postgres_db, query_string)
+    storage_table = tc.RedisTable(
         redis_storage,
         't',
         'user_id',
@@ -76,6 +70,7 @@ async def main():
         await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_db)
         table = await table_cache.cache_table(db_table, storage_table)
+        print(await table.get(1))
 
 
 if __name__ == '__main__':
