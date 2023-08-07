@@ -17,7 +17,6 @@
 
 import asyncio
 import contextlib
-import os
 import signal
 
 import cache
@@ -27,6 +26,22 @@ import storage
 
 def shutdown(shutdown_event):
     shutdown_event.set()
+
+
+def encode_str(s):
+    return s.encode()
+
+
+def decode_str(bs):
+    return bs.decode()
+
+
+def encode_int_str(i):
+    return str(i).encode()
+
+
+def decode_int_str(bs):
+    return int(bs.decode())
 
 
 async def main():
@@ -44,7 +59,19 @@ async def main():
     redis_storage = storage.RedisStorage()
     table_cache = cache.Cache(postgres_db, redis_storage)
     db_table = db.PostgresTable(postgres_db, query_string)
-    storage_table = storage.RedisTable(redis_storage, 't', 'user_id')
+    storage_table = storage.RedisTable(
+        redis_storage,
+        't',
+        'user_id',
+        encoders={
+            'user_id': encode_int_str,
+            'user_name': encode_str,
+            'city_name': encode_str,},
+        decoders={
+            'user_id': decode_int_str,
+            'user_name': decode_str,
+            'city_name': decode_str,},
+    )
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_db)

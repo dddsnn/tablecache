@@ -51,4 +51,4 @@ class PostgresTable:
     async def all(self):
         async with self._db.pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_string):
-                yield {k: str(v) for k, v in record.items()}
+                yield record
