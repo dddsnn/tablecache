@@ -44,11 +44,18 @@ class PostgresDb:
 
 
 class PostgresTable:
-    def __init__(self, postgres_db, query_string):
+    def __init__(self, postgres_db, query_all_string, query_some_string):
         self._db = postgres_db
-        self.query_string = query_string
+        self.query_all_string = query_all_string
+        self.query_some_string = query_some_string
 
     async def all(self):
         async with self._db.pool.acquire() as conn, conn.transaction():
-            async for record in conn.cursor(self.query_string):
+            async for record in conn.cursor(self.query_all_string):
+                yield record
+
+    async def get(self, primary_keys):
+        async with self._db.pool.acquire() as conn, conn.transaction():
+            async for record in conn.cursor(self.query_some_string,
+                                            primary_keys):
                 yield record

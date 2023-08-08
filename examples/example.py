@@ -42,16 +42,18 @@ def decode_int_str(bs):
 
 
 async def main():
-    query_string = '''
-    SELECT uc.*, u.name AS user_name, c.name AS city_name
-    FROM
-        users u
-        JOIN users_cities uc USING (user_id)
-        JOIN cities c USING (city_id)'''
+    base_query_string = '''
+        SELECT uc.*, u.name AS user_name, c.name AS city_name
+        FROM
+            users u
+            JOIN users_cities uc USING (user_id)
+            JOIN cities c USING (city_id)'''
+    query_some_string = f'{base_query_string} WHERE uc.user_id = ANY ($1)'
     postgres_db = tc.PostgresDb(
         dsn='postgres://postgres:@localhost:5432/postgres')
     redis_storage = tc.RedisStorage()
-    db_table = tc.PostgresTable(postgres_db, query_string)
+    db_table = tc.PostgresTable(
+        postgres_db, base_query_string, query_some_string)
     storage_table = tc.RedisTable(
         redis_storage,
         table_name='t',
