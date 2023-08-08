@@ -22,6 +22,8 @@ import sys
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
+import asyncpg
+
 import tablecache as tc
 
 
@@ -49,11 +51,12 @@ async def main():
             JOIN users_cities uc USING (user_id)
             JOIN cities c USING (city_id)'''
     query_some_string = f'{base_query_string} WHERE uc.user_id = ANY ($1)'
-    postgres_db = tc.PostgresDb(
+    postgres_pool = asyncpg.create_pool(
+        min_size=0, max_size=1,
         dsn='postgres://postgres:@localhost:5432/postgres')
     redis_storage = tc.RedisStorage()
     db_table = tc.PostgresTable(
-        postgres_db, base_query_string, query_some_string)
+        postgres_pool, base_query_string, query_some_string)
     storage_table = tc.RedisTable(
         redis_storage,
         primary_key_name='user_id',
@@ -68,7 +71,7 @@ async def main():
     )
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)
-        await stack.enter_async_context(postgres_db)
+        await stack.enter_async_context(postgres_pool)
         table = tc.CachedTable(db_table, storage_table)
         await table.load()
         print(await table.get(1))

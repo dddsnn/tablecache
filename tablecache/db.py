@@ -15,47 +15,24 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-import functools
-
-import asyncpg
-
-
-class PostgresDb:
-    def __init__(self, **connect_kwargs):
-        self._pool_factory = functools.partial(
-            asyncpg.create_pool, min_size=0, max_size=1, **connect_kwargs)
-
-    async def __aenter__(self):
-        self._pool = await self._pool_factory()
-        return self
-
-    async def __aexit__(self, *_):
-        await self._pool.close()
-        del self._pool
-        return False
-
-    @property
-    def pool(self):
-        try:
-            return self._pool
-        except AttributeError as e:
-            raise AttributeError(
-                'You have to connect the DB before using it.') from e
+import asyncpg.pool
 
 
 class PostgresTable:
-    def __init__(self, postgres_db, query_all_string, query_some_string):
-        self._db = postgres_db
+    def __init__(
+            self, pool: asyncpg.pool.Pool, query_all_string: str,
+            query_some_string: str):
+        self._pool = pool
         self.query_all_string = query_all_string
         self.query_some_string = query_some_string
 
     async def all(self):
-        async with self._db.pool.acquire() as conn, conn.transaction():
+        async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_all_string):
                 yield record
 
     async def get(self, primary_keys):
-        async with self._db.pool.acquire() as conn, conn.transaction():
+        async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_some_string,
                                             primary_keys):
                 yield record
