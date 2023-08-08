@@ -20,10 +20,21 @@ class CachedTable:
     def __init__(self, db_table, storage_table):
         self._db_table = db_table
         self._storage_table = storage_table
+        self._dirty_keys = set()
 
     async def load(self):
         async for record in self._db_table.all():
             await self._storage_table.put(record)
 
     async def get(self, key):
+        if key in self._dirty_keys:
+            await self._refresh_dirty()
         return await self._storage_table.get(key)
+
+    async def invalidate(self, key):
+        self._dirty_keys.add(key)
+
+    async def _refresh_dirty(self):
+        async for record in self._db_table.get(self._dirty_keys):
+            await self._storage_table.put(record)
+        self._dirty_keys.clear()
