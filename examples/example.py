@@ -56,7 +56,6 @@ async def main():
         postgres_db, base_query_string, query_some_string)
     storage_table = tc.RedisTable(
         redis_storage,
-        table_name='t',
         primary_key_name='user_id',
         encoders={
             'user_id': encode_int_str,

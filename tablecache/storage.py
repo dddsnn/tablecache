@@ -44,14 +44,16 @@ class RedisStorage:
 
 class RedisTable:
     def __init__(
-            self, redis_storage, *, table_name, primary_key_name, encoders,
-            decoders, primary_key_encoder=str):
+            self, redis_storage, *, primary_key_name, encoders, decoders,
+            primary_key_encoder=str):
         self._storage = redis_storage
-        self.table_name = table_name
         self._primary_key_name = primary_key_name
         self._encoders = encoders
         self._decoders = decoders
         self._primary_key_encoder = primary_key_encoder
+
+    async def clear(self):
+        await self._storage.conn.flushdb()
 
     async def put(self, record):
         try:
@@ -61,13 +63,11 @@ class RedisTable:
         record_key_str = self._record_key_str(record_key)
         encoded_record = self._encode_record(record)
         record_key = encoded_record[self._primary_key_name.encode()]
-        await self._storage.conn.hset(
-            f'{self.table_name}:{record_key_str}', mapping=encoded_record)
+        await self._storage.conn.hset(record_key_str, mapping=encoded_record)
 
     async def get(self, record_key):
         record_key_str = self._record_key_str(record_key)
-        encoded_record = await self._storage.conn.hgetall(
-            f'{self.table_name}:{record_key_str}')
+        encoded_record = await self._storage.conn.hgetall(record_key_str)
         if not encoded_record:
             raise KeyError(
                 f'No record with {self._primary_key_name}={record_key_str}.')

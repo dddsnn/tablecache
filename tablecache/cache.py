@@ -23,6 +23,7 @@ class CachedTable:
         self._dirty_keys = set()
 
     async def load(self):
+        await self._storage_table.clear()
         async for record in self._db_table.all():
             await self._storage_table.put(record)
 
