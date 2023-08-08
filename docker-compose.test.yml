@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  test:
+    build:
+      dockerfile: Dockerfile.test
+    command: pytest
+    depends_on:
+      - postgres
+      - redis
+    restart: "no"
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    ports:
+      - "5432:5432"
+    restart: "no"
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    restart: "no"
