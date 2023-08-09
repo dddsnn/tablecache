@@ -52,6 +52,15 @@ class RedisTable:
     def __init__(
             self, redis_storage, *, primary_key_name, encoders, decoders,
             primary_key_encoder=str):
+        if set(encoders) != set(decoders):
+            raise ValueError(
+                'Encoders and decoders must specify the same attributes.')
+        for attribute_name in encoders:
+            if not isinstance(attribute_name, str):
+                raise ValueError('Attribute names must be strings.')
+        if primary_key_name not in encoders:
+            raise ValueError(
+                'Primary key attribute is missing from encoders and decoders.')
         self._storage = redis_storage
         self._primary_key_name = primary_key_name
         self._encoders = encoders
