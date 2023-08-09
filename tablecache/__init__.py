@@ -19,4 +19,4 @@ from tablecache.cache import CachedTable
 from tablecache.codec import (
     decode_int_as_str, decode_str, encode_int_as_str, encode_str)
 from tablecache.db import PostgresTable
-from tablecache.storage import RedisStorage, RedisTable
+from tablecache.storage import CodingError, RedisStorage, RedisTable

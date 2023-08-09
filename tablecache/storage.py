@@ -20,6 +20,12 @@ import functools
 import redis.asyncio as redis
 
 
+class CodingError(Exception):
+    """
+    Raised when any error relating to en- or decoding occurs.
+    """
+
+
 class RedisStorage:
     def __init__(self, **connect_kwargs):
         self._conn_factory = functools.partial(redis.Redis, **connect_kwargs)
@@ -78,8 +84,8 @@ class RedisTable:
             record_key_str = self._primary_key_encoder(record_key)
             assert isinstance(record_key_str, str)
         except Exception as e:
-            raise ValueError(
-                f'Unable to decode record key {record_key} to string.') from e
+            raise CodingError(
+                f'Unable to encode record key {record_key} as string.') from e
         return record_key_str
 
     def _encode_record(self, record):
@@ -94,11 +100,11 @@ class RedisTable:
             try:
                 encoded_attribute = encoder(attribute)
             except Exception as e:
-                raise ValueError(
+                raise CodingError(
                     f'Error while encoding {attribute_name} {attribute} in '
                     f'{record}.') from e
             if not isinstance(encoded_attribute, bytes):
-                raise ValueError(
+                raise CodingError(
                     f'Illegal type {type(encoded_attribute)} of '
                     f'{attribute_name}.')
             encoded_record[attribute_name.encode()] = encoded_attribute
@@ -116,7 +122,7 @@ class RedisTable:
             try:
                 decoded_record[attribute_name] = decoder(encoded_attribute)
             except Exception as e:
-                raise ValueError(
+                raise CodingError(
                     f'Error while decoding {attribute_name} '
                     f'{encoded_attribute} in {encoded_record}.') from e
         return decoded_record
