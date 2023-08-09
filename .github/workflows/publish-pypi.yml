@@ -2,6 +2,8 @@ name: publish-pypi
 
 on:
   push:
+    tags:
+      - "**"
     branches-ignore:
       - "**"
 
