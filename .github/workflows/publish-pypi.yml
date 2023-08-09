@@ -1,11 +1,6 @@
 name: publish-pypi
 
-on:
-  push:
-    tags:
-      - "**"
-    branches-ignore:
-      - "**"
+on: create
 
 jobs:
   publish-pypi:
