@@ -1,4 +1,4 @@
-name: test-and-tag
+name: test-tag-and-publish
 
 on:
   push:
@@ -36,3 +36,20 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           custom_tag: ${{ env.VERSION }}
           tag_prefix: ""
+  publish-pypi:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: tag
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install build
+        run: python -m pip install build
+      - name: Build
+        run: python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
