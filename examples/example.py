@@ -27,22 +27,6 @@ import asyncpg
 import tablecache as tc
 
 
-def encode_str(s):
-    return s.encode()
-
-
-def decode_str(bs):
-    return bs.decode()
-
-
-def encode_int_str(i):
-    return str(i).encode()
-
-
-def decode_int_str(bs):
-    return int(bs.decode())
-
-
 async def main():
     base_query_string = '''
         SELECT uc.*, u.name AS user_name, c.name AS city_name
@@ -61,13 +45,13 @@ async def main():
         redis_storage,
         primary_key_name='user_id',
         encoders={
-            'user_id': encode_int_str,
-            'user_name': encode_str,
-            'city_name': encode_str,},
+            'user_id': tc.encode_int_as_str,
+            'user_name': tc.encode_str,
+            'city_name': tc.encode_str,},
         decoders={
-            'user_id': decode_int_str,
-            'user_name': decode_str,
-            'city_name': decode_str,},
+            'user_id': tc.decode_int_as_str,
+            'user_name': tc.decode_str,
+            'city_name': tc.decode_str,},
     )
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)
