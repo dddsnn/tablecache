@@ -15,10 +15,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import abc
+
 import asyncpg.pool
 
 
-class PostgresTable:
+class DbTable(abc.ABC):
+    async def all(self):
+        raise NotImplementedError
+
+    async def get(self, primary_keys):
+        raise NotImplementedError
+
+
+class PostgresTable(DbTable):
     def __init__(
             self, pool: asyncpg.pool.Pool, query_all_string: str,
             query_some_string: str):

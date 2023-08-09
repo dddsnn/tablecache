@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import abc
 import functools
 
 import redis.asyncio as redis
@@ -48,7 +49,18 @@ class RedisStorage:
                 'You have to connect the storage before using it.') from e
 
 
-class RedisTable:
+class StorageTable(abc.ABC):
+    async def clear(self):
+        raise NotImplementedError
+
+    async def put(self, record):
+        raise NotImplementedError
+
+    async def get(self, record_key):
+        raise NotImplementedError
+
+
+class RedisTable(StorageTable):
     def __init__(
             self, redis_storage, *, primary_key_name, encoders, decoders,
             primary_key_encoder=str):
