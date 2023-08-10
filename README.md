@@ -39,8 +39,8 @@ The main components when using the library are a DB table abstraction
 (`PostgresTable`), a storage table abstraction (`RedisTable`), and a
 `CachedTable` tying the 2 ends together.
 
-The storage needs to encode and decode the data (to bytes). Some basic codec
-functions are provided (`tablecache.encode_*` and `tablecache.decode_*`).
+The storage needs to encode and decode the data (to/from bytes). This is done
+via codecs. Some basic ones are provided (`tablecache.*Codec`).
 
 Check out examples/users_cities.py for a quick start, which should be pretty
 self-explanatory.

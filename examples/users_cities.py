@@ -44,14 +44,10 @@ async def main():
     storage_table = tc.RedisTable(
         redis_storage,
         primary_key_name='user_id',
-        encoders={
-            'user_id': tc.encode_int_as_str,
-            'user_name': tc.encode_str,
-            'city_name': tc.encode_str,},
-        decoders={
-            'user_id': tc.decode_int_as_str,
-            'user_name': tc.decode_str,
-            'city_name': tc.decode_str,},
+        codecs={
+            'user_id': tc.IntAsStringCodec(),
+            'user_name': tc.StringCodec(),
+            'city_name': tc.StringCodec(),},
     )
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)

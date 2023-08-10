@@ -15,22 +15,35 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-
-def encode_str(s: str) -> bytes:
-    """Encode a string as bytes."""
-    return s.encode()
+import abc
+import typing as t
 
 
-def decode_str(bs: bytes) -> str:
-    """Decode bytes containing a string."""
-    return bs.decode()
+class Codec(abc.ABC):
+    T = t.TypeVar('T')
+
+    @abc.abstractmethod
+    def encode(self, value: T) -> bytes:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def decode(self, bs: bytes) -> T:
+        raise NotImplementedError
 
 
-def encode_int_as_str(value: int) -> bytes:
-    """Encode a stringified int as bytes."""
-    return str(value).encode()
+class StringCodec(Codec):
+    """Simple str<->bytest codec (UTF-8)."""
+    def encode(self, value: str) -> bytes:
+        return value.encode()
+
+    def decode(self, bs: bytes) -> str:
+        return bs.decode()
 
 
-def decode_int_as_str(bs: bytes) -> int:
-    """Decode bytes containing a stringified int."""
-    return int(bs.decode())
+class IntAsStringCodec(Codec):
+    """Codec that represents ints as strings."""
+    def encode(self, value: int) -> bytes:
+        return str(value).encode()
+
+    def decode(self, bs: bytes) -> int:
+        return int(bs.decode())

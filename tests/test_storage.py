@@ -54,6 +54,18 @@ async def redis_storage(wait_for_redis, redis_host):
         yield redis_storage
 
 
+class FailCodec(tc.Codec):
+    def encode(self, _):
+        raise Exception
+
+    def decode(self, _):
+        raise Exception
+
+
+def fail(*_):
+    raise Exception
+
+
 class TestRedisTable:
     @pytest.fixture(autouse=True)
     async def flush_db(self, redis_storage):
@@ -62,16 +74,12 @@ class TestRedisTable:
     @pytest.fixture
     def make_table(self, redis_storage):
         def factory(
-                primary_key_name='pk', encoders=None, decoders=None,
-                primary_key_encoder=str):
-            encoders = encoders or {
-                'pk': tc.encode_int_as_str, 's': tc.encode_str}
-            decoders = decoders or {
-                'pk': tc.decode_int_as_str, 's': tc.decode_str}
+                primary_key_name='pk', codecs=None, primary_key_encoder=str):
+            codecs = codecs or {
+                'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
             return tc.RedisTable(
                 redis_storage, primary_key_name=primary_key_name,
-                encoders=encoders, decoders=decoders,
-                primary_key_encoder=primary_key_encoder)
+                codecs=codecs, primary_key_encoder=primary_key_encoder)
 
         return factory
 
@@ -79,25 +87,16 @@ class TestRedisTable:
     def table(self, make_table):
         return make_table()
 
-    async def test_construction_raises_if_codecs_dont_match(self, make_table):
-        with pytest.raises(ValueError):
-            make_table(
-                encoders={'pk': tc.encode_int_as_str, 's1': tc.encode_str},
-                decoders={'pk': tc.decode_int_as_str, 's2': tc.decode_str})
-
     async def test_construction_raises_on_non_str_attribute_name(
             self, make_table):
         with pytest.raises(ValueError):
             make_table(
-                encoders={'pk': tc.encode_int_as_str, 1: tc.encode_str},
-                decoders={'pk': tc.decode_int_as_str, 1: tc.decode_str})
+                codecs={'pk': tc.IntAsStringCodec(), 1: tc.StringCodec()})
 
     async def test_construction_raises_if_primary_key_missing_from_codec(
             self, make_table):
         with pytest.raises(ValueError):
-            make_table(
-                primary_key_name='pk', encoders={'s': tc.encode_str},
-                decoders={'s': tc.decode_str})
+            make_table(primary_key_name='pk', codecs={'s': tc.StringCodec()})
 
     async def test_put_and_get(self, table):
         await table.put({'pk': 1, 's': 's1'})
@@ -116,9 +115,6 @@ class TestRedisTable:
             await table.put({'pk': 1})
 
     async def test_put_raises_on_primary_key_encoding_error(self, make_table):
-        def fail(*_):
-            raise Exception
-
         table = make_table(primary_key_encoder=fail)
         with pytest.raises(tc.CodingError):
             await table.put({'pk': 1, 's': 's1'})
@@ -133,20 +129,24 @@ class TestRedisTable:
             await table.put({'pk': 1, 's': 's1'})
 
     async def test_put_raises_on_attribute_encoding_error(self, make_table):
-        def fail(*_):
-            raise Exception
-
-        table = make_table(encoders={'pk': tc.encode_int_as_str, 's': fail})
+        table = make_table(
+            codecs={'pk': tc.IntAsStringCodec(), 's': FailCodec()})
         with pytest.raises(tc.CodingError):
             await table.put({'pk': 1, 's': 's1'})
 
     async def test_put_raises_if_attribute_doesnt_encode_to_bytes(
             self, make_table):
-        def return_str(*_):
-            return 'some string'
+        class BrokenStringReturningCodec(tc.Codec):
+            def encode(self, _):
+                return 'a string (supposed to be bytes)'
+
+            def decode(self, _):
+                raise Exception
 
         table = make_table(
-            encoders={'pk': tc.encode_int_as_str, 's': return_str})
+            codecs={
+                'pk': tc.IntAsStringCodec(),
+                's': BrokenStringReturningCodec(),})
         with pytest.raises(tc.CodingError):
             await table.put({'pk': 1, 's': 's1'})
 
@@ -155,9 +155,6 @@ class TestRedisTable:
             await table.get(1)
 
     async def test_get_raises_on_primary_key_encoding_error(self, make_table):
-        def fail(*_):
-            raise Exception
-
         table = make_table(primary_key_encoder=fail)
         with pytest.raises(tc.CodingError):
             await table.get(1)
@@ -176,20 +173,18 @@ class TestRedisTable:
             await table.get(1)
 
     async def test_get_raises_on_missing_attributes(self, make_table):
-        await make_table(
-            encoders={'pk': tc.encode_int_as_str},
-            decoders={'pk': tc.decode_int_as_str}).put({'pk': 1})
+        await make_table(codecs={'pk': tc.IntAsStringCodec()}).put({'pk': 1})
         table = make_table(
-            encoders={'pk': tc.encode_int_as_str, 's': tc.encode_str})
+            codecs={'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()})
         with pytest.raises(ValueError):
             await table.get(1)
 
     async def test_get_raises_on_attribute_decoding_error(self, make_table):
-        def fail(*_):
-            raise Exception
-
-        table = make_table(decoders={'pk': tc.decode_int_as_str, 's': fail})
-        await table.put({'pk': 1, 's': 's1'})
+        await make_table(
+            codecs={'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
+        ).put({'pk': 1, 's': 's1'})
+        table = make_table(
+            codecs={'pk': tc.IntAsStringCodec(), 's': FailCodec()})
         with pytest.raises(tc.CodingError):
             await table.get(1)
 
@@ -206,16 +201,16 @@ class TestRedisTable:
             has_entries({b'pk': b'1', b's': b's1'}))
 
     async def test_uses_custom_codec(self, make_table, redis_storage):
-        def encode_tuple(t):
-            return repr(t).encode()
+        class WeirdTupleCodec(tc.Codec):
+            def encode(self, t):
+                return repr(t).encode()
 
-        def decode_tuple_but_add(bs):
-            i, s = eval(bs.decode())
-            return (i + 1, f'{s} with an addition')
+            def decode(self, bs):
+                i, s = eval(bs.decode())
+                return (i + 1, f'{s} with an addition')
 
         table = make_table(
-            encoders={'pk': tc.encode_int_as_str, 't': encode_tuple},
-            decoders={'pk': tc.decode_int_as_str, 't': decode_tuple_but_add})
+            codecs={'pk': tc.IntAsStringCodec(), 't': WeirdTupleCodec()})
         await table.put({'pk': 1, 't': (5, 'x')})
         assert_that(
             await table.get(1), has_entries(t=(6, 'x with an addition')))

@@ -22,17 +22,21 @@ import pytest
 import tablecache as tc
 
 
-@pytest.mark.parametrize('s', ['', 'foo', 'äöüß'])
-def test_str(s):
-    encoded = tc.encode_str(s)
-    assert isinstance(encoded, bytes)
-    decoded = tc.decode_str(encoded)
-    assert decoded == s
+class TestStringCodec:
+    @pytest.mark.parametrize('s', ['', 'foo', 'äöüß'])
+    def test_encode_decode_identity(self, s):
+        codec = tc.StringCodec()
+        encoded = codec.encode(s)
+        assert isinstance(encoded, bytes)
+        decoded = codec.decode(encoded)
+        assert decoded == s
 
 
-@pytest.mark.parametrize('i', [0, 1, -1, sys.maxsize + 1])
-def test_int_as_str(i):
-    encoded = tc.encode_int_as_str(i)
-    assert isinstance(encoded, bytes)
-    decoded = tc.decode_int_as_str(encoded)
-    assert decoded == i
+class TestIntAsStringCodec:
+    @pytest.mark.parametrize('i', [0, 1, -1, sys.maxsize + 1])
+    def test_encode_decode_identity(self, i):
+        codec = tc.IntAsStringCodec()
+        encoded = codec.encode(i)
+        assert isinstance(encoded, bytes)
+        decoded = codec.decode(encoded)
+        assert decoded == i

@@ -21,6 +21,8 @@ import typing as t
 
 import redis.asyncio as redis
 
+import tablecache.codec as codec
+
 
 class CodingError(Exception):
     """
@@ -77,8 +79,7 @@ class StorageTable(abc.ABC):
 class RedisTable(StorageTable):
     def __init__(
             self, redis_storage: RedisStorage, *, primary_key_name: str,
-            encoders: t.Mapping[str, t.Callable[[t.Any], bytes]],
-            decoders: t.Mapping[str, t.Callable[[t.Any], bytes]],
+            codecs: t.Mapping[str, codec.Codec],
             primary_key_encoder: t.Callable[[t.Any], str] = str) -> None:
         """
         A table stored in Redis.
@@ -88,8 +89,8 @@ class RedisTable(StorageTable):
 
         Records are stored in Redis as hashes. Each must have a primary key,
         which is used as the name of the hash. Hash keys and values are stored
-        as bytes objects, encoded and decoded via the specified encoders and
-        decoders. Only attributes for which en- and decoders exist are stored.
+        as bytes objects, encoded and decoded via the specified codecs. Only
+        attributes for which en- and decoders exist are stored.
 
         However, the name of a hash must be a string, which is why there is a
         separate primary_key_encoder.
@@ -99,34 +100,25 @@ class RedisTable(StorageTable):
 
         :param redis_storage: A RedisStorage that provides a connection.
         :param primary_key_name: The name of the attribute to be used as
-            primary key. Must also be present in encoders and decoders.
-        :param encoders: Dictionary of encoders for record attributes. Must map
-            attribute names (string) to a function that takes the corresponding
-            attribute and returns a bytes object representing it. Only
-            attributes present here are stored. Must have the same keys as
-            decoders.
-        :param decoders: Dictionary of decoders for attributes stored in Redis.
-            Must contain the same keys as encoders, and map to the
-            corresponding inverse function.
+            primary key. Must also be present in codecs.
+        :param codecs: Dictionary of codecs for record attributes. Must map
+            attribute names (string) to a tablecache.Codec instance that is
+            able to en-/decode the corresponding values. Only attributes
+            present here are stored.
         :primary_key_encoder: Function encoding the primary key as a string.
             Must be unique (i.e. 2 different primary keys must map to 2
             different encodings). For common primary key types (like int and
             str), the default str works fine, however more complex types may
             need repr or a custom function.
         """
-        if set(encoders) != set(decoders):
-            raise ValueError(
-                'Encoders and decoders must specify the same attributes.')
-        for attribute_name in encoders:
+        for attribute_name in codecs:
             if not isinstance(attribute_name, str):
                 raise ValueError('Attribute names must be strings.')
-        if primary_key_name not in encoders:
-            raise ValueError(
-                'Primary key attribute is missing from encoders and decoders.')
+        if primary_key_name not in codecs:
+            raise ValueError('Primary key attribute is missing from codecs.')
         self._storage = redis_storage
         self._primary_key_name = primary_key_name
-        self._encoders = encoders
-        self._decoders = decoders
+        self._codecs = codecs
         self._primary_key_encoder = primary_key_encoder
 
     async def clear(self) -> None:
@@ -142,7 +134,7 @@ class RedisTable(StorageTable):
         Store a record.
 
         Encodes the primary key to string and all attributes for which there
-        exists an encoder to bytes, and stores them in Redis.
+        exists a codec to bytes, and stores them in Redis.
 
         Raises a ValueError if the primary key or any other attribute is
         missing from the record.
@@ -165,11 +157,11 @@ class RedisTable(StorageTable):
         Returns a dictionary containing the data stored in Redis associated
         with the given key. The key is first encoded using the configured
         primary key encoder. All attributes in the dictionary are decoded using
-        the configured decoders, and only those for which a decoder exists are
+        the configured codecs, and only those for which a codec exists are
         returned.
 
         Raises a ValueError if the data in Redis is missing any attribute for
-        which there exists a decoder.
+        which there exists a codec.
 
         Raises a CodingError if the given key fails to encode to a string, or
         an error occurs when decoding any attribute.
@@ -194,7 +186,7 @@ class RedisTable(StorageTable):
 
     def _encode_record(self, record):
         encoded_record = {}
-        for attribute_name, encoder in self._encoders.items():
+        for attribute_name, codec in self._codecs.items():
             try:
                 attribute = record[attribute_name]
             except KeyError:
@@ -202,7 +194,7 @@ class RedisTable(StorageTable):
                     f'Unable to encode {record}, which doesn\'t contain '
                     f'{attribute_name}.')
             try:
-                encoded_attribute = encoder(attribute)
+                encoded_attribute = codec.encode(attribute)
             except Exception as e:
                 raise CodingError(
                     f'Error while encoding {attribute_name} {attribute} in '
@@ -216,7 +208,7 @@ class RedisTable(StorageTable):
 
     def _decode_record(self, encoded_record):
         decoded_record = {}
-        for attribute_name, decoder in self._decoders.items():
+        for attribute_name, codec in self._codecs.items():
             try:
                 encoded_attribute = encoded_record[attribute_name.encode()]
             except KeyError:
@@ -224,7 +216,8 @@ class RedisTable(StorageTable):
                     f'Unable to decode {encoded_record}, which doesn\'t '
                     f'contain {attribute_name}.')
             try:
-                decoded_record[attribute_name] = decoder(encoded_attribute)
+                decoded_record[attribute_name] = codec.decode(
+                    encoded_attribute)
             except Exception as e:
                 raise CodingError(
                     f'Error while decoding {attribute_name} '
