@@ -16,7 +16,11 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 from tablecache.cache import CachedTable
-from tablecache.codec import Codec, IntAsStringCodec, StringCodec
+from tablecache.codec import (
+    BoolCodec, Codec, IntAsStringCodec, Float32Codec, Float64Codec,
+    FloatAsStringCodec, NaiveDatetimeCodec, SignedInt8Codec, SignedInt16Codec,
+    SignedInt32Codec, SignedInt64Codec, StringCodec, UnsignedInt8Codec,
+    UnsignedInt16Codec, UnsignedInt32Codec, UnsignedInt64Codec, UuidCodec)
 from tablecache.db import DbTable, PostgresTable
 from tablecache.storage import (
     CodingError, RedisStorage, RedisTable, StorageTable)
