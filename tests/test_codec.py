@@ -27,6 +27,34 @@ import pytest
 import tablecache as tc
 
 
+class TestNullable:
+    @pytest.mark.parametrize('value', [0, 1, 234])
+    def test_encode_decode_non_null_values(self, value):
+        codec = tc.Nullable(tc.IntAsStringCodec())
+        encoded = codec.encode(value)
+        assert isinstance(encoded, bytes)
+        decoded = codec.decode(encoded)
+        assert decoded == value
+
+    def test_encode_decode_null(self):
+        codec = tc.Nullable(tc.IntAsStringCodec())
+        encoded = codec.encode(None)
+        assert isinstance(encoded, bytes)
+        decoded = codec.decode(encoded)
+        assert decoded is None
+
+    def test_encode_raises_from_underlying_codec(self):
+        codec = tc.Nullable(tc.IntAsStringCodec())
+        with pytest.raises(ValueError):
+            codec.encode('not a number')
+
+    @pytest.mark.parametrize('encoded', [b'', b'\x00not a number'])
+    def test_decode_raises_on_invalid(self, encoded):
+        codec = tc.Nullable(tc.IntAsStringCodec())
+        with pytest.raises(ValueError):
+            codec.decode(encoded)
+
+
 class TestBoolCodec:
     @pytest.mark.parametrize('value', [True, False])
     def test_encode_decode_identity(self, value):

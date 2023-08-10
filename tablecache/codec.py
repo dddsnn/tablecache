@@ -45,6 +45,27 @@ class Codec(abc.ABC):
         raise NotImplementedError
 
 
+class Nullable(Codec):
+    """
+    Wrapper codec that allows representing nullable values.
+
+    Encodes optional values by using an inner codec for values, and a marker
+    for None.
+    """
+    def __init__(self, value_codec):
+        self._value_codec = value_codec
+
+    def encode(self, value: t.Optional[t.Any]) -> bytes:
+        if value is None:
+            return b'\x00'
+        return b'\x01' + self._value_codec.encode(value)
+
+    def decode(self, bs: bytes) -> t.Optional[t.Any]:
+        if bs == b'\x00':
+            return None
+        return self._value_codec.decode(bs[1:])
+
+
 class BoolCodec(Codec):
     """Codec that represents bools as single bytes."""
     def encode(self, value: bool) -> bytes:
