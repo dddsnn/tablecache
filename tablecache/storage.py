@@ -61,12 +61,15 @@ class RedisStorage:
 
 
 class StorageTable(abc.ABC):
+    @abc.abstractmethod
     async def clear(self) -> None:
         raise NotImplementedError
 
+    @abc.abstractmethod
     async def put(self, record: t.Mapping[str, t.Any]) -> None:
         raise NotImplementedError
 
+    @abc.abstractmethod
     async def get(self, record_key: t.Any) -> t.Mapping[str, t.Any]:
         raise NotImplementedError
 

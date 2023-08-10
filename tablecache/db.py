@@ -23,9 +23,11 @@ import asyncpg.pool
 
 
 class DbTable(abc.ABC):
+    @abc.abstractmethod
     async def all(self) -> ca.AsyncIterator[t.Mapping[str, t.Any]]:
         raise NotImplementedError
 
+    @abc.abstractmethod
     async def get(
         self, primary_keys: t.Sequence[t.Any]
     ) -> ca.AsyncIterator[t.Mapping[str, t.Any]]:
