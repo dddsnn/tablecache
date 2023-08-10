@@ -23,20 +23,39 @@ import tablecache as tc
 
 
 class TestStringCodec:
-    @pytest.mark.parametrize('s', ['', 'foo', 'äöüß'])
-    def test_encode_decode_identity(self, s):
+    @pytest.mark.parametrize('value', ['', 'foo', 'äöüß'])
+    def test_encode_decode_identity(self, value):
         codec = tc.StringCodec()
-        encoded = codec.encode(s)
+        encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
-        assert decoded == s
+        assert decoded == value
+
+    @pytest.mark.parametrize('value', [0, 1, b'not a string'])
+    def test_encode_raises_on_invalid(self, value):
+        codec = tc.StringCodec()
+        with pytest.raises(ValueError):
+            codec.encode(value)
 
 
 class TestIntAsStringCodec:
-    @pytest.mark.parametrize('i', [0, 1, -1, sys.maxsize + 1])
-    def test_encode_decode_identity(self, i):
+    @pytest.mark.parametrize('value', [0, 1, -1, sys.maxsize + 1])
+    def test_encode_decode_identity(self, value):
         codec = tc.IntAsStringCodec()
-        encoded = codec.encode(i)
+        encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
-        assert decoded == i
+        assert decoded == value
+
+    @pytest.mark.parametrize('value', ['not a number', 1.1])
+    def test_encode_raises_on_invalid(self, value):
+        codec = tc.IntAsStringCodec()
+        with pytest.raises(ValueError):
+            codec.encode(value)
+
+    @pytest.mark.parametrize(
+        'encoded', [b'not a number', b'', b'\x00', b'1.1'])
+    def test_decode_raises_on_invalid(self, encoded):
+        codec = tc.IntAsStringCodec()
+        with pytest.raises(ValueError):
+            codec.decode(encoded)

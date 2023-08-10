@@ -16,10 +16,20 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
+import numbers
 import typing as t
 
 
 class Codec(abc.ABC):
+    """
+    Abstract base for codecs.
+
+    A codec can encode certain values to bytes, then decode those back to the
+    original value.
+
+    If an input value for encoding or decoding is unsuitable in any way, a
+    ValueError is raised.
+    """
     T = t.TypeVar('T')
 
     @abc.abstractmethod
@@ -34,6 +44,8 @@ class Codec(abc.ABC):
 class StringCodec(Codec):
     """Simple str<->bytest codec (UTF-8)."""
     def encode(self, value: str) -> bytes:
+        if not isinstance(value, str):
+            raise ValueError('Value is not a string.')
         return value.encode()
 
     def decode(self, bs: bytes) -> str:
@@ -43,6 +55,8 @@ class StringCodec(Codec):
 class IntAsStringCodec(Codec):
     """Codec that represents ints as strings."""
     def encode(self, value: int) -> bytes:
+        if not isinstance(value, int):
+            raise ValueError('Value is not an int.')
         return str(value).encode()
 
     def decode(self, bs: bytes) -> int:
