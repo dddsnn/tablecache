@@ -15,6 +15,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import typing as t
+
 import tablecache.db as db
 import tablecache.storage as storage
 
@@ -33,7 +35,7 @@ class CachedTable:
         self._storage_table = storage_table
         self._dirty_keys = set()
 
-    async def load(self):
+    async def load(self) -> None:
         """
         Load all data from the DB into storage.
 
@@ -43,7 +45,7 @@ class CachedTable:
         async for record in self._db_table.all():
             await self._storage_table.put(record)
 
-    async def get(self, key):
+    async def get(self, key: t.Any) -> t.Any:
         """
         Get a key from storage.
 
@@ -56,7 +58,7 @@ class CachedTable:
             await self._refresh_dirty()
         return await self._storage_table.get(key)
 
-    async def invalidate(self, key):
+    async def invalidate(self, key: t.Any) -> None:
         """
         Mark a key in storage as dirty.
 
@@ -65,7 +67,7 @@ class CachedTable:
         """
         self._dirty_keys.add(key)
 
-    async def _refresh_dirty(self):
+    async def _refresh_dirty(self) -> None:
         async for record in self._db_table.get(self._dirty_keys):
             await self._storage_table.put(record)
         self._dirty_keys.clear()

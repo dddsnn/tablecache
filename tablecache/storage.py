@@ -77,6 +77,24 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
 
+class AttributeIdMap:
+    """
+    Wrapper around a dictionary with compressed keys.
+
+    Takes a dictionary mapping attribute names to values, and assigns each
+    (string) key an as-small-as-possible bytes equivalent.
+    """
+    def __init__(self, item_dict: ca.Mapping[str, t.Any]) -> None:
+        self._items = []
+        for i, (attribute_name, value) in enumerate(item_dict.items()):
+            num_bytes = (i.bit_length() + 7) // 8
+            self._items.append(
+                (attribute_name, i.to_bytes(length=num_bytes), value))
+
+    def __iter__(self) -> ca.Iterator[tuple[str, bytes, t.Any]]:
+        yield from self._items
+
+
 class RedisTable(StorageTable):
     def __init__(
             self, redis_storage: RedisStorage, *, primary_key_name: str,
@@ -119,7 +137,7 @@ class RedisTable(StorageTable):
             raise ValueError('Primary key attribute is missing from codecs.')
         self._storage = redis_storage
         self._primary_key_name = primary_key_name
-        self._codecs = codecs
+        self._codecs = AttributeIdMap(codecs)
         self._primary_key_encoder = primary_key_encoder
 
     async def clear(self) -> None:
@@ -187,7 +205,7 @@ class RedisTable(StorageTable):
 
     def _encode_record(self, record):
         encoded_record = {}
-        for attribute_name, codec in self._codecs.items():
+        for attribute_name, attribute_id, codec in self._codecs:
             try:
                 attribute = record[attribute_name]
             except KeyError:
@@ -204,14 +222,14 @@ class RedisTable(StorageTable):
                 raise CodingError(
                     f'Illegal type {type(encoded_attribute)} of '
                     f'{attribute_name}.')
-            encoded_record[attribute_name.encode()] = encoded_attribute
+            encoded_record[attribute_id] = encoded_attribute
         return encoded_record
 
     def _decode_record(self, encoded_record):
         decoded_record = {}
-        for attribute_name, codec in self._codecs.items():
+        for attribute_name, attribute_id, codec in self._codecs:
             try:
-                encoded_attribute = encoded_record[attribute_name.encode()]
+                encoded_attribute = encoded_record[attribute_id]
             except KeyError:
                 raise ValueError(
                     f'Unable to decode {encoded_record}, which doesn\'t '
@@ -221,6 +239,7 @@ class RedisTable(StorageTable):
                     encoded_attribute)
             except Exception as e:
                 raise CodingError(
-                    f'Error while decoding {attribute_name} '
-                    f'{encoded_attribute} in {encoded_record}.') from e
+                    f'Error while decoding {attribute_name} (id '
+                    f'{attribute_id}) {encoded_attribute} in '
+                    f'{encoded_record}.') from e
         return decoded_record

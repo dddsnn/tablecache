@@ -16,11 +16,13 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import unittest.mock as um
 
 from hamcrest import *
 import pytest
 import redis.asyncio as redis
 
+import tablecache.storage as storage
 import tablecache as tc
 
 
@@ -52,6 +54,36 @@ async def wait_for_redis(redis_host):
 async def redis_storage(wait_for_redis, redis_host):
     async with tc.RedisStorage(host=redis_host) as redis_storage:
         yield redis_storage
+
+
+class TestAttributeIdMap:
+    def test_maps_entire_original(self):
+        original = {'a': um.Mock(), 'b': um.Mock(), '': um.Mock()}
+        d = storage.AttributeIdMap(original)
+        ids = set()
+        for n, i, v in d:
+            assert isinstance(i, bytes)
+            ids.add(i)
+            assert original[n] is v
+        assert len(ids) == len(original)
+
+    def test_produces_small_keys(self):
+        original = {'x': um.Mock(), 10 * 'x': um.Mock(), 100 * 'x': um.Mock()}
+        d = storage.AttributeIdMap(original)
+        for _, i, _ in d:
+            assert len(i) <= 1
+
+    def test_produces_multi_byte_keys_when_necessary(self):
+        original = {n * 'x': n for n in range(300)}
+        d = storage.AttributeIdMap(original)
+        ids = set()
+        for _, i, n in d:
+            ids.add(i)
+            if n < 256:
+                assert len(i) <= 1
+            else:
+                assert len(i) == 2
+        assert len(ids) == len(original)
 
 
 class FailCodec(tc.Codec):
@@ -196,9 +228,9 @@ class TestRedisTable:
         table = make_table(primary_key_encoder=custom_pk)
         await table.put({'pk': 1, 's': 's1'})
         assert_that(await table.get(1), has_entries(pk=1, s='s1'))
-        assert_that(
-            await redis_storage.conn.hgetall('the number 1'),
-            has_entries({b'pk': b'1', b's': b's1'}))
+        assert_that((await
+                     redis_storage.conn.hgetall('the number 1')).values(),
+                    contains_inanyorder(b'1', b's1'))
 
     async def test_uses_custom_codec(self, make_table, redis_storage):
         class WeirdTupleCodec(tc.Codec):
