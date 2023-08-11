@@ -24,13 +24,13 @@ import asyncpg.pool
 
 class DbTable(abc.ABC):
     @abc.abstractmethod
-    async def all(self) -> ca.AsyncIterator[t.Mapping[str, t.Any]]:
+    async def all(self) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         raise NotImplementedError
 
     @abc.abstractmethod
     async def get(
         self, primary_keys: t.Sequence[t.Any]
-    ) -> ca.AsyncIterator[t.Mapping[str, t.Any]]:
+    ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         raise NotImplementedError
 
 
@@ -63,7 +63,7 @@ class PostgresTable(DbTable):
         self.query_all_string = query_all_string
         self.query_some_string = query_some_string
 
-    async def all(self) -> ca.AsyncIterator[t.Mapping[str, t.Any]]:
+    async def all(self) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         """Asynchronously iterate over all rows."""
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_all_string):
@@ -71,7 +71,7 @@ class PostgresTable(DbTable):
 
     async def get(
         self, primary_keys: t.Sequence[t.Any]
-    ) -> ca.AsyncIterator[t.Mapping[str, t.Any]]:
+    ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         """
         Asynchronously iterate over rows matching primary keys.
 

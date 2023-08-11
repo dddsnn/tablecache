@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
+import collections.abc as ca
 import functools
 import typing as t
 
@@ -37,7 +38,7 @@ class RedisStorage:
     Provides a connection to clients. Connects on async context manager enter,
     disconnects on exit.
     """
-    def __init__(self, **connect_kwargs: t.Mapping[str, t.Any]) -> None:
+    def __init__(self, **connect_kwargs: ca.Mapping[str, t.Any]) -> None:
         """
         :param connect_kwargs: Keyword arguments that will be passed to
             redis.asyncio.Redis().
@@ -68,18 +69,18 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def put(self, record: t.Mapping[str, t.Any]) -> None:
+    async def put(self, record: ca.Mapping[str, t.Any]) -> None:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get(self, record_key: t.Any) -> t.Mapping[str, t.Any]:
+    async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
         raise NotImplementedError
 
 
 class RedisTable(StorageTable):
     def __init__(
             self, redis_storage: RedisStorage, *, primary_key_name: str,
-            codecs: t.Mapping[str, codec.Codec],
+            codecs: ca.Mapping[str, codec.Codec],
             primary_key_encoder: t.Callable[[t.Any], str] = str) -> None:
         """
         A table stored in Redis.
@@ -129,7 +130,7 @@ class RedisTable(StorageTable):
         """
         await self._storage.conn.flushdb()
 
-    async def put(self, record: t.Mapping[str, t.Any]) -> None:
+    async def put(self, record: ca.Mapping[str, t.Any]) -> None:
         """
         Store a record.
 
@@ -150,7 +151,7 @@ class RedisTable(StorageTable):
         encoded_record = self._encode_record(record)
         await self._storage.conn.hset(record_key_str, mapping=encoded_record)
 
-    async def get(self, record_key: t.Any) -> t.Mapping[str, t.Any]:
+    async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
         """
         Retrieve a previously stored record.
 
