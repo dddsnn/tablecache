@@ -57,6 +57,16 @@ async def redis_storage(wait_for_redis, redis_host):
 
 
 class TestAttributeIdMap:
+    def test_on_empty(self):
+        d = storage.AttributeIdMap({})
+        assert_that(list(d), empty())
+
+    def test_single_item(self):
+        d = storage.AttributeIdMap({'a': 1})
+        assert_that(
+            d,
+            contains_inanyorder(contains_exactly('a', instance_of(bytes), 1)))
+
     def test_maps_entire_original(self):
         original = {'a': um.Mock(), 'b': um.Mock(), '': um.Mock()}
         d = storage.AttributeIdMap(original)
@@ -65,25 +75,24 @@ class TestAttributeIdMap:
             assert isinstance(i, bytes)
             ids.add(i)
             assert original[n] is v
+            assert d[i] == (n, v)
         assert len(ids) == len(original)
 
-    def test_produces_small_keys(self):
-        original = {'x': um.Mock(), 10 * 'x': um.Mock(), 100 * 'x': um.Mock()}
-        d = storage.AttributeIdMap(original)
+    def test_uses_small_ids(self):
+        d = storage.AttributeIdMap({
+            'x': um.Mock(), 10 * 'x': um.Mock(), 100 * 'x': um.Mock()})
         for _, i, _ in d:
-            assert len(i) <= 1
+            assert len(i) == 1
 
-    def test_produces_multi_byte_keys_when_necessary(self):
-        original = {n * 'x': n for n in range(300)}
-        d = storage.AttributeIdMap(original)
-        ids = set()
-        for _, i, n in d:
-            ids.add(i)
-            if n < 256:
-                assert len(i) <= 1
-            else:
-                assert len(i) == 2
-        assert len(ids) == len(original)
+    def test_uses_fixed_length_ids(self):
+        d = storage.AttributeIdMap({n * 'x': n for n in range(300)})
+        assert all(len(i) == 2 for _, i, _ in d)
+
+    def test_getitem_raises_on_nonexistent(self):
+        d = storage.AttributeIdMap({'a': 1})
+        attribute_id = next(i for _, i, _ in d)
+        with pytest.raises(KeyError):
+            d[attribute_id + b'\x00']
 
 
 class FailCodec(tc.Codec):
@@ -211,6 +220,16 @@ class TestRedisTable:
         with pytest.raises(ValueError):
             await table.get(1)
 
+    async def test_get_raises_on_duplicate_attribute_ids(
+            self, table, redis_storage):
+        await table.put({'pk': 1, 's': 's1'})
+        set_elements = await redis_storage.conn.zrange('1', 0, -1)
+        s_element = next(e for e in set_elements if e.endswith(b's1'))
+        s_id = s_element[:1]
+        await redis_storage.conn.zadd('1', {s_id + b'foobar': 0})
+        with pytest.raises(ValueError):
+            await table.get(1)
+
     async def test_get_raises_on_attribute_decoding_error(self, make_table):
         await make_table(
             codecs={'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
@@ -228,9 +247,10 @@ class TestRedisTable:
         table = make_table(primary_key_encoder=custom_pk)
         await table.put({'pk': 1, 's': 's1'})
         assert_that(await table.get(1), has_entries(pk=1, s='s1'))
-        assert_that((await
-                     redis_storage.conn.hgetall('the number 1')).values(),
-                    contains_inanyorder(b'1', b's1'))
+        values = [
+            v[1:]
+            for v in await redis_storage.conn.zrange('the number 1', 0, -1)]
+        assert_that(values, contains_inanyorder(b'1', b's1'))
 
     async def test_uses_custom_codec(self, make_table, redis_storage):
         class WeirdTupleCodec(tc.Codec):

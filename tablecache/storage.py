@@ -79,20 +79,29 @@ class StorageTable(abc.ABC):
 
 class AttributeIdMap:
     """
-    Wrapper around a dictionary with compressed keys.
+    Utility wrapper to compress a dictionary's keys.
 
     Takes a dictionary mapping attribute names to values, and assigns each
-    (string) key an as-small-as-possible bytes equivalent.
+    key a fixed-length bytes equivalent (an ID). The length of each ID is
+    stored in the id_length property.
+
+    Supports item access by ID, returning a tuple of attribute name and value.
+    Also supports iteration, yielding tuples of attribute name, attribute ID,
+    and value.
     """
-    def __init__(self, item_dict: ca.Mapping[str, t.Any]) -> None:
-        self._items = []
-        for i, (attribute_name, value) in enumerate(item_dict.items()):
-            num_bytes = (i.bit_length() + 7) // 8
-            self._items.append(
-                (attribute_name, i.to_bytes(length=num_bytes), value))
+    def __init__(self, named_items: ca.Mapping[str, t.Any]) -> None:
+        self._data = {}
+        self.id_length = (len(named_items).bit_length() + 7) // 8
+        for i, (attribute_name, value) in enumerate(named_items.items()):
+            attribute_id = i.to_bytes(length=self.id_length)
+            self._data[attribute_id] = (attribute_name, value)
 
     def __iter__(self) -> ca.Iterator[tuple[str, bytes, t.Any]]:
-        yield from self._items
+        for attribute_id, (attribute_name, value) in self._data.items():
+            yield attribute_name, attribute_id, value
+
+    def __getitem__(self, attribute_id):
+        return self._data[attribute_id]
 
 
 class RedisTable(StorageTable):
@@ -167,7 +176,7 @@ class RedisTable(StorageTable):
             raise ValueError(f'Record {record} is missing a primary key.')
         record_key_str = self._record_key_str(record_key)
         encoded_record = self._encode_record(record)
-        await self._storage.conn.hset(record_key_str, mapping=encoded_record)
+        await self._storage.conn.zadd(record_key_str, mapping=encoded_record)
 
     async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
         """
@@ -186,7 +195,7 @@ class RedisTable(StorageTable):
         an error occurs when decoding any attribute.
         """
         record_key_str = self._record_key_str(record_key)
-        encoded_record = await self._storage.conn.hgetall(record_key_str)
+        encoded_record = await self._storage.conn.zrange(record_key_str, 0, -1)
         if not encoded_record:
             raise KeyError(
                 f'No record with {self._primary_key_name}={record_key_str}.')
@@ -222,24 +231,35 @@ class RedisTable(StorageTable):
                 raise CodingError(
                     f'Illegal type {type(encoded_attribute)} of '
                     f'{attribute_name}.')
-            encoded_record[attribute_id] = encoded_attribute
+            encoded_record[attribute_id + encoded_attribute] = 0
         return encoded_record
 
     def _decode_record(self, encoded_record):
         decoded_record = {}
-        for attribute_name, attribute_id, codec in self._codecs:
+        missing_attribute_names = set(n for n, _, _ in self._codecs)
+        for encoded_attribute in encoded_record:
+            attribute_id = encoded_attribute[:self._codecs.id_length]
+            encoded_value = encoded_attribute[self._codecs.id_length:]
             try:
-                encoded_attribute = encoded_record[attribute_id]
+                attribute_name, codec = self._codecs[attribute_id]
             except KeyError:
                 raise ValueError(
-                    f'Unable to decode {encoded_record}, which doesn\'t '
-                    f'contain {attribute_name}.')
+                    f'Error decoding encoded attribute {encoded_attribute} '
+                    f'with unknown ID {attribute_id}')
             try:
-                decoded_record[attribute_name] = codec.decode(
-                    encoded_attribute)
+                missing_attribute_names.remove(attribute_name)
+            except KeyError:
+                raise ValueError(
+                    f'{attribute_name} contained twice in {encoded_record}.')
+            try:
+                decoded_record[attribute_name] = codec.decode(encoded_value)
             except Exception as e:
                 raise CodingError(
                     f'Error while decoding {attribute_name} (id '
-                    f'{attribute_id}) {encoded_attribute} in '
+                    f'{attribute_id}) {encoded_value} in '
                     f'{encoded_record}.') from e
+        if missing_attribute_names:
+            raise ValueError(
+                f'Attributes {missing_attribute_names} missing in '
+                f'{encoded_record}.')
         return decoded_record
