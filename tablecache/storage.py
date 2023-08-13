@@ -77,77 +77,45 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
 
-class AttributeIdMap:
-    """
-    Utility wrapper to compress a dictionary's keys.
-
-    Takes a dictionary mapping attribute names to values, and assigns each
-    key a fixed-length bytes equivalent (an ID). The length of each ID is
-    stored in the id_length property.
-
-    Supports item access by ID, returning a tuple of attribute name and value.
-    Also supports iteration, yielding tuples of attribute name, attribute ID,
-    and value.
-    """
-    def __init__(self, named_items: ca.Mapping[str, t.Any]) -> None:
-        self._data = {}
-        self.id_length = (len(named_items).bit_length() + 7) // 8
-        for i, (attribute_name, value) in enumerate(named_items.items()):
-            attribute_id = i.to_bytes(length=self.id_length)
-            self._data[attribute_id] = (attribute_name, value)
-
-    def __iter__(self) -> ca.Iterator[tuple[str, bytes, t.Any]]:
-        for attribute_id, (attribute_name, value) in self._data.items():
-            yield attribute_name, attribute_id, value
-
-    def __getitem__(self, attribute_id):
-        return self._data[attribute_id]
-
-
 class RedisTable(StorageTable):
     def __init__(
-            self, redis_storage: RedisStorage, *, primary_key_name: str,
-            codecs: ca.Mapping[str, codec.Codec],
-            primary_key_encoder: t.Callable[[t.Any], str] = str) -> None:
+            self, redis_storage: RedisStorage, *, table_name: str,
+            primary_key_name: str,
+            attribute_codecs: ca.Mapping[str, codec.Codec]) -> None:
         """
         A table stored in Redis.
 
         Enables storage and retrieval of records in Redis. Records must be
-        dict-like, with string keys.
+        dict-like, with string keys. Each record must have a primary key which
+        uniquely identifies it within the table. Only attributes for which a
+        codec is specified are stored.
 
-        Records are stored in Redis as hashes. Each must have a primary key,
-        which is used as the name of the hash. Hash keys and values are stored
-        as bytes objects, encoded and decoded via the specified codecs. Only
-        attributes for which en- and decoders exist are stored.
-
-        However, the name of a hash must be a string, which is why there is a
-        separate primary_key_encoder.
-
-        The table owns the entire namespace of the connection it is given. In
-        particular, calls to clear() delete everything in the current database.
+        Records are serialized to byte strings and stored in Redis as elements
+        of a sorted set. A spearate hash stores the score for each element used
+        to find elements in the set with matching scores in order to retrieve
+        them again.
 
         :param redis_storage: A RedisStorage that provides a connection.
+        :param table_name: The name of the table, used as a prefix for keys in
+            Redis. Must be unique within the Redis instance.
         :param primary_key_name: The name of the attribute to be used as
-            primary key. Must also be present in codecs.
-        :param codecs: Dictionary of codecs for record attributes. Must map
-            attribute names (string) to a tablecache.Codec instance that is
-            able to en-/decode the corresponding values. Only attributes
-            present here are stored.
-        :primary_key_encoder: Function encoding the primary key as a string.
-            Must be unique (i.e. 2 different primary keys must map to 2
-            different encodings). For common primary key types (like int and
-            str), the default str works fine, however more complex types may
-            need repr or a custom function.
+            primary key. Must also be present in attribute_codecs.
+        :param attribute_codecs: Dictionary of codecs for record attributes.
+            Must map attribute names (string) to tablecache.Codec instances
+            that are able to en-/decode the corresponding values. Only
+            attributes present here are stored.
         """
-        for attribute_name in codecs:
-            if not isinstance(attribute_name, str):
-                raise ValueError('Attribute names must be strings.')
-        if primary_key_name not in codecs:
-            raise ValueError('Primary key attribute is missing from codecs.')
+        if any(not isinstance(attribute_name, str)
+               for attribute_name in attribute_codecs):
+            raise ValueError('Attribute names must be strings.')
         self._storage = redis_storage
+        self._table_name = table_name
         self._primary_key_name = primary_key_name
-        self._codecs = AttributeIdMap(codecs)
-        self._primary_key_encoder = primary_key_encoder
+        try:
+            self._primary_key_codec = attribute_codecs[primary_key_name]
+        except KeyError:
+            raise ValueError('Codec for primary key is missing.')
+        self._row_codec = RowCodec(attribute_codecs)
 
     async def clear(self) -> None:
         """
@@ -161,105 +129,241 @@ class RedisTable(StorageTable):
         """
         Store a record.
 
-        Encodes the primary key to string and all attributes for which there
-        exists a codec to bytes, and stores them in Redis.
+        Stores a record of all attributes for which a codec was configured in
+        Redis. Other attributes that may be present are silently ignored.
 
-        Raises a ValueError if the primary key or any other attribute is
-        missing from the record.
+        Raises a ValueError if any attribute is missing from the record.
 
-        Raises a CodingError if the primary key doesn't encode to a string, any
-        attribute doesn't encode to bytes, or any error occurs during encoding.
+        Raises a CodingError if any attribute encode to something other than
+        bytes, or any error occurs during encoding.
         """
         try:
             record_key = record[self._primary_key_name]
-        except KeyError:
-            raise ValueError(f'Record {record} is missing a primary key.')
-        record_key_str = self._record_key_str(record_key)
-        encoded_record = self._encode_record(record)
-        await self._storage.conn.zadd(record_key_str, mapping=encoded_record)
+        except KeyError as e:
+            raise ValueError(
+                f'Record {record} is missing a primary key.') from e
+        encoded_record_key = self._encode_primary_key(record_key)
+        encoded_record = self._row_codec.encode(record)
+        await self._storage.conn.zadd(
+            f'{self._table_name}:rows',
+            mapping=PairAsItems(memoryview(encoded_record), 0))
+        await self._storage.conn.hset(
+            f'{self._table_name}:key_scores', encoded_record_key, 0)
 
     async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
         """
         Retrieve a previously stored record.
 
         Returns a dictionary containing the data stored in Redis associated
-        with the given key. The key is first encoded using the configured
-        primary key encoder. All attributes in the dictionary are decoded using
-        the configured codecs, and only those for which a codec exists are
-        returned.
+        with the given key.
 
-        Raises a ValueError if the data in Redis is missing any attribute for
-        which there exists a codec.
-
-        Raises a CodingError if the given key fails to encode to a string, or
-        an error occurs when decoding any attribute.
+        Raises a CodingError if the data in Redis is missing any attribute for
+        which there exists a codec, or an error occurs when decoding the set of
+        attributes.
         """
-        record_key_str = self._record_key_str(record_key)
-        encoded_record = await self._storage.conn.zrange(record_key_str, 0, -1)
-        if not encoded_record:
+        encoded_record_key = self._encode_primary_key(record_key)
+        score = await self._storage.conn.hget(
+            f'{self._table_name}:key_scores', encoded_record_key)
+        if score is None:
             raise KeyError(
-                f'No record with {self._primary_key_name}={record_key_str}.')
-        return self._decode_record(encoded_record)
+                f'No record with {self._primary_key_name}={record_key}.')
+        encoded_records = await self._storage.conn.zrange(
+            f'{self._table_name}:rows', score, score, byscore=True)
+        for encoded_record in encoded_records:
+            decoded_record = self._row_codec.decode(encoded_record)
+            if decoded_record[self._primary_key_name] == record_key:
+                return decoded_record
+        else:
+            raise KeyError(
+                f'No record with {self._primary_key_name}={record_key}.')
 
-    def _record_key_str(self, record_key):
+    def _encode_primary_key(self, key):
         try:
-            record_key_str = self._primary_key_encoder(record_key)
+            return self._primary_key_codec.encode(key)
         except Exception as e:
-            raise CodingError(
-                f'Unable to encode record key {record_key}.') from e
-        if not isinstance(record_key_str, str):
-            raise CodingError(
-                f'Encoded record key {record_key_str} isn\'t a string.')
-        return record_key_str
+            raise CodingError(f'Unable to encode primary key {key}.') from e
 
-    def _encode_record(self, record):
-        encoded_record = {}
-        for attribute_name, attribute_id, codec in self._codecs:
-            try:
-                attribute = record[attribute_name]
-            except KeyError:
-                raise ValueError(
-                    f'Unable to encode {record}, which doesn\'t contain '
-                    f'{attribute_name}.')
-            try:
-                encoded_attribute = codec.encode(attribute)
-            except Exception as e:
-                raise CodingError(
-                    f'Error while encoding {attribute_name} {attribute} in '
-                    f'{record}.') from e
-            if not isinstance(encoded_attribute, bytes):
-                raise CodingError(
-                    f'Illegal type {type(encoded_attribute)} of '
-                    f'{attribute_name}.')
-            encoded_record[attribute_id + encoded_attribute] = 0
+
+class PairAsItems:
+    """
+    A pseudo-dict consinsting only of a single pair of values.
+
+    A workaround to pass a non-hashable key to redis, since the library expects
+    things implementing items().
+    """
+    def __init__(self, key, value):
+        self.key = key
+        self.value = value
+
+    def items(self):
+        yield self.key, self.value
+
+
+class AttributeIdMap:
+    """
+    Utility wrapper to map smaller keys to a dictionary.
+
+    Takes a dictionary mapping attribute names to values, and assigns each
+    key a fixed-length bytes equivalent (an ID). The length of each ID is
+    stored in the id_length property.
+
+    Supports item access by ID, returning a tuple of attribute name and value.
+    Also supports iteration, yielding tuples of attribute name, attribute ID,
+    and value.
+    """
+    def __init__(self, named_attributes: ca.Mapping[str, t.Any]) -> None:
+        self.attribute_names = frozenset(named_attributes)
+        self._data = {}
+        self.id_length = (len(named_attributes).bit_length() + 7) // 8
+        for i, (attribute_name, value) in enumerate(named_attributes.items()):
+            attribute_id = i.to_bytes(length=self.id_length)
+            self._data[attribute_id] = (attribute_name, value)
+
+    def __iter__(self) -> ca.Iterator[tuple[str, bytes, t.Any]]:
+        for attribute_id, (attribute_name, value) in self._data.items():
+            yield attribute_name, attribute_id, value
+
+    def __getitem__(self, attribute_id):
+        return self._data[attribute_id]
+
+
+class RowCodec:
+    """
+    Codec for an complete set of attributes.
+
+    Encodes and decodes records into bytes. Uses an AttributeIdMap to generate
+    small attribute IDs for each of a given set of named attributes.
+    """
+    def __init__(
+            self, attribute_codecs: t.Mapping[str, codec.Codec],
+            num_bytes_attribute_length: int = 2) -> None:
+        """
+        :param attribute_codecs: A dictionary mapping attribute names to
+            codecs. Only record attributes contained here will be encoded.
+        :param num_bytes_attribute_length: The number of bytes with which the
+            length of each attribute is encoded. This value sets the limit for
+            the maximum allowable encoded attribute size (to 1 less than the
+            maximum unsigned integer representable with this number of bytes).
+        """
+        self._attribute_codecs = AttributeIdMap(attribute_codecs)
+        self.num_bytes_attribute_length = num_bytes_attribute_length
+        self.max_attribute_length = 2**(num_bytes_attribute_length * 8) - 1
+
+    def encode(self, record: t.Mapping[str, t.Any]) -> bytearray:
+        """
+        Encode a record.
+
+        Encodes the given record to a bytearray. Only attributes for which a
+        codec was provided on construction are encoded.
+
+        A CodingError is raised if the record is missing any attribute for
+        which a codec was specified, an error occurs while encoding any
+        individual attribute, or any encoded attribute is too long (determined
+        by the number of bytes configured to store attribute length).
+        """
+        encoded_record = bytearray()
+        for attribute_name, attribute_id, codec in self._attribute_codecs:
+            encoded_attribute = self._encode_attribute(
+                record, attribute_name, codec)
+            encoded_record += attribute_id
+            encoded_record += len(encoded_attribute).to_bytes(
+                length=self.num_bytes_attribute_length)
+            encoded_record += encoded_attribute
         return encoded_record
 
-    def _decode_record(self, encoded_record):
+    def _encode_attribute(self, record, attribute_name, codec):
+        try:
+            attribute = record[attribute_name]
+        except KeyError as e:
+            raise ValueError(f'Attribute missing from {record}.')
+        try:
+            encoded_attribute = codec.encode(attribute)
+        except Exception as e:
+            raise CodingError(
+                f'Error while encoding {attribute_name} {attribute} in '
+                f'{record}.') from e
+        if not isinstance(encoded_attribute, bytes):
+            raise CodingError(
+                f'Illegal type {type(encoded_attribute)} of encoding of '
+                f'{attribute_name}.')
+        if len(encoded_attribute) > self.max_attribute_length:
+            raise CodingError(f'Encoding of {attribute_name} is too long.')
+        return encoded_attribute
+
+    def decode(self, encoded_record: bytes) -> t.Mapping[str, t.Any]:
+        """
+        Decode an encoded record.
+
+        Decodes a byte string containing a previously encoded record.
+
+        Raises a ValueError if encoded_record is not a bytes object, or any
+        attribute for which a codec exists is missing from it.
+
+        Raises a CodingError if the format of the encoded record is invalid or
+        incomplete in any form.
+        """
+        if not isinstance(encoded_record, bytes):
+            raise ValueError('Encoded record must be bytes.')
         decoded_record = {}
-        missing_attribute_names = set(n for n, _, _ in self._codecs)
-        for encoded_attribute in encoded_record:
-            attribute_id = encoded_attribute[:self._codecs.id_length]
-            encoded_value = encoded_attribute[self._codecs.id_length:]
-            try:
-                attribute_name, codec = self._codecs[attribute_id]
-            except KeyError:
-                raise ValueError(
-                    f'Error decoding encoded attribute {encoded_attribute} '
-                    f'with unknown ID {attribute_id}')
-            try:
-                missing_attribute_names.remove(attribute_name)
-            except KeyError:
-                raise ValueError(
-                    f'{attribute_name} contained twice in {encoded_record}.')
-            try:
-                decoded_record[attribute_name] = codec.decode(encoded_value)
-            except Exception as e:
+        reader = BytesReader(encoded_record)
+        while reader.bytes_remaining:
+            attribute_name, decoded_attribute = self._decode_next_attribute(
+                reader)
+            if attribute_name in decoded_record:
                 raise CodingError(
-                    f'Error while decoding {attribute_name} (id '
-                    f'{attribute_id}) {encoded_value} in '
-                    f'{encoded_record}.') from e
-        if missing_attribute_names:
-            raise ValueError(
-                f'Attributes {missing_attribute_names} missing in '
-                f'{encoded_record}.')
+                    f'{attribute_name} contained twice in {encoded_record}.')
+            decoded_record[attribute_name] = decoded_attribute
+        needed_attributes = self._attribute_codecs.attribute_names
+        present_attributes = frozenset(decoded_record)
+        if (missing := needed_attributes - present_attributes):
+            raise CodingError(
+                f'Attributes {missing} missing in {encoded_record}.')
         return decoded_record
+
+    def _decode_next_attribute(self, reader):
+        try:
+            attribute_id = reader.read(self._attribute_codecs.id_length)
+            value_length = int.from_bytes(
+                reader.read(self.num_bytes_attribute_length))
+            encoded_value = reader.read(value_length)
+        except BytesReader.NotEnoughBytes:
+            raise CodingError('Incomplete encoded attribute.')
+        try:
+            attribute_name, codec = self._attribute_codecs[attribute_id]
+        except KeyError:
+            raise CodingError(
+                'Error decoding encoded attribute with unknown ID '
+                f'{attribute_id}.')
+        try:
+            return attribute_name, codec.decode(encoded_value)
+        except Exception as e:
+            raise CodingError(
+                f'Error while decoding {attribute_name} (ID {attribute_id}) '
+                f'{encoded_value}.') from e
+
+
+class BytesReader:
+    class NotEnoughBytes(Exception):
+        """Raised when there are not enough bytes to satisfy a read."""
+
+    def __init__(self, bs: bytes) -> None:
+        self._bs = bs
+        self._pos = 0
+
+    @property
+    def bytes_remaining(self) -> int:
+        return len(self._bs) - self._pos
+
+    def read(self, n: int) -> bytes:
+        """
+        Read exactly n bytes, advancing the read position.
+
+        Raises NotEnoughBytes if n > bytes_remaining.
+        """
+        if n > self.bytes_remaining:
+            raise self.NotEnoughBytes
+        new_pos = self._pos + n
+        try:
+            return self._bs[self._pos:new_pos]
+        finally:
+            self._pos = new_pos
