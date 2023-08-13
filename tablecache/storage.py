@@ -118,12 +118,9 @@ class RedisTable(StorageTable):
         self._row_codec = RowCodec(attribute_codecs)
 
     async def clear(self) -> None:
-        """
-        Delete all data belonging to this table.
-
-        Flushes the entire current database.
-        """
-        await self._storage.conn.flushdb()
+        """Delete all data belonging to this table."""
+        await self._storage.conn.delete(
+            f'{self._table_name}:rows', f'{self._table_name}:key_scores')
 
     async def put(self, record: ca.Mapping[str, t.Any]) -> None:
         """

@@ -71,11 +71,13 @@ class TestRedisTable:
 
     @pytest.fixture
     def make_table(self, redis_storage):
-        def factory(primary_key_name='pk', attribute_codecs=None):
+        def factory(
+                table_name='table', primary_key_name='pk',
+                attribute_codecs=None):
             attribute_codecs = attribute_codecs or {
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
             return tc.RedisTable(
-                redis_storage, table_name='table',
+                redis_storage, table_name=table_name,
                 primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs)
 
@@ -217,6 +219,28 @@ class TestRedisTable:
         await table.clear()
         with pytest.raises(KeyError):
             await table.get(1)
+
+    async def test_multiple_tables(self, make_table):
+        table1 = make_table(table_name='t1')
+        table2 = make_table(table_name='t2')
+        await table1.put({'pk': 1, 's': 's1'})
+        await table1.put({'pk': 2, 's': 's2'})
+        await table2.put({'pk': 1, 's': 's3'})
+        assert_that(await table1.get(1), has_entries(pk=1, s='s1'))
+        assert_that(await table1.get(2), has_entries(pk=2, s='s2'))
+        assert_that(await table2.get(1), has_entries(pk=1, s='s3'))
+        with pytest.raises(KeyError):
+            await table2.get(2)
+
+    async def test_clear_only_deletes_own_keys(self, make_table):
+        table1 = make_table(table_name='t1')
+        table2 = make_table(table_name='t2')
+        await table1.put({'pk': 1, 's': 's1'})
+        await table2.put({'pk': 1, 's': 's2'})
+        await table1.clear()
+        with pytest.raises(KeyError):
+            await table1.get(1)
+        assert_that(await table2.get(1), has_entries(pk=1, s='s2'))
 
 
 class TestAttributeIdMap:
