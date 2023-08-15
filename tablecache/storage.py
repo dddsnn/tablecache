@@ -78,6 +78,12 @@ class StorageTable(abc.ABC):
     async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
         raise NotImplementedError
 
+    @abc.abstractmethod
+    async def range(
+            self, score_min: numbers.Real, score_max: numbers.Real
+    ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+        raise NotImplementedError
+
 
 class RedisTable(StorageTable):
     def __init__(
@@ -94,10 +100,15 @@ class RedisTable(StorageTable):
         uniquely identifies it within the table. Only attributes for which a
         codec is specified are stored.
 
+        Each record is also associated with a score, which can be used to get
+        many elements with scores in a given range.
+
         Records are serialized to byte strings and stored in Redis as elements
-        of a sorted set. A spearate hash stores the score for each element used
-        to find elements in the set with matching scores in order to retrieve
-        them again.
+        of a sorted set. This is used for fast queries by score range. For
+        queries by primary key, a spearate hash stores the score for each
+        element used to find elements in the set with matching scores. All
+        matching elements have to be iterated here, which implies that getting
+        by primary key is slow if there are many elements with the same score.
 
         :param redis_storage: A RedisStorage that provides a connection.
         :param table_name: The name of the table, used as a prefix for keys in
@@ -108,6 +119,10 @@ class RedisTable(StorageTable):
             Must map attribute names (string) to tablecache.Codec instances
             that are able to en-/decode the corresponding values. Only
             attributes present here are stored.
+        :param score_function: A function that extracts a score from a record.
+            Defaults to the primary key, which works fine as long as that is a
+            number. Otherwise, the hash of the primary key may be a good
+            option.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
@@ -203,6 +218,20 @@ class RedisTable(StorageTable):
         """
         _, _, decoded_record = await self._get(record_key)
         return decoded_record
+
+    async def range(
+            self, score_min: numbers.Real, score_max: numbers.Real
+    ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+        """
+        Get records with scores within a range.
+
+        Asynchronously iterates over all records with a score between score_min
+        and score_max (bounds are inclusive).
+        """
+        encoded_records = await self._storage.conn.zrange(
+            f'{self._table_name}:rows', score_min, score_max, byscore=True)
+        for encoded_record in encoded_records:
+            yield self._row_codec.decode(encoded_record)
 
 
 class PairAsItems:

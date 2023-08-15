@@ -57,6 +57,13 @@ async def redis_storage(wait_for_redis, redis_host):
         yield redis_storage
 
 
+async def collect_async_iter(i):
+    l = []
+    async for item in i:
+        l.append(item)
+    return l
+
+
 class FailCodec(tc.Codec):
     def encode(self, _):
         raise Exception
@@ -268,6 +275,68 @@ class TestRedisTable:
         with pytest.raises(KeyError):
             await table1.get(1)
         assert_that(await table2.get(1), has_entries(pk=1, s='s2'))
+
+    async def test_range_on_empty(self, table):
+        assert_that(
+            await collect_async_iter(table.range(float('-inf'), float('inf'))),
+            empty())
+
+    async def test_range_on_all_contained(self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('pk'))
+        await table.put({'pk': -50})
+        await table.put({'pk': 0})
+        await table.put({'pk': 50})
+        assert_that(
+            await collect_async_iter(table.range(-50, 50)),
+            contains_inanyorder(
+                has_entries(pk=-50), has_entries(pk=0), has_entries(pk=50)))
+
+    async def test_range_on_some_not_contained(self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('pk'))
+        await table.put({'pk': -50})
+        await table.put({'pk': 0})
+        await table.put({'pk': 50})
+        await table.put({'pk': 51})
+        assert_that(
+            await collect_async_iter(table.range(-10, 50)),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=50)))
+
+    async def test_range_on_none_contained(self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('pk'))
+        await table.put({'pk': 0})
+        await table.put({'pk': 50})
+        assert_that(await collect_async_iter(table.range(100, 200)), empty())
+
+    async def test_range_with_inf_bounds(self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('pk'))
+        await table.put({'pk': 0})
+        await table.put({'pk': 50})
+        assert_that(
+            await collect_async_iter(table.range(float('-inf'), float('inf'))),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=50)))
+
+    async def test_range_uses_custom_score_function(self, make_table):
+        def pk_minus_10(record):
+            return record['pk'] - 10
+
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=pk_minus_10)
+        await table.put({'pk': 0})
+        await table.put({'pk': 10})
+        await table.put({'pk': 60})
+        await table.put({'pk': 61})
+        assert_that(
+            await collect_async_iter(table.range(0, 50)),
+            contains_inanyorder(has_entries(pk=10), has_entries(pk=60)))
 
 
 class TestAttributeIdMap:
