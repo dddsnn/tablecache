@@ -18,6 +18,8 @@
 import abc
 import collections.abc as ca
 import functools
+import numbers
+import operator as op
 import typing as t
 
 import redis.asyncio as redis
@@ -79,9 +81,11 @@ class StorageTable(abc.ABC):
 
 class RedisTable(StorageTable):
     def __init__(
-            self, redis_storage: RedisStorage, *, table_name: str,
-            primary_key_name: str,
-            attribute_codecs: ca.Mapping[str, codec.Codec]) -> None:
+        self, redis_storage: RedisStorage, *, table_name: str,
+        primary_key_name: str, attribute_codecs: ca.Mapping[str, codec.Codec],
+        score_function: t.Callable[[t.Mapping[str, t.Any]],
+                                   numbers.Real] = None
+    ) -> None:
         """
         A table stored in Redis.
 
@@ -116,6 +120,9 @@ class RedisTable(StorageTable):
         except KeyError:
             raise ValueError('Codec for primary key is missing.')
         self._row_codec = RowCodec(attribute_codecs)
+        self._score_function = (
+            score_function or op.itemgetter(primary_key_name))
+        self._score_codec = codec.FloatAsStringCodec()
 
     async def clear(self) -> None:
         """Delete all data belonging to this table."""
@@ -127,7 +134,8 @@ class RedisTable(StorageTable):
         Store a record.
 
         Stores a record of all attributes for which a codec was configured in
-        Redis. Other attributes that may be present are silently ignored.
+        Redis. Other attributes that may be present are silently ignored. If a
+        record with the same primary key exists, it is overwritten.
 
         Raises a ValueError if any attribute is missing from the record.
 
@@ -139,17 +147,52 @@ class RedisTable(StorageTable):
         except KeyError as e:
             raise ValueError(
                 f'Record {record} is missing a primary key.') from e
-        encoded_record_key = self._encode_primary_key(record_key)
+        encoded_record_key = await self._maybe_delete_old_record(record_key)
+        score = self._score_function(record)
+        await self._storage.conn.hset(
+            f'{self._table_name}:key_scores', encoded_record_key,
+            self._score_codec.encode(score))
         encoded_record = self._row_codec.encode(record)
         await self._storage.conn.zadd(
             f'{self._table_name}:rows',
-            mapping=PairAsItems(memoryview(encoded_record), 0))
-        await self._storage.conn.hset(
-            f'{self._table_name}:key_scores', encoded_record_key, 0)
+            mapping=PairAsItems(memoryview(encoded_record), score))
+
+    async def _maybe_delete_old_record(self, record_key):
+        try:
+            encoded_record_key, old_encoded_record, _ = await self._get(
+                record_key)
+            await self._storage.conn.zrem(
+                f'{self._table_name}:rows', old_encoded_record)
+        except KeyError:
+            encoded_record_key = self._encode_primary_key(record_key)
+        return encoded_record_key
+
+    def _encode_primary_key(self, key):
+        try:
+            return self._primary_key_codec.encode(key)
+        except Exception as e:
+            raise CodingError(f'Unable to encode primary key {key}.') from e
+
+    async def _get(self, record_key):
+        encoded_record_key = self._encode_primary_key(record_key)
+        encoded_score = await self._storage.conn.hget(
+            f'{self._table_name}:key_scores', encoded_record_key)
+        if encoded_score is None:
+            raise KeyError(
+                f'No record with {self._primary_key_name}={record_key}.')
+        score = self._score_codec.decode(encoded_score)
+        encoded_records = await self._storage.conn.zrange(
+            f'{self._table_name}:rows', score, score, byscore=True)
+        for encoded_record in encoded_records:
+            decoded_record = self._row_codec.decode(encoded_record)
+            if decoded_record[self._primary_key_name] == record_key:
+                return encoded_record_key, encoded_record, decoded_record
+        raise KeyError(
+            f'No record with {self._primary_key_name}={record_key}.')
 
     async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
         """
-        Retrieve a previously stored record.
+        Retrieve a previously stored record by primary key.
 
         Returns a dictionary containing the data stored in Redis associated
         with the given key.
@@ -158,27 +201,8 @@ class RedisTable(StorageTable):
         which there exists a codec, or an error occurs when decoding the set of
         attributes.
         """
-        encoded_record_key = self._encode_primary_key(record_key)
-        score = await self._storage.conn.hget(
-            f'{self._table_name}:key_scores', encoded_record_key)
-        if score is None:
-            raise KeyError(
-                f'No record with {self._primary_key_name}={record_key}.')
-        encoded_records = await self._storage.conn.zrange(
-            f'{self._table_name}:rows', score, score, byscore=True)
-        for encoded_record in encoded_records:
-            decoded_record = self._row_codec.decode(encoded_record)
-            if decoded_record[self._primary_key_name] == record_key:
-                return decoded_record
-        else:
-            raise KeyError(
-                f'No record with {self._primary_key_name}={record_key}.')
-
-    def _encode_primary_key(self, key):
-        try:
-            return self._primary_key_codec.encode(key)
-        except Exception as e:
-            raise CodingError(f'Unable to encode primary key {key}.') from e
+        _, _, decoded_record = await self._get(record_key)
+        return decoded_record
 
 
 class PairAsItems:

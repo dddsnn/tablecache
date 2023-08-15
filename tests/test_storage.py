@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import operator as op
 import unittest.mock as um
 
 from hamcrest import *
@@ -73,13 +74,14 @@ class TestRedisTable:
     def make_table(self, redis_storage):
         def factory(
                 table_name='table', primary_key_name='pk',
-                attribute_codecs=None):
+                attribute_codecs=None, score_function=None):
             attribute_codecs = attribute_codecs or {
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
             return tc.RedisTable(
                 redis_storage, table_name=table_name,
                 primary_key_name=primary_key_name,
-                attribute_codecs=attribute_codecs)
+                attribute_codecs=attribute_codecs,
+                score_function=score_function)
 
         return factory
 
@@ -151,6 +153,30 @@ class TestRedisTable:
         with pytest.raises(tc.CodingError):
             await table.put({'pk': 1, 's': 's1'})
 
+    async def test_put_removes_old_value(self, table, redis_storage):
+        assert await redis_storage.conn.zcard('table:rows') == 0
+        await table.put({'pk': 1, 's': 'a'})
+        await table.put({'pk': 1, 's': 'b'})
+        await table.put({'pk': 1, 's': 'aaaaaaaaaaaaaaaaaaaaaaaa'})
+        await table.put({'pk': 1, 's': 'bbbbbbbbbbbbbbbbbbbbbbbb'})
+        assert await redis_storage.conn.zcard('table:rows') == 1
+        await table.put({'pk': 1, 's': 'new'})
+        assert_that(await table.get(1), has_entries(pk=1, s='new'))
+        assert await redis_storage.conn.zcard('table:rows') == 1
+
+    async def test_put_doesnt_overwrite_other_records_with_same_score(
+            self, make_table, redis_storage):
+        table = make_table(
+            attribute_codecs={
+                'pk': tc.IntAsStringCodec(), 'i': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('i'))
+        await table.put({'pk': 1, 'i': 10})
+        await table.put({'pk': 2, 'i': 10})
+        await table.put({'pk': 1, 'i': 15})
+        assert_that(await table.get(1), has_entries(pk=1, i=15))
+        assert_that(await table.get(2), has_entries(pk=2, i=10))
+        assert await redis_storage.conn.zcard('table:rows') == 2
+
     async def test_get_raises_on_nonexistent(self, table):
         with pytest.raises(KeyError):
             await table.get(1)
@@ -175,7 +201,8 @@ class TestRedisTable:
             await table.get(1)
 
     async def test_get_raises_on_duplicate_attribute_ids(
-            self, table, redis_storage):
+            self, make_table, redis_storage):
+        table = make_table(score_function=lambda _: 0)
         await table.put({'pk': 1, 's': 's1'})
         row = (await redis_storage.conn.zrange('table:rows', 0, -1))[0]
         s_id_index = row.index(b's1') - 3
