@@ -21,14 +21,17 @@ import typing as t
 
 import asyncpg.pool
 
+import tablecache.range as rng
+
 
 class DbTable(abc.ABC):
     @abc.abstractmethod
-    async def all(self) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+    async def get_record_range(
+            self) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get(
+    async def get_records(
         self, primary_keys: t.Sequence[t.Any]
     ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         raise NotImplementedError
@@ -39,46 +42,72 @@ class PostgresTable(DbTable):
     Postgres table abstraction.
 
     Represents a table, or any table-like result set in Postgres that can be
-    queried for all rows, or just some. The table is specified as query
-    strings, one to get the entire table, and one to get only certain rows.
+    queried for a range of records, or just some specific ones. The table is
+    specified as query strings, one to get a whole range in the table, and one
+    to get only certain records by their primary key.
 
     While the table may be a join of many tables or other construct, it must
     have a column functioning as primary key, i.e. one that uniquely identifies
     any row in the table.
     """
     def __init__(
-            self, pool: asyncpg.pool.Pool, query_all_string: str,
+            self, pool: asyncpg.pool.Pool, query_range_string: str,
             query_some_string: str) -> None:
         """
-        :param pool: A connection pool that is ready to be used.
-        :param query_all_string: A query string to fetch all rows.
+        :param pool: A connection pool that is ready to be used (i.e. already
+            set up and connected).
+        :param query_range_string: A query string to fetch a range of records.
+            The string must contain query arguments ($1, $2 etc.) that match
+            the type of Range used when calling get_record_range() (i.e. the
+            Range's db_args tuple). The simplest case, the AllRange has no
+            parameters and will fetch everything in the given query.
         :param query_some_string: A query string that allows filtering to fetch
-            only specific rows. This is done by setting argument $1 to a
+            only specific records. This is done by setting argument $1 to a
             sequence of primary keys, so this string essentially has to include
             "= ANY($1)" somewhere, likely taking a shape similar to "WHERE
-            my_primary_key = ANY ($1)". Can probably be created based on the
-            query_all_string, by appending the condition.
+            my_primary_key = ANY($1)". It can probably be created from a
+            similar base query as the query_range_string.
         """
         self._pool = pool
-        self.query_all_string = query_all_string
+        self.query_range_string = query_range_string
         self.query_some_string = query_some_string
 
-    async def all(self) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
-        """Asynchronously iterate over all rows."""
+    async def get_record_range(
+        self, range: rng.Range = rng.AllRange()
+    ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+        """
+        Asynchronously iterate over a range of records.
+
+        Yields records from the given range using its query parameters.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
-            async for record in conn.cursor(self.query_all_string):
+            cursor = conn.cursor(self.query_range_string, *range.db_args)
+            async for record in cursor:
                 yield record
 
-    async def get(
+    async def get_records(
         self, primary_keys: t.Sequence[t.Any]
     ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         """
-        Asynchronously iterate over rows matching primary keys.
+        Asynchronously iterate over records matching primary keys.
 
-        Yields all rows whose primary key matches one in the given sequence. If
-        a key doesn't exist in the table, it is ignored and no error is raised.
+        Yields all records whose primary key matches one in the given sequence.
+        If a key doesn't exist in the table, it is ignored and no error is
+        raised.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_some_string,
                                             primary_keys):
                 yield record
+
+    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+        """
+        Get a single record by primary key.
+
+        Convenience shortcut calling get_records with the key. Raises a
+        KeyError if no matching record exists.
+        """
+        try:
+            return await anext(self.get_records([primary_key]))
+        except StopAsyncIteration as e:
+            raise KeyError from e

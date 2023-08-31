@@ -25,6 +25,7 @@ import typing as t
 import redis.asyncio as redis
 
 import tablecache.codec as codec
+import tablecache.range as rng
 
 
 class CodingError(Exception):
@@ -71,15 +72,15 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def put(self, record: ca.Mapping[str, t.Any]) -> None:
+    async def put_record(self, record: ca.Mapping[str, t.Any]) -> None:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
+    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def range(
+    async def get_record_range(
             self, score_min: numbers.Real, score_max: numbers.Real
     ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
         raise NotImplementedError
@@ -89,8 +90,8 @@ class RedisTable(StorageTable):
     def __init__(
         self, redis_storage: RedisStorage, *, table_name: str,
         primary_key_name: str, attribute_codecs: ca.Mapping[str, codec.Codec],
-        score_function: t.Callable[[t.Mapping[str, t.Any]],
-                                   numbers.Real] = None
+        score_function: t.Optional[t.Callable[[t.Mapping[str, t.Any]],
+                                              numbers.Real]] = None
     ) -> None:
         """
         A table stored in Redis.
@@ -144,7 +145,7 @@ class RedisTable(StorageTable):
         await self._storage.conn.delete(
             f'{self._table_name}:rows', f'{self._table_name}:key_scores')
 
-    async def put(self, record: ca.Mapping[str, t.Any]) -> None:
+    async def put_record(self, record: ca.Mapping[str, t.Any]) -> None:
         """
         Store a record.
 
@@ -158,29 +159,29 @@ class RedisTable(StorageTable):
         bytes, or any error occurs during encoding.
         """
         try:
-            record_key = record[self._primary_key_name]
+            primary_key = record[self._primary_key_name]
         except KeyError as e:
             raise ValueError(
                 f'Record {record} is missing a primary key.') from e
-        encoded_record_key = await self._maybe_delete_old_record(record_key)
+        encoded_primary_key = await self._maybe_delete_old_record(primary_key)
         score = self._score_function(record)
         await self._storage.conn.hset(
-            f'{self._table_name}:key_scores', encoded_record_key,
+            f'{self._table_name}:key_scores', encoded_primary_key,
             self._score_codec.encode(score))
         encoded_record = self._row_codec.encode(record)
         await self._storage.conn.zadd(
             f'{self._table_name}:rows',
             mapping=PairAsItems(memoryview(encoded_record), score))
 
-    async def _maybe_delete_old_record(self, record_key):
+    async def _maybe_delete_old_record(self, primary_key):
         try:
-            encoded_record_key, old_encoded_record, _ = await self._get(
-                record_key)
+            encoded_primary_key, old_encoded_record, _ = await self._get(
+                primary_key)
             await self._storage.conn.zrem(
                 f'{self._table_name}:rows', old_encoded_record)
         except KeyError:
-            encoded_record_key = self._encode_primary_key(record_key)
-        return encoded_record_key
+            encoded_primary_key = self._encode_primary_key(primary_key)
+        return encoded_primary_key
 
     def _encode_primary_key(self, key):
         try:
@@ -188,24 +189,24 @@ class RedisTable(StorageTable):
         except Exception as e:
             raise CodingError(f'Unable to encode primary key {key}.') from e
 
-    async def _get(self, record_key):
-        encoded_record_key = self._encode_primary_key(record_key)
+    async def _get(self, primary_key):
+        encoded_primary_key = self._encode_primary_key(primary_key)
         encoded_score = await self._storage.conn.hget(
-            f'{self._table_name}:key_scores', encoded_record_key)
+            f'{self._table_name}:key_scores', encoded_primary_key)
         if encoded_score is None:
             raise KeyError(
-                f'No record with {self._primary_key_name}={record_key}.')
+                f'No record with {self._primary_key_name}={primary_key}.')
         score = self._score_codec.decode(encoded_score)
         encoded_records = await self._storage.conn.zrange(
             f'{self._table_name}:rows', score, score, byscore=True)
         for encoded_record in encoded_records:
             decoded_record = self._row_codec.decode(encoded_record)
-            if decoded_record[self._primary_key_name] == record_key:
-                return encoded_record_key, encoded_record, decoded_record
+            if decoded_record[self._primary_key_name] == primary_key:
+                return encoded_primary_key, encoded_record, decoded_record
         raise KeyError(
-            f'No record with {self._primary_key_name}={record_key}.')
+            f'No record with {self._primary_key_name}={primary_key}.')
 
-    async def get(self, record_key: t.Any) -> ca.Mapping[str, t.Any]:
+    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
         """
         Retrieve a previously stored record by primary key.
 
@@ -216,20 +217,25 @@ class RedisTable(StorageTable):
         which there exists a codec, or an error occurs when decoding the set of
         attributes.
         """
-        _, _, decoded_record = await self._get(record_key)
+        _, _, decoded_record = await self._get(primary_key)
         return decoded_record
 
-    async def range(
-            self, score_min: numbers.Real, score_max: numbers.Real
-    ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+    async def get_record_range(
+            self, range: rng.Range) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
         """
         Get records with scores within a range.
 
-        Asynchronously iterates over all records with a score between score_min
-        and score_max (bounds are inclusive).
+        Asynchronously iterates over all records with a score within the given
+        range. The lower bound is inclusive, the upper bound exclusive, so a
+        record with score s is yielded if range.score_ge <= s < range.score_lt.
+
+        No particular order is guaranteed.
         """
+        # Prefixing the end of the range with '(' is the Redis way of saying we
+        # want the interval to be open on that end.
         encoded_records = await self._storage.conn.zrange(
-            f'{self._table_name}:rows', score_min, score_max, byscore=True)
+            f'{self._table_name}:rows', range.score_ge, f'({range.score_lt}',
+            byscore=True)
         for encoded_record in encoded_records:
             yield self._row_codec.decode(encoded_record)
 

@@ -15,10 +15,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import collections.abc as ca
 import typing as t
 
 import tablecache.db as db
 import tablecache.storage as storage
+import tablecache.range as rng
 
 
 class CachedTable:
@@ -29,45 +31,82 @@ class CachedTable:
     fast one (storage_table).
     """
     def __init__(
-            self, db_table: db.DbTable,
-            storage_table: storage.StorageTable) -> None:
+        self, db_table: db.DbTable, storage_table: storage.StorageTable,
+        cache_range: rng.Range = rng.AllRange()
+    ) -> None:
+        """
+        :param cache_range: A range of values that should be cached. Only
+            records matching this range are queried from the DB and put into
+            storage. The default AllRange will load everything.
+        """
         self._db_table = db_table
         self._storage_table = storage_table
+        self._cache_range = cache_range
         self._dirty_keys = set()
 
     async def load(self) -> None:
         """
-        Load all data from the DB into storage.
+        Load all relevant data from the DB into storage.
 
-        Clears the storage first.
+        Loads all records matching the configured cache range. Clears the
+        storage first.
         """
         await self._storage_table.clear()
-        async for record in self._db_table.all():
-            await self._storage_table.put(record)
+        async for record in self._db_table.get_record_range(self._cache_range):
+            await self._storage_table.put_record(record)
 
-    async def get(self, key: t.Any) -> t.Any:
+    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
         """
-        Get a key from storage.
+        Get a record from storage by primary key.
 
         In case the key has been marked as dirty, ensures the data is fresh
         first.
 
+        In case the primary key doesn't exist in cache, also tries the DB in
+        case the key is from outside the cached range. This implies that
+        querying keys that may not exist is potentially costly. There is
+        however a special case if the cached range is the AllRange, where the
+        DB is not checked (since everything is cached).
+
         Raises a KeyError if the key doesn't exist.
         """
-        if key in self._dirty_keys:
+        if primary_key in self._dirty_keys:
             await self._refresh_dirty()
-        return await self._storage_table.get(key)
+        try:
+            return await self._storage_table.get_record(primary_key)
+        except KeyError:
+            if isinstance(self._cache_range, rng.AllRange):
+                raise
+            return await self._db_table.get_record(primary_key)
 
-    async def invalidate(self, key: t.Any) -> None:
+    async def get_record_range(
+            self, range: rng.Range) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+        """
+        Asynchronously iterate over records from a range.
+
+        Iterates over cached records from the given range, but only if it is
+        fully contained in the configured cache range (i.e. no records are
+        missing). Otherwise, queries the DB for the entire range and yields
+        those records. This implies that querying a range that isn't completely
+        in cache (even if just by a little bit) is expensive.
+        """
+        if self._cache_range.covers(range):
+            source = self._storage_table
+        else:
+            source = self._db_table
+        async for record in source.get_record_range(range):
+            yield record
+
+    async def invalidate(self, primary_key: t.Any) -> None:
         """
         Mark a key in storage as dirty.
 
         Data belonging to a dirty key is guaranteed to be fetched from the DB
         again before being served to a client.
         """
-        self._dirty_keys.add(key)
+        self._dirty_keys.add(primary_key)
 
     async def _refresh_dirty(self) -> None:
-        async for record in self._db_table.get(self._dirty_keys):
-            await self._storage_table.put(record)
+        async for record in self._db_table.get_records(self._dirty_keys):
+            await self._storage_table.put_record(record)
         self._dirty_keys.clear()

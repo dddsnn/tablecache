@@ -111,38 +111,38 @@ class TestRedisTable:
                 attribute_codecs={'s': tc.StringCodec()})
 
     async def test_put_and_get(self, table):
-        await table.put({'pk': 1, 's': 's1'})
-        assert_that(await table.get(1), has_entries(pk=1, s='s1'))
+        await table.put_record({'pk': 1, 's': 's1'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
 
     async def test_put_and_get_multiple(self, table):
-        await table.put({'pk': 1, 's': 's1'})
-        await table.put({'pk': 2, 's': 's2'})
-        assert_that(await table.get(1), has_entries(pk=1, s='s1'))
-        assert_that(await table.get(2), has_entries(pk=2, s='s2'))
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
 
     async def test_put_ignores_extra_attributes(self, table):
-        await table.put({'pk': 1, 's': 's1', 'x': 'x1'})
-        assert_that(await table.get(1), is_not(has_entry('x', 'x1')))
+        await table.put_record({'pk': 1, 's': 's1', 'x': 'x1'})
+        assert_that(await table.get_record(1), is_not(has_entry('x', 'x1')))
 
     async def test_put_raises_on_missing_primary_key(self, table):
         with pytest.raises(ValueError):
-            await table.put({'s': 's1'})
+            await table.put_record({'s': 's1'})
 
     async def test_put_raises_on_missing_attributes(self, table):
         with pytest.raises(ValueError):
-            await table.put({'pk': 1})
+            await table.put_record({'pk': 1})
 
     async def test_put_raises_on_primary_key_encoding_error(self, make_table):
         table = make_table(
             attribute_codecs={'pk': FailCodec(), 's': tc.StringCodec()})
         with pytest.raises(tc.CodingError):
-            await table.put({'pk': 1, 's': 's1'})
+            await table.put_record({'pk': 1, 's': 's1'})
 
     async def test_put_raises_on_attribute_encoding_error(self, make_table):
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec(), 's': FailCodec()})
         with pytest.raises(tc.CodingError):
-            await table.put({'pk': 1, 's': 's1'})
+            await table.put_record({'pk': 1, 's': 's1'})
 
     async def test_put_raises_if_attribute_doesnt_encode_to_bytes(
             self, make_table):
@@ -158,17 +158,17 @@ class TestRedisTable:
                 'pk': tc.IntAsStringCodec(),
                 's': BrokenStringReturningCodec(),})
         with pytest.raises(tc.CodingError):
-            await table.put({'pk': 1, 's': 's1'})
+            await table.put_record({'pk': 1, 's': 's1'})
 
     async def test_put_removes_old_value(self, table, redis_storage):
         assert await redis_storage.conn.zcard('table:rows') == 0
-        await table.put({'pk': 1, 's': 'a'})
-        await table.put({'pk': 1, 's': 'b'})
-        await table.put({'pk': 1, 's': 'aaaaaaaaaaaaaaaaaaaaaaaa'})
-        await table.put({'pk': 1, 's': 'bbbbbbbbbbbbbbbbbbbbbbbb'})
+        await table.put_record({'pk': 1, 's': 'a'})
+        await table.put_record({'pk': 1, 's': 'b'})
+        await table.put_record({'pk': 1, 's': 'aaaaaaaaaaaaaaaaaaaaaaaa'})
+        await table.put_record({'pk': 1, 's': 'bbbbbbbbbbbbbbbbbbbbbbbb'})
         assert await redis_storage.conn.zcard('table:rows') == 1
-        await table.put({'pk': 1, 's': 'new'})
-        assert_that(await table.get(1), has_entries(pk=1, s='new'))
+        await table.put_record({'pk': 1, 's': 'new'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='new'))
         assert await redis_storage.conn.zcard('table:rows') == 1
 
     async def test_put_doesnt_overwrite_other_records_with_same_score(
@@ -177,40 +177,40 @@ class TestRedisTable:
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 'i': tc.IntAsStringCodec()},
             score_function=op.itemgetter('i'))
-        await table.put({'pk': 1, 'i': 10})
-        await table.put({'pk': 2, 'i': 10})
-        await table.put({'pk': 1, 'i': 15})
-        assert_that(await table.get(1), has_entries(pk=1, i=15))
-        assert_that(await table.get(2), has_entries(pk=2, i=10))
+        await table.put_record({'pk': 1, 'i': 10})
+        await table.put_record({'pk': 2, 'i': 10})
+        await table.put_record({'pk': 1, 'i': 15})
+        assert_that(await table.get_record(1), has_entries(pk=1, i=15))
+        assert_that(await table.get_record(2), has_entries(pk=2, i=10))
         assert await redis_storage.conn.zcard('table:rows') == 2
 
     async def test_get_raises_on_nonexistent(self, table):
         with pytest.raises(KeyError):
-            await table.get(1)
+            await table.get_record(1)
 
     async def test_get_raises_on_primary_key_encoding_error(self, make_table):
         await make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
-        ).put({'pk': 1, 's': 's1'})
+        ).put_record({'pk': 1, 's': 's1'})
         table = make_table(
             attribute_codecs={'pk': FailCodec(), 's': tc.StringCodec()})
         with pytest.raises(tc.CodingError):
-            await table.get(1)
+            await table.get_record(1)
 
     async def test_get_raises_on_missing_attributes(self, make_table):
         await make_table(attribute_codecs={'pk': tc.IntAsStringCodec()}
-                         ).put({'pk': 1})
+                         ).put_record({'pk': 1})
         table = make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()})
         with pytest.raises(tc.CodingError):
-            await table.get(1)
+            await table.get_record(1)
 
     async def test_get_raises_on_duplicate_attribute_ids(
             self, make_table, redis_storage):
         table = make_table(score_function=lambda _: 0)
-        await table.put({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 1, 's': 's1'})
         row = (await redis_storage.conn.zrange('table:rows', 0, -1))[0]
         s_id_index = row.index(b's1') - 3
         assert int.from_bytes(row[s_id_index + 1:s_id_index + 3]) == 2
@@ -219,17 +219,17 @@ class TestRedisTable:
         await redis_storage.conn.delete('table:rows')
         await redis_storage.conn.zadd('table:rows', {false_row: 0})
         with pytest.raises(tc.CodingError):
-            await table.get(1)
+            await table.get_record(1)
 
     async def test_get_raises_on_attribute_decoding_error(self, make_table):
         await make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
-        ).put({'pk': 1, 's': 's1'})
+        ).put_record({'pk': 1, 's': 's1'})
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec(), 's': FailCodec()})
         with pytest.raises(tc.CodingError):
-            await table.get(1)
+            await table.get_record(1)
 
     async def test_uses_custom_codec(self, make_table, redis_storage):
         class WeirdTupleCodec(tc.Codec):
@@ -243,53 +243,55 @@ class TestRedisTable:
         table = make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 't': WeirdTupleCodec()})
-        await table.put({'pk': 1, 't': (5, 'x')})
+        await table.put_record({'pk': 1, 't': (5, 'x')})
         assert_that(
-            await table.get(1), has_entries(t=(6, 'x with an addition')))
+            await table.get_record(1),
+            has_entries(t=(6, 'x with an addition')))
 
     async def test_clear(self, table):
-        await table.put({'pk': 1, 's': 's1'})
-        await table.get(1)
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.get_record(1)
         await table.clear()
         with pytest.raises(KeyError):
-            await table.get(1)
+            await table.get_record(1)
 
     async def test_multiple_tables(self, make_table):
         table1 = make_table(table_name='t1')
         table2 = make_table(table_name='t2')
-        await table1.put({'pk': 1, 's': 's1'})
-        await table1.put({'pk': 2, 's': 's2'})
-        await table2.put({'pk': 1, 's': 's3'})
-        assert_that(await table1.get(1), has_entries(pk=1, s='s1'))
-        assert_that(await table1.get(2), has_entries(pk=2, s='s2'))
-        assert_that(await table2.get(1), has_entries(pk=1, s='s3'))
+        await table1.put_record({'pk': 1, 's': 's1'})
+        await table1.put_record({'pk': 2, 's': 's2'})
+        await table2.put_record({'pk': 1, 's': 's3'})
+        assert_that(await table1.get_record(1), has_entries(pk=1, s='s1'))
+        assert_that(await table1.get_record(2), has_entries(pk=2, s='s2'))
+        assert_that(await table2.get_record(1), has_entries(pk=1, s='s3'))
         with pytest.raises(KeyError):
-            await table2.get(2)
+            await table2.get_record(2)
 
     async def test_clear_only_deletes_own_keys(self, make_table):
         table1 = make_table(table_name='t1')
         table2 = make_table(table_name='t2')
-        await table1.put({'pk': 1, 's': 's1'})
-        await table2.put({'pk': 1, 's': 's2'})
+        await table1.put_record({'pk': 1, 's': 's1'})
+        await table2.put_record({'pk': 1, 's': 's2'})
         await table1.clear()
         with pytest.raises(KeyError):
-            await table1.get(1)
-        assert_that(await table2.get(1), has_entries(pk=1, s='s2'))
+            await table1.get_record(1)
+        assert_that(await table2.get_record(1), has_entries(pk=1, s='s2'))
 
     async def test_range_on_empty(self, table):
         assert_that(
-            await collect_async_iter(table.range(float('-inf'), float('inf'))),
+            await collect_async_iter(table.get_record_range(tc.AllRange())),
             empty())
 
     async def test_range_on_all_contained(self, make_table):
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=op.itemgetter('pk'))
-        await table.put({'pk': -50})
-        await table.put({'pk': 0})
-        await table.put({'pk': 50})
+        await table.put_record({'pk': -50})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 50})
         assert_that(
-            await collect_async_iter(table.range(-50, 50)),
+            await collect_async_iter(
+                table.get_record_range(tc.NumberRange(-50, 51))),
             contains_inanyorder(
                 has_entries(pk=-50), has_entries(pk=0), has_entries(pk=50)))
 
@@ -297,30 +299,37 @@ class TestRedisTable:
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=op.itemgetter('pk'))
-        await table.put({'pk': -50})
-        await table.put({'pk': 0})
-        await table.put({'pk': 50})
-        await table.put({'pk': 51})
+        await table.put_record({'pk': -50})
+        await table.put_record({'pk': -10})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 49})
+        await table.put_record({'pk': 50})
         assert_that(
-            await collect_async_iter(table.range(-10, 50)),
-            contains_inanyorder(has_entries(pk=0), has_entries(pk=50)))
+            await collect_async_iter(
+                table.get_record_range(tc.NumberRange(-10, 50))),
+            contains_inanyorder(
+                has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49)))
 
     async def test_range_on_none_contained(self, make_table):
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=op.itemgetter('pk'))
-        await table.put({'pk': 0})
-        await table.put({'pk': 50})
-        assert_that(await collect_async_iter(table.range(100, 200)), empty())
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 50})
+        assert_that(
+            await collect_async_iter(
+                table.get_record_range(tc.NumberRange(100, 200))), empty())
 
     async def test_range_with_inf_bounds(self, make_table):
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=op.itemgetter('pk'))
-        await table.put({'pk': 0})
-        await table.put({'pk': 50})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 50})
         assert_that(
-            await collect_async_iter(table.range(float('-inf'), float('inf'))),
+            await collect_async_iter(
+                table.get_record_range(
+                    tc.NumberRange(float('-inf'), float('inf')))),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=50)))
 
     async def test_range_uses_custom_score_function(self, make_table):
@@ -330,13 +339,14 @@ class TestRedisTable:
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=pk_minus_10)
-        await table.put({'pk': 0})
-        await table.put({'pk': 10})
-        await table.put({'pk': 60})
-        await table.put({'pk': 61})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 10})
+        await table.put_record({'pk': 59})
+        await table.put_record({'pk': 60})
         assert_that(
-            await collect_async_iter(table.range(0, 50)),
-            contains_inanyorder(has_entries(pk=10), has_entries(pk=60)))
+            await
+            collect_async_iter(table.get_record_range(tc.NumberRange(0, 50))),
+            contains_inanyorder(has_entries(pk=10), has_entries(pk=59)))
 
 
 class TestAttributeIdMap:

@@ -39,3 +39,4 @@ from tablecache.codec import (
 from tablecache.db import DbTable, PostgresTable
 from tablecache.storage import (
     CodingError, RedisStorage, RedisTable, StorageTable)
+from tablecache.range import AllRange, NumberRange, Range
