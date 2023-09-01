@@ -23,12 +23,20 @@ import sys
 sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
 import asyncpg
+import redis.asyncio as redis
 
 import tablecache as tc
 
 
+# In this basic example, we have 2 Postgres tables that are joined together,
+# where the join has a unique key. We want to store the result of the join in a
+# fast storage (Redis).
 async def main():
-    base_query_string = '''
+    # We define 2 query strings: one that queries for a range (subset) of the
+    # join (in our case the entire result set), and one that filters out rows
+    # with specific primary keys. These query strings are passed into a
+    # PostgresTable to represent our access to the data.
+    query_range_string = '''
         SELECT
             uc.*, u.name AS user_name, u.nickname AS user_nickname,
             c.name AS city_name
@@ -36,17 +44,27 @@ async def main():
             users u
             JOIN users_cities uc USING (user_id)
             JOIN cities c USING (city_id)'''
-    query_some_string = f'{base_query_string} WHERE uc.user_id = ANY ($1)'
+    query_some_string = f'{query_range_string} WHERE uc.user_id = ANY ($1)'
     postgres_pool = asyncpg.create_pool(
         min_size=0, max_size=1,
         dsn='postgres://postgres:@localhost:5432/postgres')
     redis_storage = tc.RedisStorage()
     db_table = tc.PostgresTable(
-        postgres_pool, base_query_string, query_some_string)
+        postgres_pool, query_range_string, query_some_string)
+    # We specify a RedisTable which can accept records of the shape in our
+    # Postgres table. We need to specify a name for the table (used to create a
+    # namespace within Redis), the name of the primary key column, as well as a
+    # dictionary of codecs for the attributes. Each key in it must be a column
+    # of the table, and each value must be a codec (basic ones available in
+    # tablecache.codec) which is capable of encoding the corresponding value to
+    # bytes. The special Nullable codec can wrap another codec and enable null
+    # values (by themselves, normal codecs can't store nulls). Note that only
+    # attributes for which a codec has been specified are cached.
     storage_table = tc.RedisTable(
         redis_storage,
+        table_name='users_cities',
         primary_key_name='user_id',
-        codecs={
+        attribute_codecs={
             'user_id': tc.IntAsStringCodec(),
             'user_name': tc.StringCodec(),
             'user_nickname': tc.Nullable(tc.StringCodec()),
@@ -55,14 +73,17 @@ async def main():
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_pool)
-        await setup_example_db(postgres_pool)
+        await setup_example_dbs(postgres_pool)
         table = tc.CachedTable(db_table, storage_table)
         await table.load()
-        print(f'User 1 in Redis: {await table.get(1)}')
-        print(f'User 2 in Redis: {await table.get(2)}')
+        # After creating a CachedTable with our DB and storage tables and
+        # loading it, we can query it, hitting the cache rather than the DB.
+        print(f'User 1 in Redis: {await table.get_record(1)}')
+        print(f'User 2 in Redis: {await table.get_record(2)}')
 
 
-async def setup_example_db(pool):
+async def setup_example_dbs(pool):
+    await redis.Redis().flushall()
     await pool.execute(
         '''
         DROP SCHEMA public CASCADE;
