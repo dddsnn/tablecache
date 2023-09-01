@@ -1,0 +1,193 @@
+# Copyright 2023 Marc Lehmann
+
+# This file is part of tablecache.
+#
+# tablecache is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Affero General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option) any
+# later version.
+#
+# tablecache is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with tablecache. If not, see <https://www.gnu.org/licenses/>.
+
+import asyncio
+import contextlib
+import datetime
+import numbers
+import pathlib
+import sys
+import typing as t
+
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
+
+import asyncpg
+import redis.asyncio as redis
+
+import tablecache as tc
+
+
+# In this example, we have a table of timestamped device data, and we want to
+# be able to quickly query data from a time range, but only for a specific
+# device. The Redis backend requires that each record has exactly one (float)
+# score that defines its order by which it can be efficiently found. Since we
+# want to filter by device ID and then by time, we have to define a custom
+# Range implementation which munges both into a single float score. In this
+# implementation, we have to make sure that the score bounds, the DB
+# parameters, and the score function we pass to the RedisTable match each
+# other.
+async def main():
+    base_query_string = 'SELECT * FROM device_data'
+    # The query_all_string needs to have parameters $1 etc. that match the
+    # parameters of our custom range. In our case, we want to filter by
+    # timestamp, and optionally by device_id (we want all devices when loading
+    # the cache, but only a specific one when we have a cache miss). We achieve
+    # the optional filtering by setting $3 to true or false to get all or only
+    # one specific device, respectively.
+    query_all_string = f'''{base_query_string} WHERE ts >= $1 AND ts < $2
+        AND ($3 OR device_id = $4)'''
+    query_some_string = f'{base_query_string} WHERE device_id = ANY ($1)'
+    postgres_pool = asyncpg.create_pool(
+        min_size=0, max_size=1,
+        dsn='postgres://postgres:@localhost:5432/postgres')
+    redis_storage = tc.RedisStorage()
+    db_table = tc.PostgresTable(
+        postgres_pool, query_all_string, query_some_string)
+    storage_table = tc.RedisTable(
+        redis_storage,
+        table_name='device_data',
+        primary_key_name='data_id',
+        attribute_codecs={
+            'data_id': tc.IntAsStringCodec(),
+            'device_id': tc.IntAsStringCodec(),
+            'data': tc.IntAsStringCodec(),
+            'ts': tc.NaiveDatetimeCodec(),},
+        score_function=device_ts_record_score,
+    )
+    async with contextlib.AsyncExitStack() as stack:
+        await stack.enter_async_context(redis_storage)
+        await stack.enter_async_context(postgres_pool)
+        await setup_example_dbs(postgres_pool)
+        # We're loading the table and specifying that records in the range from
+        # 2023-01-01T12:00:00 to 2023-01-03T12:00:00 should be loaded (so there
+        # are records before and after this range that aren't going into the
+        # cache).
+        table = tc.CachedTable(
+            db_table, storage_table,
+            DeviceTsRange(None, '2023-01-01T12:00:00', '2023-01-03T12:00:00'))
+        await table.load()
+        # Now that the cache is loaded, we can query it by range. Depending on
+        # whether the range we query for is contained in the cache, we'll
+        # either get all records from cache, or all from the DB. There is
+        # currently no middle ground. If the range is not fully cached, the DB
+        # will be hit for everything.
+        print('Device 1, all records in cache:')
+        async for record in table.get_record_range(DeviceTsRange(
+                1, '2023-01-02', '2023-01-03')):
+            print(record)
+        print('Device 1, not all records in cache (will be loaded from DB):')
+        async for record in table.get_record_range(DeviceTsRange(
+                1, '2023-01-01', '2023-01-05')):
+            print(record)
+        print('Device 2, all records in cache:')
+        async for record in table.get_record_range(DeviceTsRange(
+                2, '2023-01-02', '2023-01-03')):
+            print(record)
+        print('Device 2, not all records in cache (will be loaded from DB):')
+        async for record in table.get_record_range(DeviceTsRange(
+                2, '2023-01-01', '2023-01-05')):
+            print(record)
+
+
+async def setup_example_dbs(pool):
+    await redis.Redis().flushall()
+    await pool.execute(
+        '''
+        DROP SCHEMA public CASCADE;
+        CREATE SCHEMA public;
+        CREATE TABLE devices (
+            device_id integer PRIMARY KEY GENERATED BY DEFAULT AS IDENTITY);
+        CREATE TABLE device_data (
+            data_id integer PRIMARY KEY GENERATED BY DEFAULT AS IDENTITY,
+            device_id integer NOT NULL REFERENCES devices(device_id),
+            data integer NOT NULL,
+            ts timestamp without time zone NOT NULL
+        );
+
+        INSERT INTO devices(device_id) VALUES (1), (2);
+        INSERT INTO device_data(device_id, data, ts) VALUES
+            (1,  11, '2023-01-01T00:00:00Z'),
+            (1,  12, '2023-01-02T00:00:00Z'),
+            (1,  13, '2023-01-03T00:00:00Z'),
+            (1,  14, '2023-01-04T00:00:00Z'),
+            (2,  22, '2023-01-02T00:00:00Z'),
+            (2,  23, '2023-01-03T00:00:00Z'),
+            (2,  24, '2023-01-04T00:00:00Z');''')
+
+
+# This function combines device ID and timestamp into a single float score. It
+# takes the device ID as the integer part, and adds the epoch timestamp divided by
+# 10**10. It essentially creates a namespace for each device in the interval
+# [device_id, device_id+1[ (i.e. the upper bound is exclusive). Since
+# double-precision floats give us 15 decimal places of precision, we can have
+# seconds-precision timestamps as long as our device IDs are less than 10**5.
+def device_ts_score(device_id: int, ts: datetime.datetime) -> numbers.Real:
+    return device_id + (ts.timestamp() / 10_000_000_000)
+
+
+def device_ts_record_score(record: t.Mapping[str, t.Any]) -> numbers.Real:
+    return device_ts_score(record['device_id'], record['ts'])
+
+
+# Our custom range takes a device ID as well as lower and upper timestamp
+# bounds, and provides lower and upper score bounds for it using the score
+# function from above. When Redis is queried with this range (via the
+# CachedTable), it will yield all the records for the specified device in the
+# specified time frame.
+#
+# The range also defines a set of Postgres parameters that will yield the same
+# records. It is up to the implementor to ensure these parameters and the score
+# bounds match.
+#
+# The range accepts a device ID of None, but this only works when querying
+# Postgres where we can specify more than one filter in the query (useful when
+# loading the cache, where we want all devices). In Redis, we have only the
+# score to filter by, and our score function has locked us into the
+# segmentation of the data by device ID.
+class DeviceTsRange(tc.Range):
+    def __init__(
+            self, device_id: t.Optional[int], ge_isoformat: str,
+            lt_isoformat: str) -> None:
+        self._device_id = device_id
+        self._ge = datetime.datetime.fromisoformat(ge_isoformat)
+        self._lt = datetime.datetime.fromisoformat(lt_isoformat)
+
+    @property
+    def score_ge(self) -> numbers.Real:
+        if self._device_id is None:
+            raise AttributeError('Can\'t represent scores for all devices.')
+        return device_ts_score(self._device_id, self._ge)
+
+    @property
+    def score_lt(self) -> numbers.Real:
+        if self._device_id is None:
+            raise AttributeError('Can\'t represent scores for all devices.')
+        return device_ts_score(self._device_id, self._lt)
+
+    @property
+    def db_args(self) -> tuple[t.Any]:
+        return (self._ge, self._lt, self._device_id is None, self._device_id)
+
+    def covers(self, other: t.Self) -> bool:
+        covers_device_id = (
+            self._device_id is None or self._device_id == other._device_id)
+        covers_time = self._ge <= other._ge and self._lt >= other._lt
+        return covers_device_id and covers_time
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
