@@ -227,15 +227,16 @@ class UuidCodec(Codec):
         return uuid.UUID(bytes=bs)
 
 
-class NaiveDatetimeCodec(Codec):
+class UtcDatetimeCodec(Codec):
     """
-    Codec for timezone-unaware datetimes.
+    Codec for UTC datetimes.
 
     Encodes values as an epoch timestamp in a double precision float, so
     precision is limited to that value range.
 
-    Will encode timezone-aware datetimes, but drop any timezone information
-    during encoding.
+    Only timezone-naive datetimes ones in timezone UTC can be encoded. Any
+    other value results in a ValueError. Naive datetimes are treated as though
+    they are UTC. When decoding datetimes in UTC are returned.
     """
     def __init__(self):
         self._float_codec = Float64Codec()
@@ -243,6 +244,10 @@ class NaiveDatetimeCodec(Codec):
     def encode(self, value: datetime.datetime) -> bytes:
         if not isinstance(value, datetime.datetime):
             raise ValueError('Value is not a datetime.')
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        elif value.tzinfo != datetime.timezone.utc:
+            raise ValueError('Datetime is not in UTC.')
         try:
             return self._float_codec.encode(value.timestamp())
         except Exception as e:
@@ -251,6 +256,7 @@ class NaiveDatetimeCodec(Codec):
     def decode(self, bs: bytes) -> datetime.datetime:
         try:
             timestamp = self._float_codec.decode(bs)
-            return datetime.datetime.fromtimestamp(timestamp)
+            return datetime.datetime.fromtimestamp(
+                timestamp, tz=datetime.timezone.utc)
         except Exception as e:
             raise ValueError('Unable to decode timestamp float.') from e

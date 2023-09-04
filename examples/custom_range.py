@@ -65,7 +65,7 @@ async def main():
             'data_id': tc.IntAsStringCodec(),
             'device_id': tc.IntAsStringCodec(),
             'data': tc.IntAsStringCodec(),
-            'ts': tc.NaiveDatetimeCodec(),},
+            'ts': tc.UtcDatetimeCodec(),},
         score_function=device_ts_record_score,
     )
     async with contextlib.AsyncExitStack() as stack:

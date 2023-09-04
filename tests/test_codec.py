@@ -20,7 +20,6 @@ import math
 import struct
 import sys
 import uuid
-import zoneinfo
 
 import pytest
 
@@ -280,30 +279,35 @@ class TestUuidCodec:
             codec.decode(encoded)
 
 
-class TestNaiveDatetimeCodec:
+class TestUtcDatetimeCodec:
     @pytest.mark.parametrize('ts', [0, 1.5, 1000, -100000, 1700000000])
     def test_encode_decode_identity(self, ts):
-        codec = tc.NaiveDatetimeCodec()
-        value = datetime.datetime.fromtimestamp(ts)
+        codec = tc.UtcDatetimeCodec()
+        value = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
         assert decoded == value
 
-    def test_encodes_tz_aware_but_drops_tz_on_decode(self):
-        codec = tc.NaiveDatetimeCodec()
+    def test_encodes_naive_datetimes_to_utc(self):
+        codec = tc.UtcDatetimeCodec()
         value = datetime.datetime.fromtimestamp(
-            1000, tz=zoneinfo.ZoneInfo('Europe/Berlin'))
+            10000, tz=datetime.timezone.utc).replace(tzinfo=None)
         encoded = codec.encode(value)
-        assert isinstance(encoded, bytes)
-        decoded = codec.decode(encoded)
-        assert decoded == datetime.datetime.fromtimestamp(1000, tz=None)
+        assert codec.decode(encoded) == datetime.datetime.fromtimestamp(
+            10000, tz=datetime.timezone.utc)
 
     @pytest.mark.parametrize('value', [None, 0, datetime.datetime])
-    def test_encode_raises_on_invalid(self, value):
-        codec = tc.NaiveDatetimeCodec()
+    def test_encode_raises_on_non_datetime(self, value):
+        codec = tc.UtcDatetimeCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
+
+    def test_encode_raises_on_non_utc(self):
+        codec = tc.UtcDatetimeCodec()
+        not_utc = datetime.timezone(datetime.timedelta(seconds=3600))
+        with pytest.raises(ValueError):
+            codec.encode(datetime.datetime.fromtimestamp(1000, tz=not_utc))
 
     @pytest.mark.parametrize(
         'encoded', [
@@ -311,6 +315,6 @@ class TestNaiveDatetimeCodec:
             struct.pack('>d', float('inf')),
             struct.pack('>d', float('nan'))])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.NaiveDatetimeCodec()
+        codec = tc.UtcDatetimeCodec()
         with pytest.raises(ValueError):
             codec.decode(encoded)

@@ -23,7 +23,6 @@ from tablecache.codec import (
     Float32Codec,
     Float64Codec,
     FloatAsStringCodec,
-    NaiveDatetimeCodec,
     Nullable,
     SignedInt8Codec,
     SignedInt16Codec,
@@ -34,6 +33,7 @@ from tablecache.codec import (
     UnsignedInt16Codec,
     UnsignedInt32Codec,
     UnsignedInt64Codec,
+    UtcDatetimeCodec,
     UuidCodec,
 )
 from tablecache.db import DbTable, PostgresTable
