@@ -36,6 +36,10 @@ class DbTable(abc.ABC):
     ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
         raise NotImplementedError
 
+    @abc.abstractmethod
+    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+        raise NotImplementedError
+
 
 class PostgresTable(DbTable):
     """
