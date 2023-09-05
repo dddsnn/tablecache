@@ -67,6 +67,11 @@ class RedisStorage:
 
 
 class StorageTable(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def table_name(self) -> str:
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def clear(self) -> None:
         raise NotImplementedError
@@ -140,10 +145,14 @@ class RedisTable(StorageTable):
             score_function or op.itemgetter(primary_key_name))
         self._score_codec = codec.FloatAsStringCodec()
 
+    @property
+    def table_name(self) -> str:
+        return self._table_name
+
     async def clear(self) -> None:
         """Delete all data belonging to this table."""
         await self._storage.conn.delete(
-            f'{self._table_name}:rows', f'{self._table_name}:key_scores')
+            f'{self.table_name}:rows', f'{self.table_name}:key_scores')
 
     async def put_record(self, record: ca.Mapping[str, t.Any]) -> None:
         """
@@ -166,11 +175,11 @@ class RedisTable(StorageTable):
         encoded_primary_key = await self._maybe_delete_old_record(primary_key)
         score = self._score_function(record)
         await self._storage.conn.hset(
-            f'{self._table_name}:key_scores', encoded_primary_key,
+            f'{self.table_name}:key_scores', encoded_primary_key,
             self._score_codec.encode(score))
         encoded_record = self._row_codec.encode(record)
         await self._storage.conn.zadd(
-            f'{self._table_name}:rows',
+            f'{self.table_name}:rows',
             mapping=PairAsItems(memoryview(encoded_record), score))
 
     async def _maybe_delete_old_record(self, primary_key):
@@ -178,7 +187,7 @@ class RedisTable(StorageTable):
             encoded_primary_key, old_encoded_record, _ = await self._get(
                 primary_key)
             await self._storage.conn.zrem(
-                f'{self._table_name}:rows', old_encoded_record)
+                f'{self.table_name}:rows', old_encoded_record)
         except KeyError:
             encoded_primary_key = self._encode_primary_key(primary_key)
         return encoded_primary_key
@@ -192,13 +201,13 @@ class RedisTable(StorageTable):
     async def _get(self, primary_key):
         encoded_primary_key = self._encode_primary_key(primary_key)
         encoded_score = await self._storage.conn.hget(
-            f'{self._table_name}:key_scores', encoded_primary_key)
+            f'{self.table_name}:key_scores', encoded_primary_key)
         if encoded_score is None:
             raise KeyError(
                 f'No record with {self._primary_key_name}={primary_key}.')
         score = self._score_codec.decode(encoded_score)
         encoded_records = await self._storage.conn.zrange(
-            f'{self._table_name}:rows', score, score, byscore=True)
+            f'{self.table_name}:rows', score, score, byscore=True)
         for encoded_record in encoded_records:
             decoded_record = self._row_codec.decode(encoded_record)
             if decoded_record[self._primary_key_name] == primary_key:
@@ -234,7 +243,7 @@ class RedisTable(StorageTable):
         # Prefixing the end of the range with '(' is the Redis way of saying we
         # want the interval to be open on that end.
         encoded_records = await self._storage.conn.zrange(
-            f'{self._table_name}:rows', range.score_ge, f'({range.score_lt}',
+            f'{self.table_name}:rows', range.score_ge, f'({range.score_lt}',
             byscore=True)
         for encoded_record in encoded_records:
             yield self._row_codec.decode(encoded_record)

@@ -56,3 +56,7 @@ query.
 
 At the moment, the Redis storage supports only one table, which takes up the
 entire keyspace of the connected Redis instance.
+
+## Logging
+
+The library logs messages with logger names in the `tablecache` namespace.

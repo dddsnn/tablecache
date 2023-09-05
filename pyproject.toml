@@ -6,3 +6,4 @@ minversion = "7.4"
 addopts = "-v -l"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+log_level = "INFO"

@@ -52,6 +52,7 @@ class MockDbTable:
 class MockStorageTable:
     def __init__(self, primary_key_name):
         self.primary_key_name = primary_key_name
+        self.table_name = 'mock table'
         self.records = {}
 
     async def clear(self):

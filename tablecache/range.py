@@ -87,6 +87,9 @@ class AllRange(Range):
 
     Defines no DB query arguments.
     """
+    def __repr__(self):
+        return type(self).__name__
+
     @property
     def score_ge(self) -> numbers.Real:
         return float('-inf')
@@ -114,6 +117,10 @@ class NumberRange(Range):
     def __init__(self, ge: numbers.Real, lt: numbers.Real) -> None:
         self._ge = ge
         self._lt = lt
+
+    def __repr__(self):
+        return (
+            f'{type(self).__name__} in the interval [{self._ge}, {self._lt}[')
 
     @property
     def score_ge(self) -> numbers.Real:

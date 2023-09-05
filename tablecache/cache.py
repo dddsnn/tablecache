@@ -16,12 +16,14 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import collections.abc as ca
+import logging
 import typing as t
 
 import tablecache.db as db
 import tablecache.storage as storage
 import tablecache.range as rng
 
+_logger = logging.getLogger(__name__)
 
 class CachedTable:
     """
@@ -51,6 +53,9 @@ class CachedTable:
         Loads all records matching the configured cache range. Clears the
         storage first.
         """
+        _logger.info(
+            f'Clearing and loading {self._storage_table.table_name} in '
+            f'{self._cache_range}.')
         await self._storage_table.clear()
         async for record in self._db_table.get_record_range(self._cache_range):
             await self._storage_table.put_record(record)
@@ -107,6 +112,7 @@ class CachedTable:
         self._dirty_keys.add(primary_key)
 
     async def _refresh_dirty(self) -> None:
+        _logger.info(f'Refreshing {len(self._dirty_keys)} dirty keys.')
         async for record in self._db_table.get_records(self._dirty_keys):
             await self._storage_table.put_record(record)
         self._dirty_keys.clear()
