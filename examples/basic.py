@@ -48,7 +48,7 @@ async def main():
     postgres_pool = asyncpg.create_pool(
         min_size=0, max_size=1,
         dsn='postgres://postgres:@localhost:5432/postgres')
-    redis_storage = tc.RedisStorage()
+    redis_conn = redis.Redis()
     db_table = tc.PostgresTable(
         postgres_pool, query_range_string, query_some_string)
     # We specify a RedisTable which can accept records of the shape in our
@@ -61,7 +61,7 @@ async def main():
     # values (by themselves, normal codecs can't store nulls). Note that only
     # attributes for which a codec has been specified are cached.
     storage_table = tc.RedisTable(
-        redis_storage,
+        redis_conn,
         table_name='users_cities',
         primary_key_name='user_id',
         attribute_codecs={
@@ -71,20 +71,20 @@ async def main():
             'city_name': tc.StringCodec(),},
     )
     async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_pool)
-        await setup_example_dbs(postgres_pool)
+        await setup_example_dbs(redis_conn, postgres_pool)
         table = tc.CachedTable(db_table, storage_table)
         await table.load()
         # After creating a CachedTable with our DB and storage tables and
         # loading it, we can query it, hitting the cache rather than the DB.
         print(f'User 1 in Redis: {await table.get_record(1)}')
         print(f'User 2 in Redis: {await table.get_record(2)}')
+    await redis_conn.close()
 
 
-async def setup_example_dbs(pool):
-    await redis.Redis().flushall()
-    await pool.execute(
+async def setup_example_dbs(redis_conn, postgres_pool):
+    await redis_conn.flushall()
+    await postgres_pool.execute(
         '''
         DROP SCHEMA public CASCADE;
         CREATE SCHEMA public;

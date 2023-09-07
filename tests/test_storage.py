@@ -52,9 +52,10 @@ async def wait_for_redis(redis_host):
 
 
 @pytest.fixture(scope='session')
-async def redis_storage(wait_for_redis, redis_host):
-    async with tc.RedisStorage(host=redis_host) as redis_storage:
-        yield redis_storage
+async def conn(wait_for_redis, redis_host):
+    conn = redis.Redis(host=redis_host)
+    yield conn
+    await conn.close()
 
 
 async def collect_async_iter(i):
@@ -74,19 +75,18 @@ class FailCodec(tc.Codec):
 
 class TestRedisTable:
     @pytest.fixture(autouse=True)
-    async def flush_db(self, redis_storage):
-        await redis_storage.conn.flushdb()
+    async def flush_db(self, conn):
+        await conn.flushdb()
 
     @pytest.fixture
-    def make_table(self, redis_storage):
+    def make_table(self, conn):
         def factory(
                 table_name='table', primary_key_name='pk',
                 attribute_codecs=None, score_function=None):
             attribute_codecs = attribute_codecs or {
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
             return tc.RedisTable(
-                redis_storage, table_name=table_name,
-                primary_key_name=primary_key_name,
+                conn, table_name=table_name, primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs,
                 score_function=score_function)
 
@@ -160,19 +160,19 @@ class TestRedisTable:
         with pytest.raises(tc.CodingError):
             await table.put_record({'pk': 1, 's': 's1'})
 
-    async def test_put_removes_old_value(self, table, redis_storage):
-        assert await redis_storage.conn.zcard('table:rows') == 0
+    async def test_put_removes_old_value(self, table, conn):
+        assert await conn.zcard('table:rows') == 0
         await table.put_record({'pk': 1, 's': 'a'})
         await table.put_record({'pk': 1, 's': 'b'})
         await table.put_record({'pk': 1, 's': 'aaaaaaaaaaaaaaaaaaaaaaaa'})
         await table.put_record({'pk': 1, 's': 'bbbbbbbbbbbbbbbbbbbbbbbb'})
-        assert await redis_storage.conn.zcard('table:rows') == 1
+        assert await conn.zcard('table:rows') == 1
         await table.put_record({'pk': 1, 's': 'new'})
         assert_that(await table.get_record(1), has_entries(pk=1, s='new'))
-        assert await redis_storage.conn.zcard('table:rows') == 1
+        assert await conn.zcard('table:rows') == 1
 
     async def test_put_doesnt_overwrite_other_records_with_same_score(
-            self, make_table, redis_storage):
+            self, make_table, conn):
         table = make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 'i': tc.IntAsStringCodec()},
@@ -182,7 +182,7 @@ class TestRedisTable:
         await table.put_record({'pk': 1, 'i': 15})
         assert_that(await table.get_record(1), has_entries(pk=1, i=15))
         assert_that(await table.get_record(2), has_entries(pk=2, i=10))
-        assert await redis_storage.conn.zcard('table:rows') == 2
+        assert await conn.zcard('table:rows') == 2
 
     async def test_get_raises_on_nonexistent(self, table):
         with pytest.raises(KeyError):
@@ -208,16 +208,16 @@ class TestRedisTable:
             await table.get_record(1)
 
     async def test_get_raises_on_duplicate_attribute_ids(
-            self, make_table, redis_storage):
+            self, make_table, conn):
         table = make_table(score_function=lambda _: 0)
         await table.put_record({'pk': 1, 's': 's1'})
-        row = (await redis_storage.conn.zrange('table:rows', 0, -1))[0]
+        row = (await conn.zrange('table:rows', 0, -1))[0]
         s_id_index = row.index(b's1') - 3
         assert int.from_bytes(row[s_id_index + 1:s_id_index + 3]) == 2
         s_id = row[s_id_index:s_id_index + 1]
         false_row = row + s_id + (6).to_bytes(length=2) + b'foobar'
-        await redis_storage.conn.delete('table:rows')
-        await redis_storage.conn.zadd('table:rows', {false_row: 0})
+        await conn.delete('table:rows')
+        await conn.zadd('table:rows', {false_row: 0})
         with pytest.raises(tc.CodingError):
             await table.get_record(1)
 
@@ -231,7 +231,7 @@ class TestRedisTable:
         with pytest.raises(tc.CodingError):
             await table.get_record(1)
 
-    async def test_uses_custom_codec(self, make_table, redis_storage):
+    async def test_uses_custom_codec(self, make_table, conn):
         class WeirdTupleCodec(tc.Codec):
             def encode(self, t):
                 return repr(t).encode()

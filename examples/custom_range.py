@@ -54,11 +54,11 @@ async def main():
     postgres_pool = asyncpg.create_pool(
         min_size=0, max_size=1,
         dsn='postgres://postgres:@localhost:5432/postgres')
-    redis_storage = tc.RedisStorage()
+    redis_conn = redis.Redis()
     db_table = tc.PostgresTable(
         postgres_pool, query_all_string, query_some_string)
     storage_table = tc.RedisTable(
-        redis_storage,
+        redis_conn,
         table_name='device_data',
         primary_key_name='data_id',
         attribute_codecs={
@@ -69,9 +69,8 @@ async def main():
         score_function=device_ts_record_score,
     )
     async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(redis_storage)
         await stack.enter_async_context(postgres_pool)
-        await setup_example_dbs(postgres_pool)
+        await setup_example_dbs(redis_conn, postgres_pool)
         # We're loading the table and specifying that records in the range from
         # 2023-01-01T12:00:00 to 2023-01-03T12:00:00 should be loaded (so there
         # are records before and after this range that aren't going into the
@@ -101,11 +100,12 @@ async def main():
         async for record in table.get_record_range(DeviceTsRange(
                 2, '2023-01-01', '2023-01-05')):
             print(record)
+        await redis_conn.close()
 
 
-async def setup_example_dbs(pool):
-    await redis.Redis().flushall()
-    await pool.execute(
+async def setup_example_dbs(redis_conn, postgres_pool):
+    await redis_conn.flushall()
+    await postgres_pool.execute(
         '''
         DROP SCHEMA public CASCADE;
         CREATE SCHEMA public;

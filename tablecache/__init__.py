@@ -37,6 +37,5 @@ from tablecache.codec import (
     UuidCodec,
 )
 from tablecache.db import DbTable, PostgresTable
-from tablecache.storage import (
-    CodingError, RedisStorage, RedisTable, StorageTable)
+from tablecache.storage import CodingError, RedisTable, StorageTable
 from tablecache.range import AllRange, NumberRange, Range

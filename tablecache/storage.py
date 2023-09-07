@@ -17,7 +17,6 @@
 
 import abc
 import collections.abc as ca
-import functools
 import numbers
 import operator as op
 import typing as t
@@ -32,38 +31,6 @@ class CodingError(Exception):
     """
     Raised when any error relating to en- or decoding occurs.
     """
-
-
-class RedisStorage:
-    """
-    Redis connection proxy.
-
-    Provides a connection to clients. Connects on async context manager enter,
-    disconnects on exit.
-    """
-    def __init__(self, **connect_kwargs: ca.Mapping[str, t.Any]) -> None:
-        """
-        :param connect_kwargs: Keyword arguments that will be passed to
-            redis.asyncio.Redis().
-        """
-        self._conn_factory = functools.partial(redis.Redis, **connect_kwargs)
-
-    async def __aenter__(self):
-        self._conn = self._conn_factory()
-        return self
-
-    async def __aexit__(self, *_):
-        await self._conn.close()
-        del self._conn
-        return False
-
-    @property
-    def conn(self) -> redis.Redis:
-        try:
-            return self._conn
-        except AttributeError as e:
-            raise AttributeError(
-                'You have to connect the storage before using it.') from e
 
 
 class StorageTable(abc.ABC):
@@ -93,8 +60,8 @@ class StorageTable(abc.ABC):
 
 class RedisTable(StorageTable):
     def __init__(
-        self, redis_storage: RedisStorage, *, table_name: str,
-        primary_key_name: str, attribute_codecs: ca.Mapping[str, codec.Codec],
+        self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
+        attribute_codecs: ca.Mapping[str, codec.Codec],
         score_function: t.Optional[t.Callable[[t.Mapping[str, t.Any]],
                                               numbers.Real]] = None
     ) -> None:
@@ -116,7 +83,8 @@ class RedisTable(StorageTable):
         matching elements have to be iterated here, which implies that getting
         by primary key is slow if there are many elements with the same score.
 
-        :param redis_storage: A RedisStorage that provides a connection.
+        :param conn: An async Redis connection. The connection will not be
+            closed and needs to be cleaned up from the outside.
         :param table_name: The name of the table, used as a prefix for keys in
             Redis. Must be unique within the Redis instance.
         :param primary_key_name: The name of the attribute to be used as
@@ -133,7 +101,7 @@ class RedisTable(StorageTable):
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
             raise ValueError('Attribute names must be strings.')
-        self._storage = redis_storage
+        self._conn = conn
         self._table_name = table_name
         self._primary_key_name = primary_key_name
         try:
@@ -151,7 +119,7 @@ class RedisTable(StorageTable):
 
     async def clear(self) -> None:
         """Delete all data belonging to this table."""
-        await self._storage.conn.delete(
+        await self._conn.delete(
             f'{self.table_name}:rows', f'{self.table_name}:key_scores')
 
     async def put_record(self, record: ca.Mapping[str, t.Any]) -> None:
@@ -174,11 +142,11 @@ class RedisTable(StorageTable):
                 f'Record {record} is missing a primary key.') from e
         encoded_primary_key = await self._maybe_delete_old_record(primary_key)
         score = self._score_function(record)
-        await self._storage.conn.hset(
+        await self._conn.hset(
             f'{self.table_name}:key_scores', encoded_primary_key,
             self._score_codec.encode(score))
         encoded_record = self._row_codec.encode(record)
-        await self._storage.conn.zadd(
+        await self._conn.zadd(
             f'{self.table_name}:rows',
             mapping=PairAsItems(memoryview(encoded_record), score))
 
@@ -186,7 +154,7 @@ class RedisTable(StorageTable):
         try:
             encoded_primary_key, old_encoded_record, _ = await self._get(
                 primary_key)
-            await self._storage.conn.zrem(
+            await self._conn.zrem(
                 f'{self.table_name}:rows', old_encoded_record)
         except KeyError:
             encoded_primary_key = self._encode_primary_key(primary_key)
@@ -200,13 +168,13 @@ class RedisTable(StorageTable):
 
     async def _get(self, primary_key):
         encoded_primary_key = self._encode_primary_key(primary_key)
-        encoded_score = await self._storage.conn.hget(
+        encoded_score = await self._conn.hget(
             f'{self.table_name}:key_scores', encoded_primary_key)
         if encoded_score is None:
             raise KeyError(
                 f'No record with {self._primary_key_name}={primary_key}.')
         score = self._score_codec.decode(encoded_score)
-        encoded_records = await self._storage.conn.zrange(
+        encoded_records = await self._conn.zrange(
             f'{self.table_name}:rows', score, score, byscore=True)
         for encoded_record in encoded_records:
             decoded_record = self._row_codec.decode(encoded_record)
@@ -242,7 +210,7 @@ class RedisTable(StorageTable):
         """
         # Prefixing the end of the range with '(' is the Redis way of saying we
         # want the interval to be open on that end.
-        encoded_records = await self._storage.conn.zrange(
+        encoded_records = await self._conn.zrange(
             f'{self.table_name}:rows', range.score_ge, f'({range.score_lt}',
             byscore=True)
         for encoded_record in encoded_records:
