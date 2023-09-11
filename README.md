@@ -1,6 +1,6 @@
 # tablecache
 
-Dead simple cache for unwieldily joined relations.
+Simple cache for unwieldily joined relations.
 
 ## Copyright and license
 

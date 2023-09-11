@@ -24,7 +24,7 @@ import typing as t
 import redis.asyncio as redis
 
 import tablecache.codec as codec
-import tablecache.range as rng
+import tablecache.subset as ss
 
 
 class CodingError(Exception):
@@ -52,9 +52,18 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get_record_range(
+    async def get_record_subset(
             self, score_min: numbers.Real, score_max: numbers.Real
     ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def delete_record(self, primary_key: t.Any) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def delete_record_subset(
+            self, score_intervals: ca.Iterable[ss.Interval]) -> None:
         raise NotImplementedError
 
 
@@ -74,10 +83,10 @@ class RedisTable(StorageTable):
         codec is specified are stored.
 
         Each record is also associated with a score, which can be used to get
-        many elements with scores in a given range.
+        many elements with scores in a given subset.
 
         Records are serialized to byte strings and stored in Redis as elements
-        of a sorted set. This is used for fast queries by score range. For
+        of a sorted set. This is used for fast queries by score subset. For
         queries by primary key, a spearate hash stores the score for each
         element used to find elements in the set with matching scores. All
         matching elements have to be iterated here, which implies that getting
@@ -94,9 +103,10 @@ class RedisTable(StorageTable):
             that are able to en-/decode the corresponding values. Only
             attributes present here are stored.
         :param score_function: A function that extracts a score from a record.
-            Defaults to the primary key, which works fine as long as that is a
-            number. Otherwise, the hash of the primary key may be a good
-            option.
+            A record's score must not change, even if the record is changed,
+            i.e. it must be derived only from immutable fields. Defaults to the
+            primary key, which works fine as long as that is a number.
+            Otherwise, the hash of the primary key may be a good option.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
@@ -180,6 +190,11 @@ class RedisTable(StorageTable):
             decoded_record = self._row_codec.decode(encoded_record)
             if decoded_record[self._primary_key_name] == primary_key:
                 return encoded_primary_key, encoded_record, decoded_record
+        # A score exists for that key, but no record with that score. This
+        # happens when deleting ranges, where we don't have access to the keys
+        # belonging to the scores we delete. Clean this up here.
+        await self._conn.hdel(
+            f'{self.table_name}:key_scores', encoded_primary_key)
         raise KeyError(
             f'No record with {self._primary_key_name}={primary_key}.')
 
@@ -197,24 +212,48 @@ class RedisTable(StorageTable):
         _, _, decoded_record = await self._get(primary_key)
         return decoded_record
 
-    async def get_record_range(
-            self, range: rng.Range) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+    async def get_record_subset(
+            self,
+            subset: ss.Subset) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
         """
-        Get records with scores within a range.
+        Get records with scores within a subset.
 
         Asynchronously iterates over all records with a score within the given
-        range. The lower bound is inclusive, the upper bound exclusive, so a
-        record with score s is yielded if range.score_ge <= s < range.score_lt.
+        subset. The lower bound is inclusive, the upper bound exclusive, so a
+        record with score s is yielded if there is an interval i in the
+        subset's score_intervals with s in i.
 
         No particular order is guaranteed.
         """
         # Prefixing the end of the range with '(' is the Redis way of saying we
         # want the interval to be open on that end.
-        encoded_records = await self._conn.zrange(
-            f'{self.table_name}:rows', range.score_ge, f'({range.score_lt}',
-            byscore=True)
-        for encoded_record in encoded_records:
-            yield self._row_codec.decode(encoded_record)
+        for interval in subset.score_intervals:
+            encoded_records = await self._conn.zrange(
+                f'{self.table_name}:rows', interval.ge, f'({interval.lt}',
+                byscore=True)
+            for encoded_record in encoded_records:
+                yield self._row_codec.decode(encoded_record)
+
+    async def delete_record(self, primary_key: t.Any) -> None:
+        encoded_primary_key = self._encode_primary_key(primary_key)
+        encoded_score = await self._conn.hget(
+            f'{self.table_name}:key_scores', encoded_primary_key)
+        if encoded_score is None:
+            raise KeyError(
+                f'No record with {self._primary_key_name}={primary_key}.')
+        await self._conn.hdel(
+            f'{self.table_name}:key_scores', encoded_primary_key)
+        num_removed = await self._conn.zremrangebyscore(
+            f'{self.table_name}:rows', encoded_score, encoded_score)
+        if not num_removed:
+            raise KeyError(
+                f'No record with {self._primary_key_name}={primary_key}.')
+
+    async def delete_record_subset(
+            self, score_intervals: ca.Iterable[ss.Interval]) -> None:
+        for interval in score_intervals:
+            await self._conn.zremrangebyscore(
+                f'{self.table_name}:rows', interval.ge, f'({interval.lt}')
 
 
 class PairAsItems:

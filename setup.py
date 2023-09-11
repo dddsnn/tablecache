@@ -30,7 +30,7 @@ with (pathlib.Path(__file__).parent / 'README.md').absolute().open() as f:
 
 setuptools.setup(
     name='tablecache', version='2.1.0',
-    description='Dead simple cache for unwieldily joined relations.',
+    description='Simple cache for unwieldily joined relations.',
     long_description_content_type='text/markdown', long_description=readme,
     author="Marc Lehmann", author_email="marc.lehmann@gmx.de",
     url='https://github.com/dddsnn/tablecache', python_requires='>=3.11',

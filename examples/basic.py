@@ -32,11 +32,11 @@ import tablecache as tc
 # where the join has a unique key. We want to store the result of the join in a
 # fast storage (Redis).
 async def main():
-    # We define 2 query strings: one that queries for a range (subset) of the
-    # join (in our case the entire result set), and one that filters out rows
-    # with specific primary keys. These query strings are passed into a
+    # We define 2 query strings: one that queries for a subset of the join (in
+    # our case the entire result set), and one that filters out rows with
+    # specific primary keys. These query strings are passed into a
     # PostgresTable to represent our access to the data.
-    query_range_string = '''
+    query_subset_string = '''
         SELECT
             uc.*, u.name AS user_name, u.nickname AS user_nickname,
             c.name AS city_name
@@ -44,13 +44,13 @@ async def main():
             users u
             JOIN users_cities uc USING (user_id)
             JOIN cities c USING (city_id)'''
-    query_some_string = f'{query_range_string} WHERE uc.user_id = ANY ($1)'
+    query_pks_string = f'{query_subset_string} WHERE uc.user_id = ANY ($1)'
     postgres_pool = asyncpg.create_pool(
         min_size=0, max_size=1,
         dsn='postgres://postgres:@localhost:5432/postgres')
     redis_conn = redis.Redis()
     db_table = tc.PostgresTable(
-        postgres_pool, query_range_string, query_some_string)
+        postgres_pool, query_subset_string, query_pks_string)
     # We specify a RedisTable which can accept records of the shape in our
     # Postgres table. We need to specify a name for the table (used to create a
     # namespace within Redis), the name of the primary key column, as well as a
