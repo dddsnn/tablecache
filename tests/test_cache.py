@@ -125,12 +125,8 @@ class TestCachedTable:
 
     @pytest.fixture
     def make_table(self, db_table, storage_table):
-        def factory(
-                cached_subset_class=ft.partial(tc.All, 'pk'),
-                *cached_subset_args):
-            return tc.CachedTable(
-                db_table, storage_table, cached_subset_class,
-                *cached_subset_args)
+        def factory(cached_subset_class=ft.partial(tc.All, 'pk')):
+            return tc.CachedTable(db_table, storage_table, cached_subset_class)
 
         return factory
 
@@ -147,7 +143,7 @@ class TestCachedTable:
 
     async def test_get_record_raises_if_not_loaded(self, table, db_table):
         db_table.records = {1: {'pk': 1, 'k': 'v1'}, 2: {'pk': 2, 'k': 'v2'}}
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError):
             await table.get_record(1)
 
     async def test_get_record_raises_on_nonexistent(self, table, db_table):
@@ -165,10 +161,9 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(6)]))
 
     async def test_get_record_subset_only_some(self, make_table, db_table):
-        table = make_table(
-            ft.partial(tc.NumberRangeSubset, 'pk'), *_inf_to_inf)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
-        await table.load()
+        await table.load(*_inf_to_inf)
         assert_that(
             await collect_async_iter(table.get_record_subset(2, 4)),
             contains_inanyorder(
@@ -176,9 +171,9 @@ class TestCachedTable:
 
     async def test_loads_only_specified_subset(
             self, make_table, db_table, storage_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'), 2, 4)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
-        await table.load()
+        await table.load(2, 4)
         assert_that(
             await collect_async_iter(
                 storage_table.get_record_subset(
@@ -187,32 +182,34 @@ class TestCachedTable:
 
     async def test_load_observes_loaded_records(self, make_table, db_table):
         subset_class = ft.partial(AdjustableNumberRangeSubset, 'pk')
-        table = make_table(subset_class, 2, 4)
+        table = make_table(subset_class)
         db_table.records = {i: {'pk': i} for i in range(6)}
-        await table.load()
+        await table.load(2, 4)
         expected_observations = await collect_async_iter(
             db_table.get_record_subset(subset_class(2, 4)))
         assert_that(
-            table._cached_subset.observe.call_args_list,
+            table.cached_subset.observe.call_args_list,
             contains_inanyorder(*[um.call(r) for r in expected_observations]))
 
-    async def test_load_clears_storage_first(self, table, db_table):
+    async def test_load_clears_storage_first(
+            self, table, db_table, storage_table):
         db_table.records = {1: {'pk': 1, 'k': 'v1'}}
+        storage_table.records = {2: {'pk': 2, 'k': 'v2'}}
         await table.load()
         assert_that(await table.get_record(1), has_entries(k='v1'))
         with pytest.raises(KeyError):
             await table.get_record(2)
-        db_table.records = {2: {'pk': 2, 'k': 'v2'}}
+
+    async def test_load_raises_if_already_loaded(self, table):
         await table.load()
-        with pytest.raises(KeyError):
-            await table.get_record(1)
-        assert_that(await table.get_record(2), has_entries(k='v2'))
+        with pytest.raises(ValueError):
+            await table.load()
 
     async def test_get_record_subset_returns_db_state_if_subset_not_cached(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'), 2, 4)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
-        await table.load()
+        await table.load(2, 4)
         assert_that(
             await collect_async_iter(table.get_record_subset(2, 5)),
             contains_inanyorder(
@@ -220,9 +217,9 @@ class TestCachedTable:
 
     async def test_get_record_also_checks_db_in_case_not_in_cached_subset(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'), 2, 4)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
-        await table.load()
+        await table.load(2, 4)
         assert_that(await table.get_record(1), has_entries(pk=1, source='db'))
 
     async def test_get_record_doesnt_check_db_if_all_in_cache(
@@ -249,10 +246,9 @@ class TestCachedTable:
 
     async def test_get_record_subset_refreshes_invalid_keys(
             self, make_table, db_table):
-        table = make_table(
-            ft.partial(tc.NumberRangeSubset, 'pk'), *_inf_to_inf)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
-        await table.load()
+        await table.load(*_inf_to_inf)
         db_table.records = {1: {'pk': 1, 'k': 'b1'}}
         await table.invalidate_record(1)
         assert_that(
@@ -270,10 +266,9 @@ class TestCachedTable:
 
     async def test_get_record_subset_only_refreshes_once(
             self, make_table, db_table):
-        table = make_table(
-            ft.partial(tc.NumberRangeSubset, 'pk'), *_inf_to_inf)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
-        await table.load()
+        await table.load(*_inf_to_inf)
         db_table.records = {1: {'pk': 1, 'k': 'b1'}}
         await table.invalidate_record(1)
         await collect_async_iter(table.get_record_subset(1, 2))
@@ -292,10 +287,9 @@ class TestCachedTable:
 
     async def test_get_record_subset_deletes_invalid_keys(
             self, make_table, db_table):
-        table = make_table(
-            ft.partial(tc.NumberRangeSubset, 'pk'), *_inf_to_inf)
+        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i, 'k': f'a{i}'} for i in range(3)}
-        await table.load()
+        await table.load(*_inf_to_inf)
         db_table.records = {0: {'pk': 0, 'k': 'a0'}, 2: {'pk': 2, 'k': 'a2'}}
         await table.invalidate_record(1)
         assert_that(
@@ -314,9 +308,9 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_prunes_old_data(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'), 0, 4)
+        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
-        await table.load()
+        await table.load(0, 4)
         assert_that(
             await collect_async_iter(table.get_record_subset(0, 4)),
             contains_inanyorder(
@@ -334,9 +328,9 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_loads_new_subset(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'), 0, 2)
+        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
-        await table.load()
+        await table.load(0, 2)
         assert_that(
             await collect_async_iter(table.get_record_subset(0, 2)),
             contains_inanyorder(
@@ -350,9 +344,9 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_doesnt_introduce_duplicates(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'), 0, 2)
+        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
-        await table.load()
+        await table.load(0, 2)
         await table.adjust_cached_subset(
             prune_ge=-1, prune_lt=0, new_ge=0, new_lt=4)
         assert_that(
@@ -362,9 +356,9 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_observes_new_records(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'), 0, 2)
+        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
-        await table.load()
+        await table.load(0, 2)
         await table.adjust_cached_subset(
             prune_ge=-1, prune_lt=0, new_ge=0, new_lt=4)
         expected_observations = await collect_async_iter(

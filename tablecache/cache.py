@@ -31,48 +31,65 @@ class CachedTable:
 
     Maintains records from a relatively slow storage (db_table) in a relatively
     fast one (storage_table). Not thread-safe.
+
+    The cache has to be loaded with load() before anything meaningful can
+    happen. Many methods will raise a ValueError if this wasn't done. Calling
+    load() more than once also raises a ValueError.
     """
     def __init__(
             self, db_table: db.DbTable, storage_table: storage.StorageTable,
-            cached_subset_class: type[ss.CachedSubset], *cached_subset_args:
-        list[t.Any], **cached_subset_kwargs: dict[str, t.Any]) -> None:
+            cached_subset_class: type[ss.CachedSubset]) -> None:
         """
-        :param cached_subset_class: The type of subset to use. It's
-            instantiated on construction with *cached_subset_args and
-            **cached_subset_kwargs to form the subset that is cached. This is
-            also used to keep track of which values within the subset are
-            actually currently cached. Other methods that need subsets (like
-            get_record_subset()) similarly take subset arguments and then use
-            this class to instantiate one. This implies that the type of subset
-            chosen here determines how the cache can be queried, and in
-            particular that using the convenient All subset means you can only
-            get individual records by primary key, or all records.
+        :param cached_subset_class: The type of subset to use. This class is
+            used in various methods that deal with subsets, like load() and
+            get_record_subset(). These methods take args and kwargs to
+            instantiate this class. This implies that the type of subset chosen
+            here determines how the cache can be queried, and in particular
+            that using the convenient All subset means you can only get
+            individual records by primary key, or all records. The subset
+            instantiated by load() is also used to keep track of which values
+            within the subset are actually currently cached.
         """
         self._db_table = db_table
         self._storage_table = storage_table
         self._cached_subset_class = cached_subset_class
-        self._cached_subset = cached_subset_class(
-            *cached_subset_args, **cached_subset_kwargs)
+        self._cached_subset = None
         self._dirty_keys = set()
         self._dirty_scores = set()
 
-    async def load(self) -> None:
+    @property
+    def cached_subset(self) -> ss.CachedSubset:
+        """The subset currently cached."""
+        if not self._cached_subset:
+            raise ValueError('Cache has not been loaded.')
+        return self._cached_subset
+
+    async def load(
+            self, *cached_subset_args: list[t.Any],
+            **cached_subset_kwargs: dict[str, t.Any]) -> None:
         """
         Load all relevant data from the DB into storage.
 
-        Loads all records matching the configured cache subset. Clears the
-        storage first.
+        Instantiates a cached subset from the configured class with the given
+        args and kwargs and loads all records matching it. Clears the storage
+        first.
+
+        Raises a ValueError if the cache was already loaded.
         """
+        if self._cached_subset:
+            raise ValueError('Cache has already been loaded.')
+        self._cached_subset = self._cached_subset_class(
+            *cached_subset_args, **cached_subset_kwargs)
         _logger.info(
-            f'Clearing and loading {self._cached_subset} of table '
+            f'Clearing and loading {self.cached_subset} of table '
             f'{self._storage_table.table_name}.')
         await self._storage_table.clear()
-        await self._load_subset(self._cached_subset)
+        await self._load_subset(self.cached_subset)
 
     async def _load_subset(self, subset: ss.Subset) -> None:
         async for record in self._db_table.get_record_subset(subset):
             await self._storage_table.put_record(record)
-            self._cached_subset.observe(record)
+            self.cached_subset.observe(record)
 
     async def adjust_cached_subset(
             self, **subset_adjust_kwargs: dict[str, t.Any]) -> None:
@@ -82,7 +99,7 @@ class CachedTable:
         Passes through the arguments to the cached subset's adjust(), and then
         deletes old and loads new records according to the result.
         """
-        expire_intervals, new_subset = self._cached_subset.adjust(
+        expire_intervals, new_subset = self.cached_subset.adjust(
             **subset_adjust_kwargs)
         await self._storage_table.delete_record_subset(expire_intervals)
         await self._load_subset(new_subset)
@@ -108,7 +125,7 @@ class CachedTable:
         try:
             return await self._storage_table.get_record(primary_key)
         except KeyError:
-            if isinstance(self._cached_subset, ss.All):
+            if isinstance(self.cached_subset, ss.All):
                 raise
             return await self._db_table.get_record(primary_key)
 
@@ -127,7 +144,7 @@ class CachedTable:
         subset = self._cached_subset_class(*subset_args, **subset_kwargs)
         if any(s in subset for s in self._dirty_scores):
             await self._refresh_dirty()
-        if self._cached_subset.covers(subset):
+        if self.cached_subset.covers(subset):
             source = self._storage_table
         else:
             source = self._db_table
@@ -153,7 +170,7 @@ class CachedTable:
                 f'Ignoring attempt to invalidate primary key {primary_key} '
                 'which doesn\'t exist.')
             return
-        score = self._cached_subset.record_score(record)
+        score = self.cached_subset.record_score(record)
         self._dirty_scores.add(score)
         self._dirty_keys.add(primary_key)
 
