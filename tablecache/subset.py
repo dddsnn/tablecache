@@ -92,8 +92,9 @@ class CachedSubset(Subset):
     adjust() in an implementation-specific way (e.g. expire old values, get new
     ones).
     """
+    @classmethod
     @abc.abstractmethod
-    def record_score(self, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
         """Calculate a record's score."""
         raise NotImplementedError
 
@@ -136,16 +137,26 @@ class CachedSubset(Subset):
         raise NotImplementedError
 
 
-class All(CachedSubset):
+class CachedSubsetWithPrimaryKey(CachedSubset):
+    """Convenience subclass providing a primary key name class member."""
+    _primary_key_name = 'primary_key_placeholder'
+
+    @classmethod
+    def with_primary_key(cls, primary_key_name: str) -> type[t.Self]:
+        """Return a subclass with given primary key name."""
+        class WithPrimaryKey(cls):
+            _primary_key_name = primary_key_name
+
+        return WithPrimaryKey
+
+
+class All(CachedSubsetWithPrimaryKey):
     """
     A subset that actually represents the whole, matching everything.
 
     Scores are the hash of the primary key. Defines no DB query arguments and
     is not adjustable.
     """
-    def __init__(self, primary_key_name: str) -> None:
-        self._primary_key_name = primary_key_name
-
     def __repr__(self):
         return f'all (with primary key named {self._primary_key_name})'
 
@@ -157,8 +168,9 @@ class All(CachedSubset):
     def db_args(self) -> tuple:
         return ()
 
-    def record_score(self, record: ca.Mapping[str, t.Any]) -> numbers.Real:
-        return hash(record[self._primary_key_name])
+    @classmethod
+    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+        return hash(record[cls._primary_key_name])
 
     def covers(self, other: Subset) -> bool:
         return True
@@ -170,7 +182,7 @@ class All(CachedSubset):
         raise NotImplementedError
 
 
-class NumberRangeSubset(CachedSubset):
+class NumberRangeSubset(CachedSubsetWithPrimaryKey):
     """
     A simple subset matching records by their score directly.
 
@@ -182,10 +194,7 @@ class NumberRangeSubset(CachedSubset):
     primary key. The DB args are a 2-tuple specifying the lower and upper
     bound.
     """
-    def __init__(
-            self, primary_key_name: str, ge: numbers.Real,
-            lt: numbers.Real) -> None:
-        self._primary_key_name = primary_key_name
+    def __init__(self, ge: numbers.Real, lt: numbers.Real) -> None:
         self._ge = ge
         self._lt = lt
 
@@ -201,8 +210,9 @@ class NumberRangeSubset(CachedSubset):
     def db_args(self) -> tuple[numbers.Real]:
         return (self._ge, self._lt)
 
-    def record_score(self, record: ca.Mapping[str, t.Any]) -> numbers.Real:
-        return record[self._primary_key_name]
+    @classmethod
+    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+        return record[cls._primary_key_name]
 
     def covers(self, other: t.Self) -> bool:
         return self._ge <= other._ge and self._lt >= other._lt
@@ -223,4 +233,4 @@ class NumberRangeSubset(CachedSubset):
         old_lt, self._lt = self._lt, extend_until
         return (
             Interval(float('-inf', self._ge)),
-            NumberRangeSubset(self._primary_key_name, old_lt, self._lt))
+            type(self)(self._primary_key_name, old_lt, self._lt))

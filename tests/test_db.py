@@ -131,15 +131,15 @@ class TestPostgresTable:
 
     async def test_get_record_subset_on_empty(self, table):
         assert_that(
-            await
-            collect_async_iter(table.get_record_subset(tc.All('user_id'))),
+            await collect_async_iter(
+                table.get_record_subset(tc.All.with_primary_key('user_id')())),
             empty())
 
     async def test_get_record_subset_on_one(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         assert_that(
-            await
-            collect_async_iter(table.get_record_subset(tc.All('user_id'))),
+            await collect_async_iter(
+                table.get_record_subset(tc.All.with_primary_key('user_id')())),
             contains_inanyorder(
                 has_entries(
                     user_id=1, user_name='u1', user_age=1, city_id=11,
@@ -150,8 +150,8 @@ class TestPostgresTable:
         await insert_user(2, 'u2', None, 11, 'c1')
         await insert_user(3, 'u3', 3, 12, 'c2')
         assert_that(
-            await
-            collect_async_iter(table.get_record_subset(tc.All('user_id'))),
+            await collect_async_iter(
+                table.get_record_subset(tc.All.with_primary_key('user_id')())),
             contains_inanyorder(
                 has_entries(
                     user_id=1, user_name='u1', user_age=1, city_id=11,

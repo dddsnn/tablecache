@@ -95,8 +95,8 @@ class TestRedisTable:
     @pytest.fixture
     def make_table(self, conn):
         def factory(
-                table_name='table', primary_key_name='pk',
-                attribute_codecs=None, score_function=None):
+            table_name='table', primary_key_name='pk', attribute_codecs=None,
+            score_function=op.itemgetter('pk')):
             attribute_codecs = attribute_codecs or {
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
             return tc.RedisTable(
@@ -293,7 +293,8 @@ class TestRedisTable:
 
     async def test_get_record_subset_on_empty(self, table):
         assert_that(
-            await collect_async_iter(table.get_record_subset(tc.All('pk'))),
+            await collect_async_iter(
+                table.get_record_subset(tc.All.with_primary_key('pk')())),
             empty())
 
     async def test_get_record_subset_on_all_contained(self, make_table):
@@ -305,7 +306,8 @@ class TestRedisTable:
         await table.put_record({'pk': 50})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -50, 51))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-50, 51))),
             contains_inanyorder(
                 has_entries(pk=-50), has_entries(pk=0), has_entries(pk=50)))
 
@@ -320,7 +322,8 @@ class TestRedisTable:
         await table.put_record({'pk': 50})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 50))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 50))),
             contains_inanyorder(
                 has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49)))
 
@@ -332,7 +335,8 @@ class TestRedisTable:
         await table.put_record({'pk': 50})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', 100, 200))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(100, 200))),
             empty())
 
     async def test_get_record_subset_with_inf_bounds(self, make_table):
@@ -344,7 +348,8 @@ class TestRedisTable:
         assert_that(
             await collect_async_iter(
                 table.get_record_subset(
-                    tc.NumberRangeSubset('pk', float('-inf'), float('inf')))),
+                    tc.NumberRangeSubset.with_primary_key('pk')(
+                        float('-inf'), float('inf')))),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=50)))
 
     async def test_get_record_subset_with_multiple_intervals(self, make_table):
@@ -380,7 +385,8 @@ class TestRedisTable:
         await table.put_record({'pk': 60})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', 0, 50))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(0, 50))),
             contains_inanyorder(has_entries(pk=10), has_entries(pk=59)))
 
     async def test_delete_record_raises_on_nonexistent(self, table):
@@ -389,7 +395,8 @@ class TestRedisTable:
             await table.delete_record(1)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 10))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 10))),
             contains_inanyorder(has_entries(pk=0)))
 
     async def test_delete_record_deletes(self, table):
@@ -399,7 +406,8 @@ class TestRedisTable:
         await table.delete_record(1)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 10))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 10))),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=2)))
 
     async def test_delete_record_subset_on_empty(self, make_table):
@@ -409,7 +417,8 @@ class TestRedisTable:
         await table.delete_record_subset([tc.Interval(0, 50)])
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 51))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 51))),
             empty())
 
     async def test_delete_record_subset_deletes_nothing(self, make_table):
@@ -420,7 +429,8 @@ class TestRedisTable:
         await table.delete_record_subset([])
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 51))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 51))),
             contains_inanyorder(has_entries(pk=0)))
 
     async def test_delete_record_subset_deletes_all(self, make_table):
@@ -433,7 +443,8 @@ class TestRedisTable:
         await table.delete_record_subset([tc.Interval(0, 50)])
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 51))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 51))),
             empty())
 
     async def test_delete_record_subset_deletes_some(self, make_table):
@@ -447,8 +458,8 @@ class TestRedisTable:
         await table.delete_record_subset([tc.Interval(0, 51)])
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -100,
-                                                             100))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
             contains_inanyorder(has_entries(pk=-1), has_entries(pk=51)))
 
     async def test_delete_record_subset_deletes_multiple_intervals(
@@ -466,8 +477,8 @@ class TestRedisTable:
             tc.Interval(-40, -9), tc.Interval(10, 11)])
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -100,
-                                                             100))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
             contains_inanyorder(
                 has_entries(pk=-50), has_entries(pk=0), has_entries(pk=49)))
 
@@ -480,7 +491,8 @@ class TestRedisTable:
             await table.delete_record(1)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.NumberRangeSubset('pk', -10, 10))),
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 10))),
             contains_inanyorder(has_entries(pk=0)))
 
 

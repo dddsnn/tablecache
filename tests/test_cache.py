@@ -15,7 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-import functools as ft
 import unittest.mock as um
 
 from hamcrest import *
@@ -57,8 +56,12 @@ class MockDbTable(tc.DbTable):
 
 
 class MockStorageTable(tc.StorageTable):
-    def __init__(self, primary_key_name):
-        self.primary_key_name = primary_key_name
+    def __init__(self, conn, **kwargs):
+        self.score_function = kwargs['score_function']
+        assert conn == 'conn_not_needed_for_mock'
+        assert kwargs['attribute_codecs'] == (
+            'attribute_codecs_not_needed_for_mock')
+        assert kwargs['table_name'] == 'table_name_not_needed_for_mock'
         self.records = {}
 
     @property
@@ -69,7 +72,7 @@ class MockStorageTable(tc.StorageTable):
         self.records = {}
 
     async def put_record(self, record):
-        primary_key = record[self.primary_key_name]
+        primary_key = self.score_function(record)
         self.records[primary_key] = record
 
     async def get_record(self, primary_key):
@@ -96,8 +99,8 @@ class MockStorageTable(tc.StorageTable):
 
 
 class AdjustableNumberRangeSubset(tc.NumberRangeSubset):
-    def __init__(self, primary_key_name, ge, lt):
-        super().__init__(primary_key_name, ge, lt)
+    def __init__(self, ge, lt):
+        super().__init__(ge, lt)
         self.observe = um.Mock()
 
     def adjust(self, *, prune_ge, prune_lt, new_ge, new_lt):
@@ -107,11 +110,7 @@ class AdjustableNumberRangeSubset(tc.NumberRangeSubset):
             raise ValueError
         self._ge = max(self._ge, prune_lt)
         self._lt = max(self._lt, new_lt)
-        return (
-            [tc.Interval(prune_ge, prune_lt)],
-            AdjustableNumberRangeSubset(
-                self._primary_key_name, new_ge, new_lt),
-        )
+        return ([tc.Interval(prune_ge, prune_lt)], type(self)(new_ge, new_lt))
 
 
 class TestCachedTable:
@@ -120,15 +119,37 @@ class TestCachedTable:
         return MockDbTable()
 
     @pytest.fixture
-    def storage_table(self):
-        return MockStorageTable('pk')
+    def storage_table_instance(self):
+        return {}
 
     @pytest.fixture
-    def make_table(self, db_table, storage_table):
-        def factory(cached_subset_class=ft.partial(tc.All, 'pk')):
-            return tc.CachedTable(db_table, storage_table, cached_subset_class)
+    def make_table(self, db_table, storage_table_instance, monkeypatch):
+        def make_mock_storage_table(*args, **kwargs):
+            if 'instance' in storage_table_instance:
+                raise Exception('Can only have one mock storage table.')
+            mock_storage_table = MockStorageTable(*args, **kwargs)
+            storage_table_instance['instance'] = mock_storage_table
+            return mock_storage_table
+
+        import tablecache.storage
+        monkeypatch.setattr(
+            tablecache.storage, 'RedisTable', make_mock_storage_table)
+
+        def factory(cached_subset_class=tc.All.with_primary_key('pk')):
+            return tc.CachedTable(
+                cached_subset_class, db_table, primary_key_name='pk',
+                attribute_codecs='attribute_codecs_not_needed_for_mock',
+                redis_conn='conn_not_needed_for_mock',
+                redis_table_name='table_name_not_needed_for_mock')
 
         return factory
+
+    @pytest.fixture
+    def get_storage_table(self, storage_table_instance):
+        def getter():
+            return storage_table_instance['instance']
+
+        return getter
 
     @pytest.fixture
     def table(self, make_table):
@@ -161,7 +182,7 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(6)]))
 
     async def test_get_record_subset_only_some(self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
         await table.load(*_inf_to_inf)
         assert_that(
@@ -170,18 +191,18 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(2, 4)]))
 
     async def test_loads_only_specified_subset(
-            self, make_table, db_table, storage_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+            self, make_table, db_table, get_storage_table):
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
         await table.load(2, 4)
         assert_that(
             await collect_async_iter(
-                storage_table.get_record_subset(
-                    tc.NumberRangeSubset('pk', *_inf_to_inf))),
-            contains_inanyorder(*[has_entries(pk=i) for i in range(2, 4)]))
+                get_storage_table().get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(*_inf_to_inf))
+            ), contains_inanyorder(*[has_entries(pk=i) for i in range(2, 4)]))
 
     async def test_load_observes_loaded_records(self, make_table, db_table):
-        subset_class = ft.partial(AdjustableNumberRangeSubset, 'pk')
+        subset_class = AdjustableNumberRangeSubset.with_primary_key('pk')
         table = make_table(subset_class)
         db_table.records = {i: {'pk': i} for i in range(6)}
         await table.load(2, 4)
@@ -192,9 +213,9 @@ class TestCachedTable:
             contains_inanyorder(*[um.call(r) for r in expected_observations]))
 
     async def test_load_clears_storage_first(
-            self, table, db_table, storage_table):
+            self, table, db_table, get_storage_table):
         db_table.records = {1: {'pk': 1, 'k': 'v1'}}
-        storage_table.records = {2: {'pk': 2, 'k': 'v2'}}
+        get_storage_table().records = {2: {'pk': 2, 'k': 'v2'}}
         await table.load()
         assert_that(await table.get_record(1), has_entries(k='v1'))
         with pytest.raises(KeyError):
@@ -207,7 +228,7 @@ class TestCachedTable:
 
     async def test_get_record_subset_returns_db_state_if_subset_not_cached(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
         await table.load(2, 4)
         assert_that(
@@ -217,16 +238,16 @@ class TestCachedTable:
 
     async def test_get_record_also_checks_db_in_case_not_in_cached_subset(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(6)}
         await table.load(2, 4)
         assert_that(await table.get_record(1), has_entries(pk=1, source='db'))
 
     async def test_get_record_doesnt_check_db_if_all_in_cache(
-            self, table, db_table, storage_table):
+            self, table, db_table, get_storage_table):
         db_table.records = {i: {'pk': i} for i in range(6)}
         await table.load()
-        del storage_table.records[1]
+        del get_storage_table().records[1]
         with pytest.raises(KeyError):
             await table.get_record(1)
 
@@ -246,7 +267,7 @@ class TestCachedTable:
 
     async def test_get_record_subset_refreshes_invalid_keys(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
         await table.load(*_inf_to_inf)
         db_table.records = {1: {'pk': 1, 'k': 'b1'}}
@@ -266,7 +287,7 @@ class TestCachedTable:
 
     async def test_get_record_subset_only_refreshes_once(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
         await table.load(*_inf_to_inf)
         db_table.records = {1: {'pk': 1, 'k': 'b1'}}
@@ -287,7 +308,7 @@ class TestCachedTable:
 
     async def test_get_record_subset_deletes_invalid_keys(
             self, make_table, db_table):
-        table = make_table(ft.partial(tc.NumberRangeSubset, 'pk'))
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i, 'k': f'a{i}'} for i in range(3)}
         await table.load(*_inf_to_inf)
         db_table.records = {0: {'pk': 0, 'k': 'a0'}, 2: {'pk': 2, 'k': 'a2'}}
@@ -308,7 +329,7 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_prunes_old_data(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
+        table = make_table(AdjustableNumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
         await table.load(0, 4)
         assert_that(
@@ -328,7 +349,7 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_loads_new_subset(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
+        table = make_table(AdjustableNumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
         await table.load(0, 2)
         assert_that(
@@ -344,7 +365,7 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_doesnt_introduce_duplicates(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
+        table = make_table(AdjustableNumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
         await table.load(0, 2)
         await table.adjust_cached_subset(
@@ -356,14 +377,14 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_observes_new_records(
             self, make_table, db_table):
-        table = make_table(ft.partial(AdjustableNumberRangeSubset, 'pk'))
+        table = make_table(AdjustableNumberRangeSubset.with_primary_key('pk'))
         db_table.records = {i: {'pk': i} for i in range(4)}
         await table.load(0, 2)
         await table.adjust_cached_subset(
             prune_ge=-1, prune_lt=0, new_ge=0, new_lt=4)
         expected_observations = await collect_async_iter(
             db_table.get_record_subset(
-                AdjustableNumberRangeSubset('pk', 2, 4)))
+                AdjustableNumberRangeSubset.with_primary_key('pk')(2, 4)))
         assert_that(
             table._cached_subset.observe.call_args_list,
             contains_inanyorder(

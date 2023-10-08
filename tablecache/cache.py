@@ -17,8 +17,10 @@
 
 import collections.abc as ca
 import logging
+import redis.asyncio as redis
 import typing as t
 
+import tablecache.codec as codec
 import tablecache.db as db
 import tablecache.storage as storage
 import tablecache.subset as ss
@@ -30,15 +32,17 @@ class CachedTable:
     A cached table.
 
     Maintains records from a relatively slow storage (db_table) in a relatively
-    fast one (storage_table). Not thread-safe.
+    fast RedisTable. Not thread-safe.
 
     The cache has to be loaded with load() before anything meaningful can
     happen. Many methods will raise a ValueError if this wasn't done. Calling
     load() more than once also raises a ValueError.
     """
     def __init__(
-            self, db_table: db.DbTable, storage_table: storage.StorageTable,
-            cached_subset_class: type[ss.CachedSubset]) -> None:
+            self, cached_subset_class: type[ss.CachedSubset],
+            db_table: db.DbTable, *, primary_key_name: str,
+            attribute_codecs: ca.Mapping[str, codec.Codec],
+            redis_conn: redis.Redis, redis_table_name: str) -> None:
         """
         :param cached_subset_class: The type of subset to use. This class is
             used in various methods that deal with subsets, like load() and
@@ -49,10 +53,25 @@ class CachedTable:
             individual records by primary key, or all records. The subset
             instantiated by load() is also used to keep track of which values
             within the subset are actually currently cached.
+        :param primary_key_name: The name of the attribute to be used as
+            primary key. Must also be present in attribute_codecs.
+        :param attribute_codecs: Dictionary of codecs for record attributes.
+            Must map attribute names (string) to tablecache.Codec instances
+            that are able to en-/decode the corresponding values. Only
+            attributes present here are stored.
+        :param redis_conn: An async Redis connection. Used in the construction
+            of a RedisTable. The connection will not be closed and needs to be
+            cleaned up from the outside.
+        :param redis_table_name: The name of the table, used as a prefix for
+            keys in Redis. Must be unique within the Redis instance.
         """
-        self._db_table = db_table
-        self._storage_table = storage_table
         self._cached_subset_class = cached_subset_class
+        self._db_table = db_table
+        self._storage_table = storage.RedisTable(
+            redis_conn, table_name=redis_table_name,
+            primary_key_name=primary_key_name,
+            attribute_codecs=attribute_codecs,
+            score_function=cached_subset_class.record_score)
         self._cached_subset = None
         self._dirty_keys = set()
         self._dirty_scores = set()

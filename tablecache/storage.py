@@ -18,7 +18,6 @@
 import abc
 import collections.abc as ca
 import numbers
-import operator as op
 import typing as t
 
 import redis.asyncio as redis
@@ -71,9 +70,8 @@ class RedisTable(StorageTable):
     def __init__(
         self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
         attribute_codecs: ca.Mapping[str, codec.Codec],
-        score_function: t.Optional[t.Callable[[t.Mapping[str, t.Any]],
-                                              numbers.Real]] = None
-    ) -> None:
+        score_function: t.Callable[[t.Mapping[str, t.Any]],
+                                   numbers.Real]) -> None:
         """
         A table stored in Redis.
 
@@ -104,9 +102,8 @@ class RedisTable(StorageTable):
             attributes present here are stored.
         :param score_function: A function that extracts a score from a record.
             A record's score must not change, even if the record is changed,
-            i.e. it must be derived only from immutable fields. Defaults to the
-            primary key, which works fine as long as that is a number.
-            Otherwise, the hash of the primary key may be a good option.
+            i.e. it must be derived only from immutable fields. Getting the
+            primary key or its hash may be a good option.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
@@ -119,8 +116,7 @@ class RedisTable(StorageTable):
         except KeyError:
             raise ValueError('Codec for primary key is missing.')
         self._row_codec = RowCodec(attribute_codecs)
-        self._score_function = (
-            score_function or op.itemgetter(primary_key_name))
+        self._score_function = score_function
         self._score_codec = codec.FloatAsStringCodec()
 
     @property
