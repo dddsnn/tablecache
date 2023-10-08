@@ -51,32 +51,42 @@ async def main():
     redis_conn = redis.Redis()
     db_table = tc.PostgresTable(
         postgres_pool, query_subset_string, query_pks_string)
-    # We specify a RedisTable which can accept records of the shape in our
-    # Postgres table. We need to specify a name for the table (used to create a
-    # namespace within Redis), the name of the primary key column, as well as a
-    # dictionary of codecs for the attributes. Each key in it must be a column
-    # of the table, and each value must be a codec (basic ones available in
+    # We specify a CachedTable which will create a RedisTable that can accept
+    # records of the shape in our Postgres table. We need to give it a
+    # CachedSubset subclass that it uses to query both Postgres and Redis. The
+    # choice of All here loads everything, but doesn't allow meaningful queries
+    # for ranges of values (only queries for individual records by primary
+    # key). See the advanced examples for more options. (N.B. The
+    # with_primary_key classmethod actually returns a subclass with the
+    # primary_key_name class member set).
+    #
+    # Then, in addition to the DB table, we need to specify parameters to
+    # create the RedisTable. These are a name for the table in (used to create
+    # a namespace), the name of the primary key column, as well as a dictionary
+    # of codecs for the attributes. Each key in it must be a column of the
+    # table, and each value must be a codec (basic ones available in
     # tablecache.codec) which is capable of encoding the corresponding value to
     # bytes. The special Nullable codec can wrap another codec and enable null
     # values (by themselves, normal codecs can't store nulls). Note that only
     # attributes for which a codec has been specified are cached.
-    storage_table = tc.RedisTable(
-        redis_conn,
-        table_name='users_cities',
+    table = tc.CachedTable(
+        tc.All.with_primary_key('user_id'),
+        db_table,
         primary_key_name='user_id',
         attribute_codecs={
             'user_id': tc.IntAsStringCodec(),
             'user_name': tc.StringCodec(),
             'user_nickname': tc.Nullable(tc.StringCodec()),
             'city_name': tc.StringCodec(),},
+        redis_conn=redis_conn,
+        redis_table_name='users_cities',
     )
     async with contextlib.AsyncExitStack() as stack:
         await stack.enter_async_context(postgres_pool)
         await setup_example_dbs(redis_conn, postgres_pool)
-        table = tc.CachedTable(db_table, storage_table)
         await table.load()
-        # After creating a CachedTable with our DB and storage tables and
-        # loading it, we can query it, hitting the cache rather than the DB.
+        # After loading the CachedTable, we can query it, hitting the cache
+        # rather than the DB.
         print(f'User 1 in Redis: {await table.get_record(1)}')
         print(f'User 2 in Redis: {await table.get_record(2)}')
     await redis_conn.close()
