@@ -390,3 +390,46 @@ class TestCachedTable:
             contains_inanyorder(
                 *[anything() for _ in range(4)],
                 *[um.call(r) for r in expected_observations]))
+
+
+class TestInvalidRecordRepository:
+    @pytest.fixture
+    def repo(self):
+        import tablecache.cache
+        return tablecache.cache.InvalidRecordRepository()
+
+    def test_primary_key_invalid(self, repo):
+        repo.flag_invalid(1, 101)
+        assert 1 in repo.invalid_primary_keys
+        assert 101 not in repo.invalid_primary_keys
+
+    def test_score_invalid(self, repo):
+        repo.flag_invalid(1, 101)
+        assert 101 in repo.invalid_scores
+        assert 1 not in repo.invalid_scores
+
+    def test_primary_key_not_invalid(self, repo):
+        repo.flag_invalid(1, 101)
+        assert 2 not in repo.invalid_primary_keys
+
+    def test_score_not_invalid(self, repo):
+        repo.flag_invalid(1, 101)
+        assert 102 not in repo.invalid_scores
+
+    def test_primary_key_not_invalid_after_clear(self, repo):
+        repo.flag_invalid(1, 101)
+        repo.clear()
+        assert 1 not in repo.invalid_primary_keys
+
+    def test_score_not_invalid_after_clear(self, repo):
+        repo.flag_invalid(1, 101)
+        repo.clear()
+        assert 101 not in repo.invalid_scores
+
+    def test_len_is_number_of_primary_keys(self, repo):
+        assert len(repo) == 0
+        repo.flag_invalid(1, 101)
+        repo.flag_invalid(2, 102)
+        assert len(repo) == 2
+        repo.flag_invalid(3, 102)
+        assert len(repo) == 3

@@ -73,8 +73,7 @@ class CachedTable:
             attribute_codecs=attribute_codecs,
             score_function=cached_subset_class.record_score)
         self._cached_subset = None
-        self._dirty_keys = set()
-        self._dirty_scores = set()
+        self._invalid_record_repo = InvalidRecordRepository()
 
     @property
     def cached_subset(self) -> ss.CachedSubset:
@@ -127,7 +126,7 @@ class CachedTable:
         """
         Get a record from storage by primary key.
 
-        In case the key has been marked as dirty, ensures the data is fresh
+        In case the key has been marked as invalid, ensures the data is fresh
         first.
 
         In case the primary key doesn't exist in cache, also tries the DB in
@@ -139,8 +138,8 @@ class CachedTable:
 
         Raises a KeyError if the key doesn't exist.
         """
-        if primary_key in self._dirty_keys:
-            await self._refresh_dirty()
+        if primary_key in self._invalid_record_repo.invalid_primary_keys:
+            await self._refresh_invalid()
         try:
             return await self._storage_table.get_record(primary_key)
         except KeyError:
@@ -161,8 +160,8 @@ class CachedTable:
         completely in cache (even if just by a little bit) is expensive.
         """
         subset = self._cached_subset_class(*subset_args, **subset_kwargs)
-        if any(s in subset for s in self._dirty_scores):
-            await self._refresh_dirty()
+        if any(s in subset for s in self._invalid_record_repo.invalid_scores):
+            await self._refresh_invalid()
         if self.cached_subset.covers(subset):
             source = self._storage_table
         else:
@@ -190,14 +189,34 @@ class CachedTable:
                 'which doesn\'t exist.')
             return
         score = self.cached_subset.record_score(record)
-        self._dirty_scores.add(score)
-        self._dirty_keys.add(primary_key)
+        self._invalid_record_repo.flag_invalid(primary_key, score)
 
-    async def _refresh_dirty(self) -> None:
-        _logger.info(f'Refreshing {len(self._dirty_keys)} invalid keys.')
-        for key in self._dirty_keys:
+    async def _refresh_invalid(self) -> None:
+        _logger.info(
+            f'Refreshing {len(self._invalid_record_repo)} invalid keys.')
+        for key in self._invalid_record_repo.invalid_primary_keys:
             await self._storage_table.delete_record(key)
-        async for record in self._db_table.get_records(self._dirty_keys):
+        async for record in self._db_table.get_records(
+                self._invalid_record_repo.invalid_primary_keys):
             await self._storage_table.put_record(record)
-        self._dirty_keys.clear()
-        self._dirty_scores.clear()
+        self._invalid_record_repo.clear()
+
+
+class InvalidRecordRepository:
+    def __init__(self):
+        self.invalid_primary_keys = set()
+        self.invalid_scores = set()
+
+    def __len__(self):
+        return len(self.invalid_primary_keys)
+
+    def flag_invalid(self, primary_key, score):
+        self.invalid_primary_keys.add(primary_key)
+        self.invalid_scores.add(score)
+
+    def primary_key_is_invalid(self, primary_key):
+        return primary_key in self.invalid_primary_keys
+
+    def clear(self):
+        self.invalid_primary_keys.clear()
+        self.invalid_scores.clear()
