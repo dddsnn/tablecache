@@ -232,5 +232,5 @@ class NumberRangeSubset(CachedSubsetWithPrimaryKey):
         self._ge = prune_until
         old_lt, self._lt = self._lt, extend_until
         return (
-            Interval(float('-inf', self._ge)),
+            Interval(float('-inf'), self._ge),
             type(self)(self._primary_key_name, old_lt, self._lt))
