@@ -22,7 +22,7 @@ import numbers
 import typing as t
 
 
-@dc.dataclass
+@dc.dataclass(frozen=True)
 class Interval:
     """
     A number interval.
