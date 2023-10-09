@@ -65,7 +65,8 @@ requested the next time.
 
 Check out [examples/basic.py](examples/basic.py) for a quick start, which
 should be pretty self-explanatory. There are more examples showing off advanced
-functionality.
+functionality. There is a `docker-compose.yml` in the directory which starts
+the Postgres and Redis instance needed for the examples.
 
 ### Redis
 

@@ -1,0 +1,18 @@
+# This file is here to conveniently start a Postgres and a Redis instance to
+# run the examples with. Just `docker compose up` in this directory, and the
+# examples should run locally.
+
+version: "3.8"
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    ports:
+      - "5432:5432"
+    restart: "no"
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    restart: "no"
