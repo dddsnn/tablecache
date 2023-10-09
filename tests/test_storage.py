@@ -297,6 +297,17 @@ class TestRedisTable:
                 table.get_record_subset(tc.All.with_primary_key('pk')())),
             empty())
 
+    async def test_get_record_subset_on_one_record(self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('pk'))
+        await table.put_record({'pk': 0})
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-50, 51))),
+            contains_inanyorder(has_entries(pk=0)))
+
     async def test_get_record_subset_on_all_contained(self, make_table):
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
