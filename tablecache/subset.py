@@ -79,6 +79,7 @@ class Subset(abc.ABC):
         raise NotImplementedError
 
     def __contains__(self, score):
+        """Return whether a score is contained in this subset."""
         return any(score in i for i in self.score_intervals)
 
 

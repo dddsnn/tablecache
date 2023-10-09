@@ -89,6 +89,14 @@ async def main():
         # rather than the DB.
         print(f'User 1 in Redis: {await table.get_record(1)}')
         print(f'User 2 in Redis: {await table.get_record(2)}')
+        # When data in the DB changes, the cache will still return the old
+        # record. Once we invalidate it (by primary key), the cache will
+        # refresh that record on the next request.
+        await postgres_pool.execute(
+            'UPDATE users SET name=$1 WHERE user_id=$2', 'New Name', 1)
+        print(f'User 1 still with old name: {await table.get_record(1)}')
+        await table.invalidate_record(1)
+        print(f'User 1 with new name: {await table.get_record(1)}')
     await redis_conn.close()
 
 

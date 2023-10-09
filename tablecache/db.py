@@ -29,16 +29,33 @@ class DbTable(abc.ABC):
     async def get_record_subset(
             self,
             subset: ss.Subset) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+        """
+        Asynchronously iterate over a subset of records.
+
+        Yields records from the given subset using its query parameters.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def get_records(
         self, primary_keys: t.Sequence[t.Any]
     ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+        """
+        Asynchronously iterate over records matching primary keys.
+
+        Yields all records whose primary key matches one in the given sequence.
+        If a key doesn't exist in the table, it is ignored and no error is
+        raised.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+        """
+        Get a single record by primary key.
+
+        Raises a KeyError if no matching record exists.
+        """
         raise NotImplementedError
 
 
@@ -80,11 +97,6 @@ class PostgresTable(DbTable):
     async def get_record_subset(
             self,
             subset: ss.Subset) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
-        """
-        Asynchronously iterate over a subset of records.
-
-        Yields records from the given subset using its query parameters.
-        """
         async with self._pool.acquire() as conn, conn.transaction():
             cursor = conn.cursor(self.query_subset_string, *subset.db_args)
             async for record in cursor:
@@ -93,25 +105,12 @@ class PostgresTable(DbTable):
     async def get_records(
         self, primary_keys: t.Sequence[t.Any]
     ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
-        """
-        Asynchronously iterate over records matching primary keys.
-
-        Yields all records whose primary key matches one in the given sequence.
-        If a key doesn't exist in the table, it is ignored and no error is
-        raised.
-        """
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_pks_string,
                                             primary_keys):
                 yield record
 
     async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
-        """
-        Get a single record by primary key.
-
-        Convenience shortcut calling get_records with the key. Raises a
-        KeyError if no matching record exists.
-        """
         try:
             return await anext(self.get_records([primary_key]))
         except StopAsyncIteration as e:
