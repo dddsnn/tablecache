@@ -39,4 +39,5 @@ from tablecache.codec import (
 from tablecache.db import DbTable, PostgresTable
 from tablecache.storage import CodingError, RedisTable, StorageTable
 from tablecache.subset import (
-    All, CachedSubset, Interval, NumberRangeSubset, Subset)
+    All, CachedSubset, CachedSubsetWithPrimaryKey, Interval, NumberRangeSubset,
+    Subset)
