@@ -30,6 +30,7 @@ import asyncpg
 import redis.asyncio as redis
 
 import tablecache as tc
+import tablecache.types as tp
 
 
 # In this example, we have a table of timestamped device data, and we want to
@@ -144,19 +145,23 @@ class TsSubset(tc.CachedSubset):
     # There is only one interval of scores for the values in Redis represented
     # by this subset.
     @property
+    @t.override
     def score_intervals(self) -> ca.Iterable[tc.Interval]:
         return [tc.Interval(self._ge.timestamp(), self._lt.timestamp())]
 
     @property
-    def db_args(self) -> tuple:
+    @t.override
+    def db_args(self) -> tuple[numbers.Real, numbers.Real]:
         return (self._ge, self._lt)
 
     # This is the score function that extracts a (float) timestamp from a
     # record.
     @classmethod
-    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+    @t.override
+    def record_score(cls, record: tp.Record) -> numbers.Real:
         return record['ts'].timestamp()
 
+    @t.override
     def covers(self, other: t.Self) -> bool:
         return self._ge <= other._ge <= other._lt <= self._lt
 
@@ -164,16 +169,18 @@ class TsSubset(tc.CachedSubset):
     # it inserts a record into storage. This would allows us to keep track of
     # which records (and which scores) actually exist. We don't need this here,
     # but it will become useful in more advanced examples.
-    def observe(self, record: ca.Mapping[str, t.Any]) -> None:
+    @t.override
+    def observe(self, record: tp.Record) -> None:
         pass
 
     # We're defining an adjust() method that allows us to discard outdated
     # records (up to some timestap) and load new ones. We have to adjust our
     # bounds, and return a tuple of score intervals to be deleted (just one in
     # our case) and a Subset instance of new records to be added.
+    @t.override
     def adjust(
-        self, *, prune_until_isoformat: str, extend_until_isoformat: str
-    ) -> tuple[ca.Iterable[tc.Interval], tc.Subset]:
+            self, *, prune_until_isoformat: str,
+            extend_until_isoformat: str) -> tc.Adjustment[t.Self]:
         prune_until = datetime.datetime.fromisoformat(prune_until_isoformat)
         extend_until = datetime.datetime.fromisoformat(extend_until_isoformat)
         if prune_until < self._ge:
@@ -184,8 +191,9 @@ class TsSubset(tc.CachedSubset):
                 'New upper bound must not be lower than the current one.')
         self._ge = prune_until
         old_lt, self._lt = self._lt, extend_until
-        return ([tc.Interval(float('-inf'), self._ge.timestamp())],
-                TsSubset(old_lt.isoformat(), self._lt.isoformat()))
+        return tc.Adjustment(
+            [tc.Interval(float('-inf'), self._ge.timestamp())],
+            TsSubset(old_lt.isoformat(), self._lt.isoformat()))
 
 
 if __name__ == '__main__':

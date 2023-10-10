@@ -110,7 +110,8 @@ class AdjustableNumberRangeSubset(tc.NumberRangeSubset):
             raise ValueError
         self._ge = max(self._ge, prune_lt)
         self._lt = max(self._lt, new_lt)
-        return ([tc.Interval(prune_ge, prune_lt)], type(self)(new_ge, new_lt))
+        return tc.Adjustment([tc.Interval(prune_ge, prune_lt)],
+                             type(self)(new_ge, new_lt))
 
 
 class TestCachedTable:

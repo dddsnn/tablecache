@@ -31,6 +31,7 @@ import asyncpg
 import redis.asyncio as redis
 
 import tablecache as tc
+import tablecache.types as tp
 
 
 # This example builds on custom_subset.py, but here each row of data has a
@@ -178,6 +179,7 @@ class DeviceTsSubset(tc.CachedSubset):
         return device_id + (ts.timestamp() / 10_000_000_000)
 
     @property
+    @t.override
     def score_intervals(self) -> ca.Iterable[tc.Interval]:
         if self._device_id is None:
             raise ValueError('Can\'t represent scores for all devices.')
@@ -189,15 +191,19 @@ class DeviceTsSubset(tc.CachedSubset):
         yield from self._observed_scores.values()
 
     @property
-    def db_args(self) -> tuple:
+    @t.override
+    def db_args(
+            self) -> tuple[numbers.Real, numbers.Real, bool, t.Optional[int]]:
         return (self._ge, self._lt, self._device_id is None, self._device_id)
 
     @classmethod
-    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+    @t.override
+    def record_score(cls, record: tp.Record) -> numbers.Real:
         device_id = record['device_id']
         ts = record['ts']
         return cls._device_ts_score(device_id, ts)
 
+    @t.override
     def covers(self, other: t.Self) -> bool:
         covers_device_id = (
             self._device_id is None or self._device_id == other._device_id)
@@ -210,7 +216,8 @@ class DeviceTsSubset(tc.CachedSubset):
     # track of which devices even exist, so when we have to generate the
     # score_intervals property, we don't have to go through intervals for all
     # possible device IDs, but only those that actually exist.
-    def observe(self, record: ca.Mapping[str, t.Any]) -> None:
+    @t.override
+    def observe(self, record: tp.Record) -> None:
         self._observed_scores = self._observed_scores or {}
         device_id = record['device_id']
         score = self.record_score(record)
@@ -231,9 +238,10 @@ class DeviceTsSubset(tc.CachedSubset):
     # through all the observed score intervals by device ID, pruning it from
     # the left, and add the interval that needs to be deleted in Redis to a
     # list that we return in the end.
+    @t.override
     def adjust(
-        self, *, prune_until_isoformat: datetime.datetime
-    ) -> tuple[ca.Iterable[tc.Interval], tc.Subset]:
+            self, *,
+            prune_until_isoformat: datetime.datetime) -> tc.Adjustment[t.Self]:
         prune_until = datetime.datetime.fromisoformat(prune_until_isoformat)
         if prune_until < self._ge:
             raise ValueError(
@@ -269,7 +277,7 @@ class DeviceTsSubset(tc.CachedSubset):
         self._ge = prune_until
         # Since we're not supporting extending the subset here, we just return
         # an empty subset as the subset of new records to load.
-        return (
+        return tc.Adjustment(
             intersection_intervals,
             DeviceTsSubset(None, '1970-01-01', '1970-01-01'))
 

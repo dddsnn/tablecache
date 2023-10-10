@@ -24,6 +24,10 @@ import redis.asyncio as redis
 
 import tablecache.codec as codec
 import tablecache.subset as ss
+import tablecache.types as tp
+
+type AttributeCodecs = ca.Mapping[str, codec.Codec]
+type ScoreFunction = t.Callable[[ca.Mapping[str, t.Any]], numbers.Real]
 
 
 class CodingError(Exception):
@@ -32,7 +36,7 @@ class CodingError(Exception):
     """
 
 
-class StorageTable(abc.ABC):
+class StorageTable[PrimaryKey](abc.ABC):
     @property
     @abc.abstractmethod
     def table_name(self) -> str:
@@ -43,21 +47,21 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def put_record(self, record: ca.Mapping[str, t.Any]) -> None:
+    async def put_record(self, record: tp.Record) -> None:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         raise NotImplementedError
 
     @abc.abstractmethod
     async def get_record_subset(
-            self, score_min: numbers.Real, score_max: numbers.Real
-    ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+            self, score_min: numbers.Real,
+            score_max: numbers.Real) -> tp.Records:
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def delete_record(self, primary_key: t.Any) -> None:
+    async def delete_record(self, primary_key: PrimaryKey) -> None:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -66,12 +70,11 @@ class StorageTable(abc.ABC):
         raise NotImplementedError
 
 
-class RedisTable(StorageTable):
+class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
     def __init__(
-        self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
-        attribute_codecs: ca.Mapping[str, codec.Codec],
-        score_function: t.Callable[[t.Mapping[str, t.Any]],
-                                   numbers.Real]) -> None:
+            self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
+            attribute_codecs: AttributeCodecs,
+            score_function: ScoreFunction) -> None:
         """
         A table stored in Redis.
 
@@ -120,15 +123,18 @@ class RedisTable(StorageTable):
         self._score_codec = codec.FloatAsStringCodec()
 
     @property
+    @t.override
     def table_name(self) -> str:
         return self._table_name
 
+    @t.override
     async def clear(self) -> None:
         """Delete all data belonging to this table."""
         await self._conn.delete(
             f'{self.table_name}:rows', f'{self.table_name}:key_scores')
 
-    async def put_record(self, record: ca.Mapping[str, t.Any]) -> None:
+    @t.override
+    async def put_record(self, record: tp.Record) -> None:
         """
         Store a record.
 
@@ -194,7 +200,8 @@ class RedisTable(StorageTable):
         raise KeyError(
             f'No record with {self._primary_key_name}={primary_key}.')
 
-    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+    @t.override
+    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         """
         Retrieve a previously stored record by primary key.
 
@@ -208,9 +215,8 @@ class RedisTable(StorageTable):
         _, _, decoded_record = await self._get(primary_key)
         return decoded_record
 
-    async def get_record_subset(
-            self,
-            subset: ss.Subset) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+    @t.override
+    async def get_record_subset(self, subset: ss.Subset) -> tp.Records:
         """
         Get records with scores within a subset.
 
@@ -230,7 +236,8 @@ class RedisTable(StorageTable):
             for encoded_record in encoded_records:
                 yield self._row_codec.decode(encoded_record)
 
-    async def delete_record(self, primary_key: t.Any) -> None:
+    @t.override
+    async def delete_record(self, primary_key: PrimaryKey) -> None:
         encoded_primary_key = self._encode_primary_key(primary_key)
         encoded_score = await self._conn.hget(
             f'{self.table_name}:key_scores', encoded_primary_key)
@@ -245,6 +252,7 @@ class RedisTable(StorageTable):
             raise KeyError(
                 f'No record with {self._primary_key_name}={primary_key}.')
 
+    @t.override
     async def delete_record_subset(
             self, score_intervals: ca.Iterable[ss.Interval]) -> None:
         for interval in score_intervals:
@@ -303,7 +311,7 @@ class RowCodec:
     small attribute IDs for each of a given set of named attributes.
     """
     def __init__(
-            self, attribute_codecs: t.Mapping[str, codec.Codec],
+            self, attribute_codecs: AttributeCodecs,
             num_bytes_attribute_length: int = 2) -> None:
         """
         :param attribute_codecs: A dictionary mapping attribute names to
@@ -317,7 +325,7 @@ class RowCodec:
         self.num_bytes_attribute_length = num_bytes_attribute_length
         self.max_attribute_length = 2**(num_bytes_attribute_length * 8) - 1
 
-    def encode(self, record: t.Mapping[str, t.Any]) -> bytearray:
+    def encode(self, record: tp.Record) -> bytearray:
         """
         Encode a record.
 
@@ -358,7 +366,7 @@ class RowCodec:
             raise CodingError(f'Encoding of {attribute_name} is too long.')
         return encoded_attribute
 
-    def decode(self, encoded_record: bytes) -> t.Mapping[str, t.Any]:
+    def decode(self, encoded_record: bytes) -> tp.Record:
         """
         Decode an encoded record.
 

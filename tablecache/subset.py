@@ -21,6 +21,8 @@ import dataclasses as dc
 import numbers
 import typing as t
 
+import tablecache.types as tp
+
 
 @dc.dataclass(frozen=True)
 class Interval:
@@ -35,6 +37,12 @@ class Interval:
 
     def __contains__(self, x):
         return self.ge <= x < self.lt
+
+
+@dc.dataclass(frozen=True)
+class Adjustment[Subset]:
+    expire_intervals: ca.Iterable[Interval]
+    new_subset: Subset
 
 
 class Subset(abc.ABC):
@@ -78,7 +86,7 @@ class Subset(abc.ABC):
         """
         raise NotImplementedError
 
-    def __contains__(self, score):
+    def __contains__(self, score: numbers.Real) -> bool:
         """Return whether a score is contained in this subset."""
         return any(score in i for i in self.score_intervals)
 
@@ -95,7 +103,7 @@ class CachedSubset(Subset):
     """
     @classmethod
     @abc.abstractmethod
-    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+    def record_score(cls, record: tp.Record) -> numbers.Real:
         """Calculate a record's score."""
         raise NotImplementedError
 
@@ -110,7 +118,7 @@ class CachedSubset(Subset):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def observe(self, record: ca.Mapping[str, t.Any]) -> None:
+    def observe(self, record: tp.Record) -> None:
         """
         Observe a record being inserted into storage.
 
@@ -120,10 +128,7 @@ class CachedSubset(Subset):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def adjust(
-            self,
-            **kwargs: dict[str,
-                           t.Any]) -> tuple[ca.Iterable[Interval], Subset]:
+    def adjust(self, **kwargs: dict[str, t.Any]) -> Adjustment[t.Self]:
         """
         Adjust which records are specified by this subset.
 
@@ -170,16 +175,16 @@ class All(CachedSubsetWithPrimaryKey):
         return ()
 
     @classmethod
-    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+    def record_score(cls, record: tp.Record) -> numbers.Real:
         return hash(record[cls._primary_key_name])
 
     def covers(self, other: Subset) -> bool:
         return True
 
-    def observe(self, record: ca.Mapping[str, t.Any]) -> None:
+    def observe(self, record: tp.Record) -> None:
         pass
 
-    def adjust(self) -> tuple[ca.Iterable[Interval], Subset]:
+    def adjust(self) -> Adjustment[t.Self]:
         raise NotImplementedError
 
 
@@ -208,22 +213,21 @@ class NumberRangeSubset(CachedSubsetWithPrimaryKey):
         return [Interval(self._ge, self._lt)]
 
     @property
-    def db_args(self) -> tuple[numbers.Real]:
+    def db_args(self) -> tuple[numbers.Real, numbers.Real]:
         return (self._ge, self._lt)
 
     @classmethod
-    def record_score(cls, record: ca.Mapping[str, t.Any]) -> numbers.Real:
+    def record_score(cls, record: tp.Record) -> numbers.Real:
         return record[cls._primary_key_name]
 
     def covers(self, other: t.Self) -> bool:
         return self._ge <= other._ge and self._lt >= other._lt
 
-    def observe(self, record: ca.Mapping[str, t.Any]) -> None:
+    def observe(self, record: tp.Record) -> None:
         pass
 
-    def adjust(
-            self, *, prune_until: numbers.Real, extend_until: numbers.Real
-    ) -> tuple[ca.Iterable[Interval], Subset]:
+    def adjust(self, *, prune_until: numbers.Real,
+               extend_until: numbers.Real) -> Adjustment[t.Self]:
         if prune_until < self._ge:
             raise ValueError(
                 'New lower bound must not be lower than the current one.')
@@ -232,6 +236,6 @@ class NumberRangeSubset(CachedSubsetWithPrimaryKey):
                 'New upper bound must not be lower than the current one.')
         self._ge = prune_until
         old_lt, self._lt = self._lt, extend_until
-        return (
+        return Adjustment(
             Interval(float('-inf'), self._ge),
             type(self)(self._primary_key_name, old_lt, self._lt))

@@ -24,7 +24,7 @@ import typing as t
 import uuid
 
 
-class Codec(abc.ABC):
+class Codec[T](abc.ABC):
     """
     Abstract base for codecs.
 
@@ -34,8 +34,6 @@ class Codec(abc.ABC):
     If an input value for encoding or decoding is unsuitable in any way, a
     ValueError is raised.
     """
-    T = t.TypeVar('T')
-
     @abc.abstractmethod
     def encode(self, value: T) -> bytes:
         raise NotImplementedError
@@ -45,34 +43,38 @@ class Codec(abc.ABC):
         raise NotImplementedError
 
 
-class Nullable(Codec):
+class Nullable[T](Codec[t.Optional[T]]):
     """
     Wrapper codec that allows representing nullable values.
 
     Encodes optional values by using an inner codec for values, and a marker
     for None.
     """
-    def __init__(self, value_codec):
+    def __init__(self, value_codec: Codec[T]):
         self._value_codec = value_codec
 
-    def encode(self, value: t.Optional[t.Any]) -> bytes:
+    @t.override
+    def encode(self, value: t.Optional[T]) -> bytes:
         if value is None:
             return b'\x00'
         return b'\x01' + self._value_codec.encode(value)
 
-    def decode(self, bs: bytes) -> t.Optional[t.Any]:
+    @t.override
+    def decode(self, bs: bytes) -> t.Optional[T]:
         if bs == b'\x00':
             return None
         return self._value_codec.decode(bs[1:])
 
 
-class BoolCodec(Codec):
+class BoolCodec(Codec[bool]):
     """Codec that represents bools as single bytes."""
+    @t.override
     def encode(self, value: bool) -> bytes:
         if not isinstance(value, bool):
             raise ValueError('Value is not a bool.')
         return b'\x01' if value else b'\x00'
 
+    @t.override
     def decode(self, bs: bytes) -> bool:
         if bs == b'\x00':
             return False
@@ -81,58 +83,64 @@ class BoolCodec(Codec):
         raise ValueError('Invalid bool representation.')
 
 
-class StringCodec(Codec):
+class StringCodec(Codec[str]):
     """Simple str<->bytest codec (UTF-8)."""
+    @t.override
     def encode(self, value: str) -> bytes:
         if not isinstance(value, str):
             raise ValueError('Value is not a string.')
         return value.encode()
 
+    @t.override
     def decode(self, bs: bytes) -> str:
         return bs.decode()
 
 
-class IntAsStringCodec(Codec):
+class IntAsStringCodec(Codec[int]):
     """Codec that represents ints as strings."""
+    @t.override
     def encode(self, value: int) -> bytes:
         if not isinstance(value, int):
             raise ValueError('Value is not an int.')
         return str(value).encode()
 
+    @t.override
     def decode(self, bs: bytes) -> int:
         return int(bs.decode())
 
 
-class FloatAsStringCodec(Codec):
+class FloatAsStringCodec(Codec[numbers.Real]):
     """
     Codec that represents floats as strings.
 
     Handles infinities and NaNs, but makes no distinction between signalling
     NaNs (all NaNs are decoded to quiet NaNs).
     """
+    @t.override
     def encode(self, value: numbers.Real) -> bytes:
         if not isinstance(value, numbers.Real):
             raise ValueError('Value is not a real number.')
         return str(value).encode()
 
+    @t.override
     def decode(self, bs: bytes) -> numbers.Real:
         return float(bs.decode())
 
 
-class EncodedNumberCodec(Codec):
+class EncodedNumberCodec[T: numbers.Number](Codec[T]):
     """Codec that encodes numbers to bytes directly."""
-    NumberType = t.TypeVar('NumberType')
-
     def __init__(self, struct_format: str) -> None:
         self._struct_format = struct_format
 
-    def encode(self, value: NumberType) -> bytes:
+    @t.override
+    def encode(self, value: T) -> bytes:
         try:
             return struct.pack(self._struct_format, value)
         except struct.error as e:
             raise ValueError('Unable to encode number.') from e
 
-    def decode(self, bs: bytes) -> NumberType:
+    @t.override
+    def decode(self, bs: bytes) -> T:
         try:
             value, = struct.unpack(self._struct_format, bs)
         except struct.error as e:
@@ -140,8 +148,8 @@ class EncodedNumberCodec(Codec):
         return value
 
 
-class EncodedIntCodec(EncodedNumberCodec):
-    NumberType = int
+class EncodedIntCodec(EncodedNumberCodec[int]):
+    pass
 
 
 class SignedInt8Codec(EncodedIntCodec):
@@ -184,8 +192,7 @@ class UnsignedInt64Codec(EncodedIntCodec):
         super().__init__('>Q')
 
 
-class EncodedFloatCodec(EncodedNumberCodec):
-    NumberType = float
+class EncodedFloatCodec(EncodedNumberCodec[numbers.Real]):
     """
     Codec that encodes floats to bytes directly.
 
@@ -203,7 +210,8 @@ class Float32Codec(EncodedFloatCodec):
     def __init__(self) -> None:
         super().__init__('>f')
 
-    def encode(self, value: float) -> bytes:
+    @t.override
+    def encode(self, value: numbers.Real) -> bytes:
         encoded = super().encode(value)
         if not math.isinf(value) and (value < self._min_value
                                       or value > self._max_value):
@@ -216,18 +224,20 @@ class Float64Codec(EncodedFloatCodec):
         super().__init__('>d')
 
 
-class UuidCodec(Codec):
+class UuidCodec(Codec[uuid.UUID]):
     """Codec for UUIDs."""
+    @t.override
     def encode(self, value: uuid.UUID) -> bytes:
         if not isinstance(value, uuid.UUID):
             raise ValueError('Value is not a UUID.')
         return value.bytes
 
+    @t.override
     def decode(self, bs: bytes) -> uuid.UUID:
         return uuid.UUID(bytes=bs)
 
 
-class UtcDatetimeCodec(Codec):
+class UtcDatetimeCodec(Codec[datetime.datetime]):
     """
     Codec for UTC datetimes.
 
@@ -241,6 +251,7 @@ class UtcDatetimeCodec(Codec):
     def __init__(self):
         self._float_codec = Float64Codec()
 
+    @t.override
     def encode(self, value: datetime.datetime) -> bytes:
         if not isinstance(value, datetime.datetime):
             raise ValueError('Value is not a datetime.')
@@ -253,6 +264,7 @@ class UtcDatetimeCodec(Codec):
         except Exception as e:
             raise ValueError('Unable to encode timestamp as float.') from e
 
+    @t.override
     def decode(self, bs: bytes) -> datetime.datetime:
         try:
             timestamp = self._float_codec.decode(bs)

@@ -15,19 +15,19 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-import collections.abc as ca
 import logging
 import redis.asyncio as redis
 import typing as t
 
-import tablecache.codec as codec
 import tablecache.db as db
 import tablecache.storage as storage
 import tablecache.subset as ss
+import tablecache.types as tp
 
 _logger = logging.getLogger(__name__)
 
-class CachedTable:
+
+class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
     """
     A cached table.
 
@@ -39,10 +39,10 @@ class CachedTable:
     load() more than once also raises a ValueError.
     """
     def __init__(
-            self, cached_subset_class: type[ss.CachedSubset],
+            self, cached_subset_class: type[CachedSubset],
             db_table: db.DbTable, *, primary_key_name: str,
-            attribute_codecs: ca.Mapping[str, codec.Codec],
-            redis_conn: redis.Redis, redis_table_name: str) -> None:
+            attribute_codecs: storage.AttributeCodecs, redis_conn: redis.Redis,
+            redis_table_name: str) -> None:
         """
         :param cached_subset_class: The type of subset to use. This class is
             used in various methods that deal with subsets, like load() and
@@ -76,7 +76,7 @@ class CachedTable:
         self._invalid_record_repo = InvalidRecordRepository()
 
     @property
-    def cached_subset(self) -> ss.CachedSubset:
+    def cached_subset(self) -> CachedSubset:
         """The subset currently cached."""
         if not self._cached_subset:
             raise ValueError('Cache has not been loaded.')
@@ -117,12 +117,12 @@ class CachedTable:
         Passes through the arguments to the cached subset's adjust(), and then
         deletes old and loads new records according to the result.
         """
-        expire_intervals, new_subset = self.cached_subset.adjust(
-            **subset_adjust_kwargs)
-        await self._storage_table.delete_record_subset(expire_intervals)
-        await self._load_subset(new_subset)
+        adjustment = self.cached_subset.adjust(**subset_adjust_kwargs)
+        await self._storage_table.delete_record_subset(
+            adjustment.expire_intervals)
+        await self._load_subset(adjustment.new_subset)
 
-    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         """
         Get a record from storage by primary key.
 
@@ -148,8 +148,8 @@ class CachedTable:
             return await self._db_table.get_record(primary_key)
 
     async def get_record_subset(
-        self, *subset_args: list[t.Any], **subset_kwargs: dict[str, t.Any]
-    ) -> t.AsyncIterator[ca.Mapping[str, t.Any]]:
+            self, *subset_args: list[t.Any],
+            **subset_kwargs: dict[str, t.Any]) -> tp.Records:
         """
         Asynchronously iterate over records from a subset.
 
@@ -169,7 +169,7 @@ class CachedTable:
         async for record in source.get_record_subset(subset):
             yield record
 
-    async def invalidate_record(self, primary_key: t.Any) -> None:
+    async def invalidate_record(self, primary_key: PrimaryKey) -> None:
         """
         Mark a single record in storage as invalid.
 

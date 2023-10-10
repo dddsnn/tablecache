@@ -16,19 +16,17 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
-import collections.abc as ca
 import typing as t
 
 import asyncpg.pool
 
 import tablecache.subset as ss
+import tablecache.types as tp
 
 
-class DbTable(abc.ABC):
+class DbTable[PrimaryKey](abc.ABC):
     @abc.abstractmethod
-    async def get_record_subset(
-            self,
-            subset: ss.Subset) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+    async def get_record_subset(self, subset: ss.Subset) -> tp.Records:
         """
         Asynchronously iterate over a subset of records.
 
@@ -38,8 +36,7 @@ class DbTable(abc.ABC):
 
     @abc.abstractmethod
     async def get_records(
-        self, primary_keys: t.Sequence[t.Any]
-    ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+            self, primary_keys: t.Sequence[PrimaryKey]) -> tp.Records:
         """
         Asynchronously iterate over records matching primary keys.
 
@@ -50,7 +47,7 @@ class DbTable(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         """
         Get a single record by primary key.
 
@@ -59,7 +56,7 @@ class DbTable(abc.ABC):
         raise NotImplementedError
 
 
-class PostgresTable(DbTable):
+class PostgresTable[PrimaryKey](DbTable[PrimaryKey]):
     """
     Postgres table abstraction.
 
@@ -94,23 +91,23 @@ class PostgresTable(DbTable):
         self.query_subset_string = query_subset_string
         self.query_pks_string = query_pks_string
 
-    async def get_record_subset(
-            self,
-            subset: ss.Subset) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+    @t.override
+    async def get_record_subset(self, subset: ss.Subset) -> tp.Records:
         async with self._pool.acquire() as conn, conn.transaction():
             cursor = conn.cursor(self.query_subset_string, *subset.db_args)
             async for record in cursor:
                 yield record
 
+    @t.override
     async def get_records(
-        self, primary_keys: t.Sequence[t.Any]
-    ) -> ca.AsyncIterator[ca.Mapping[str, t.Any]]:
+            self, primary_keys: t.Sequence[PrimaryKey]) -> tp.Records:
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(self.query_pks_string,
                                             primary_keys):
                 yield record
 
-    async def get_record(self, primary_key: t.Any) -> ca.Mapping[str, t.Any]:
+    @t.override
+    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         try:
             return await anext(self.get_records([primary_key]))
         except StopAsyncIteration as e:

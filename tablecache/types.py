@@ -15,29 +15,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-from tablecache.cache import CachedTable
-from tablecache.codec import (
-    BoolCodec,
-    Codec,
-    IntAsStringCodec,
-    Float32Codec,
-    Float64Codec,
-    FloatAsStringCodec,
-    Nullable,
-    SignedInt8Codec,
-    SignedInt16Codec,
-    SignedInt32Codec,
-    SignedInt64Codec,
-    StringCodec,
-    UnsignedInt8Codec,
-    UnsignedInt16Codec,
-    UnsignedInt32Codec,
-    UnsignedInt64Codec,
-    UtcDatetimeCodec,
-    UuidCodec,
-)
-from tablecache.db import DbTable, PostgresTable
-from tablecache.storage import CodingError, RedisTable, StorageTable
-from tablecache.subset import (
-    Adjustment, All, CachedSubset, CachedSubsetWithPrimaryKey, Interval,
-    NumberRangeSubset, Subset)
+import collections.abc as ca
+import typing as t
+
+type Record = ca.Mapping[str, t.Any]
+type Records = ca.AsyncIterator[Record]
