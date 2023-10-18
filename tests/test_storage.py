@@ -425,7 +425,7 @@ class TestRedisTable:
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=op.itemgetter('pk'))
-        await table.delete_record_subset([tc.Interval(0, 50)])
+        assert await table.delete_record_subset([tc.Interval(0, 50)]) == 0
         assert_that(
             await collect_async_iter(
                 table.get_record_subset(
@@ -437,7 +437,7 @@ class TestRedisTable:
             attribute_codecs={'pk': tc.IntAsStringCodec()},
             score_function=op.itemgetter('pk'))
         await table.put_record({'pk': 0})
-        await table.delete_record_subset([])
+        assert await table.delete_record_subset([]) == 0
         assert_that(
             await collect_async_iter(
                 table.get_record_subset(
@@ -451,7 +451,7 @@ class TestRedisTable:
         await table.put_record({'pk': 0})
         await table.put_record({'pk': 10})
         await table.put_record({'pk': 49})
-        await table.delete_record_subset([tc.Interval(0, 50)])
+        assert await table.delete_record_subset([tc.Interval(0, 50)]) == 3
         assert_that(
             await collect_async_iter(
                 table.get_record_subset(
@@ -466,7 +466,7 @@ class TestRedisTable:
         await table.put_record({'pk': 0})
         await table.put_record({'pk': 50})
         await table.put_record({'pk': 51})
-        await table.delete_record_subset([tc.Interval(0, 51)])
+        assert await table.delete_record_subset([tc.Interval(0, 51)]) == 2
         assert_that(
             await collect_async_iter(
                 table.get_record_subset(
@@ -484,14 +484,34 @@ class TestRedisTable:
         await table.put_record({'pk': 0})
         await table.put_record({'pk': 10})
         await table.put_record({'pk': 49})
-        await table.delete_record_subset([
+        num_deleted = await table.delete_record_subset([
             tc.Interval(-40, -9), tc.Interval(10, 11)])
+        assert num_deleted == 3
         assert_that(
             await collect_async_iter(
                 table.get_record_subset(
                     tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
             contains_inanyorder(
                 has_entries(pk=-50), has_entries(pk=0), has_entries(pk=49)))
+
+    async def test_delete_record_subset_deletes_overlapping_intervals(
+            self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_function=op.itemgetter('pk'))
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 10})
+        await table.put_record({'pk': 20})
+        await table.put_record({'pk': 30})
+        await table.put_record({'pk': 40})
+        num_deleted = await table.delete_record_subset([
+            tc.Interval(5, 25), tc.Interval(15, 35)])
+        assert num_deleted == 3
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset(
+                    tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=40)))
 
     async def test_delete_record_raises_if_deleted_in_subset_previously(
             self, table):

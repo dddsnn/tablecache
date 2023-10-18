@@ -93,9 +93,12 @@ class MockStorageTable(tc.StorageTable):
         del self.records[primary_key]
 
     async def delete_record_subset(self, score_intervals):
+        num_deleted = 0
         for primary_key in list(self.records):
             if any(primary_key in i for i in score_intervals):
                 del self.records[primary_key]
+                num_deleted += 1
+        return num_deleted
 
 
 class AdjustableNumberRangeSubset(tc.NumberRangeSubset):

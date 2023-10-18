@@ -102,12 +102,16 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
             f'Clearing and loading {self.cached_subset} of table '
             f'{self._storage_table.table_name}.')
         await self._storage_table.clear()
-        await self._load_subset(self.cached_subset)
+        num_loaded = await self._load_subset(self.cached_subset)
+        _logger.info(f'Loaded {num_loaded} records.')
 
     async def _load_subset(self, subset: ss.Subset) -> None:
+        num_loaded = 0
         async for record in self._db_table.get_record_subset(subset):
             await self._storage_table.put_record(record)
             self.cached_subset.observe(record)
+            num_loaded += 1
+        return num_loaded
 
     async def adjust_cached_subset(
             self, **subset_adjust_kwargs: dict[str, t.Any]) -> None:
@@ -121,9 +125,11 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         _logger.info(
             f'Adjusting table {self._storage_table.table_name} to '
             f'{self.cached_subset}.')
-        await self._storage_table.delete_record_subset(
+        num_deleted = await self._storage_table.delete_record_subset(
             adjustment.expire_intervals)
-        await self._load_subset(adjustment.new_subset)
+        num_loaded = await self._load_subset(adjustment.new_subset)
+        _logger.info(
+            f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
 
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         """

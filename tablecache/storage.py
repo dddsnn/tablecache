@@ -66,7 +66,7 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def delete_record_subset(
-            self, score_intervals: ca.Iterable[ss.Interval]) -> None:
+            self, score_intervals: ca.Iterable[ss.Interval]) -> int:
         raise NotImplementedError
 
 
@@ -238,6 +238,7 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
+        """Delete a record by primary key."""
         encoded_primary_key = self._encode_primary_key(primary_key)
         encoded_score = await self._conn.hget(
             f'{self.table_name}:key_scores', encoded_primary_key)
@@ -254,10 +255,17 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_record_subset(
-            self, score_intervals: ca.Iterable[ss.Interval]) -> None:
+            self, score_intervals: ca.Iterable[ss.Interval]) -> int:
+        """
+        Delete records with scores in any of the given intervals.
+
+        Returns the number of records deleted.
+        """
+        num_deleted = 0
         for interval in score_intervals:
-            await self._conn.zremrangebyscore(
+            num_deleted += await self._conn.zremrangebyscore(
                 f'{self.table_name}:rows', interval.ge, f'({interval.lt}')
+        return num_deleted
 
 
 class PairAsItems:
