@@ -252,14 +252,17 @@ class DeviceTsSubset(tc.CachedSubset):
             # No record has ever been observed, no need to expire anything.
             # We're not supporting loading new records here, so use an empty
             # interval for the new records.
-            return ([], DeviceTsSubset(None, '1970-01-01', '1970-01-01'))
+            self._ge = prune_until
+            return tc.Adjustment([],
+                                 DeviceTsSubset(
+                                     None, '1970-01-01', '1970-01-01'))
         if prune_until >= self._lt:
             # We're pruning everything, so expire all observed intervals and
             # load nothing new.
             intervals = self._observed_scores.values()
             self._observed_scores.clear()
             self._ge = self._lt
-            return (
+            return tc.Adjustment(
                 intervals, DeviceTsSubset(None, '1970-01-01', '1970-01-01'))
         intersection_intervals = []
         for device_id, current in list(self._observed_scores.items()):
