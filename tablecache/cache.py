@@ -118,6 +118,9 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         deletes old and loads new records according to the result.
         """
         adjustment = self.cached_subset.adjust(**subset_adjust_kwargs)
+        _logger.info(
+            f'Adjusting table {self._storage_table.table_name} to '
+            f'{self.cached_subset}.')
         await self._storage_table.delete_record_subset(
             adjustment.expire_intervals)
         await self._load_subset(adjustment.new_subset)
