@@ -184,11 +184,11 @@ class DeviceTsSubset(tc.CachedSubset):
         if self._device_id is None:
             raise ValueError('Can\'t represent scores for all devices.')
         if self._observed_scores is None:
-            return [
-                tc.Interval(
-                    self._device_ts_score(self._device_id, self._ge),
-                    self._device_ts_score(self._device_id, self._lt))]
-        yield from self._observed_scores.values()
+            yield tc.Interval(
+                self._device_ts_score(self._device_id, self._ge),
+                self._device_ts_score(self._device_id, self._lt))
+        else:
+            yield from self._observed_scores.values()
 
     @property
     @t.override
@@ -277,6 +277,8 @@ class DeviceTsSubset(tc.CachedSubset):
             else:
                 self._observed_scores[device_id] = tc.Interval(
                     new_ge, current.lt)
+        if not self._observed_scores:
+            self._observed_scores = None
         self._ge = prune_until
         # Since we're not supporting extending the subset here, we just return
         # an empty subset as the subset of new records to load.
