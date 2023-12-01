@@ -54,6 +54,50 @@ class TestNullable:
             codec.decode(encoded)
 
 
+class TestArray:
+    def test_encode_decode_on_empty(self):
+        codec = tc.Array(tc.StringCodec())
+        encoded = codec.encode([])
+        assert isinstance(encoded, bytes)
+        assert codec.decode(encoded) == []
+
+    @pytest.mark.parametrize('value', [['a'], ['a', 'b']])
+    def test_encode_decode(self, value):
+        codec = tc.Array(tc.StringCodec())
+        encoded = codec.encode(value)
+        assert isinstance(encoded, bytes)
+        decoded = codec.decode(encoded)
+        assert decoded == value
+
+    def test_encode_decode_handles_empty_element(self):
+        codec = tc.Array(tc.StringCodec())
+        encoded = codec.encode(['', 'a'])
+        assert isinstance(encoded, bytes)
+        assert codec.decode(encoded) == ['', 'a']
+
+    @pytest.mark.parametrize('value', [1, 'asd'])
+    def test_encode_raises_on_non_list(self, value):
+        codec = tc.Array(tc.StringCodec())
+        with pytest.raises(ValueError):
+            codec.encode(value)
+
+    def test_encode_raises_from_underlying_codec(self):
+        codec = tc.Array(tc.StringCodec())
+        with pytest.raises(ValueError):
+            codec.encode([1])
+
+    def test_encode_raises_on_oversized_value(self):
+        codec = tc.Array(tc.StringCodec())
+        with pytest.raises(ValueError):
+            codec.encode(65536 * 'x')
+
+    @pytest.mark.parametrize('encoded', [b'x00', b'\x00\x01', b'\x00\x01\x42'])
+    def test_decode_raises_on_invalid(self, encoded):
+        codec = tc.Array(tc.UnsignedInt16Codec())
+        with pytest.raises(ValueError):
+            codec.decode(encoded)
+
+
 class TestBoolCodec:
     @pytest.mark.parametrize('value', [True, False])
     def test_encode_decode_identity(self, value):

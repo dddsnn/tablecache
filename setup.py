@@ -29,7 +29,7 @@ with (pathlib.Path(__file__).parent / 'README.md').absolute().open() as f:
     readme = f.read()
 
 setuptools.setup(
-    name='tablecache', version='3.0.0',
+    name='tablecache', version='3.1.0',
     description='Simple cache for unwieldily joined relations.',
     long_description_content_type='text/markdown', long_description=readme,
     author="Marc Lehmann", author_email="marc.lehmann@gmx.de",

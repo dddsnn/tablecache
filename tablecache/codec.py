@@ -66,6 +66,41 @@ class Nullable[T](Codec[t.Optional[T]]):
         return self._value_codec.decode(bs[1:])
 
 
+class Array[T](Codec[list[T]]):
+    """
+    Wrapper codec that allows representing arrays (i.e. lists).
+
+    Encodes elements using an inner codec. The length of each element is
+    encoded using a 16-bit unsigned integer, so elements must not be over 65535
+    bytes long.
+    """
+    def __init__(self, value_codec: Codec[T]):
+        self._value_codec = value_codec
+        self._length_codec = UnsignedInt16Codec()
+
+    @t.override
+    def encode(self, values: list[T]) -> bytes:
+        if not isinstance(values, list):
+            raise ValueError('Value must be a list.')
+        encoded = bytearray()
+        for value in values:
+            encoded_value = self._value_codec.encode(value)
+            encoded += self._length_codec.encode(len(encoded_value))
+            encoded += encoded_value
+        return bytes(encoded)
+
+    @t.override
+    def decode(self, bs: bytes) -> list[T]:
+        values = []
+        i = 0
+        while i < len(bs):
+            value_length = self._length_codec.decode(bs[i:i + 2])
+            value = self._value_codec.decode(bs[i + 2:i + 2 + value_length])
+            values.append(value)
+            i += 2 + value_length
+        return values
+
+
 class BoolCodec(Codec[bool]):
     """Codec that represents bools as single bytes."""
     @t.override

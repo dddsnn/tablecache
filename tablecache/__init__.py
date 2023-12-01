@@ -17,6 +17,7 @@
 
 from tablecache.cache import CachedTable
 from tablecache.codec import (
+    Array,
     BoolCodec,
     Codec,
     IntAsStringCodec,
