@@ -79,7 +79,9 @@ the `CachedSubset` implementation. When primary keys are numbers, it's
 perfectly legal to use the primary key itself as the score
 (`tablecache.NumberRangeSubset.with_primary_key('name_of_the_primary_key')`
 returns a `CachedSubset` subclass that can be used). If the primary key is not
-a numerical, using its hash may be a good option.
+numerical, using its hash may be a good option. Note however that a record's
+score must not change when the record changes, so the score should probably
+only depend on immutable fields.
 
 The classical example for a more meaningful use of the score is timeseries
 data, where each record has a timestamp field (separate from the primary key)

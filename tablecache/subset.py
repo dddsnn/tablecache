@@ -104,7 +104,11 @@ class CachedSubset(Subset):
     @classmethod
     @abc.abstractmethod
     def record_score(cls, record: tp.Record) -> numbers.Real:
-        """Calculate a record's score."""
+        """
+        Calculate a record's score.
+
+        The score of a record never changes, even if the record is modified.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
