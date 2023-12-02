@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import numbers
 import redis.asyncio as redis
 import typing as t
 
@@ -178,7 +179,9 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         async for record in source.get_record_subset(subset):
             yield record
 
-    async def invalidate_record(self, primary_key: PrimaryKey) -> None:
+    async def invalidate_record(
+            self, primary_key: PrimaryKey,
+            score_hint: t.Optional[numbers.Real] = None) -> None:
         """
         Mark a single record in storage as invalid.
 
@@ -187,22 +190,30 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         record was updated in the DB, or newly added altogether. Data belonging
         to an invalidated key is guaranteed to be fetched from the DB again
         before being served to a client. Keys that are no longer found in the
-        DB are deleted. Keys that aren't in cache at all are loaded
-        immediately.
+        DB are deleted. Keys that aren't in cache at all are loaded.
 
-        Implementation note: refreshed records aren't observed for the cached
-        subset again. Since record scores aren't allowed to change as per the
-        Subset contract, this isn't an issue.
+        Internally, the score of the record is required to mark it invalid for
+        subset queries. The score may be given as the score_hint parameter. The
+        implementation will trust that this parameter is correct, and supplying
+        a wrong one will lead to to record not being properly invalidated. When
+        not supplying one at all, the current record is first fetched from
+        storage in order to calculate the score at a small extra cost.
+
+        Implementation note: updated and deleted records aren't observed for
+        the cached subset again. As long as record scores aren't allowed to
+        change even when the record does (as per the Subset contract), this
+        isn't an issue. Records that were newly added are observed so the
+        subset can add their scores.
         """
-        try:
-            record = await self._storage_table.get_record(primary_key)
-            self._invalidate_flag_existing(primary_key, record)
-        except KeyError:
-            await self._invalidate_add_new(primary_key)
-
-    def _invalidate_flag_existing(self, primary_key, record):
-        score = self.cached_subset.record_score(record)
-        self._invalid_record_repo.flag_invalid(primary_key, score)
+        if score_hint is not None:
+            self._invalid_record_repo.flag_invalid(primary_key, score_hint)
+        else:
+            try:
+                record = await self._storage_table.get_record(primary_key)
+                score = self.cached_subset.record_score(record)
+                self._invalid_record_repo.flag_invalid(primary_key, score)
+            except KeyError:
+                await self._invalidate_add_new(primary_key)
 
     async def _invalidate_add_new(self, primary_key):
         try:
@@ -218,7 +229,10 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         _logger.info(
             f'Refreshing {len(self._invalid_record_repo)} invalid keys.')
         for key in self._invalid_record_repo.invalid_primary_keys:
-            await self._storage_table.delete_record(key)
+            try:
+                await self._storage_table.delete_record(key)
+            except KeyError:
+                pass
         async for record in self._db_table.get_records(
                 self._invalid_record_repo.invalid_primary_keys):
             await self._storage_table.put_record(record)

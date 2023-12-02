@@ -363,6 +363,40 @@ class TestCachedTable:
             await table.get_record(2)
         assert_that(await table.get_record(1), has_entries(pk=1, k='a1'))
 
+    async def test_invalidate_record_uses_score_hint(
+            self, make_table, db_table):
+        subset_class = AdjustableNumberRangeSubset.with_primary_key('pk')
+        table = make_table(subset_class)
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        await table.load(*_inf_to_inf)
+        updated = {'pk': 1, 'k': 'b1'}
+        db_table.records = {1: updated}
+        await table.invalidate_record(
+            1,
+            subset_class.record_score(updated) + 1000)
+        assert_that(
+            await collect_async_iter(table.get_record_subset(0, 2)),
+            contains_inanyorder(has_entries(pk=1, k='a1')))
+        await table.invalidate_record(1, subset_class.record_score(updated))
+        assert_that(
+            await collect_async_iter(table.get_record_subset(0, 2)),
+            contains_inanyorder(has_entries(pk=1, k='b1')))
+
+    async def test_invalidate_record_with_score_hint_works_with_newly_added(
+            self, make_table, db_table):
+        subset_class = AdjustableNumberRangeSubset.with_primary_key('pk')
+        table = make_table(subset_class)
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        await table.load(*_inf_to_inf)
+        new_record = {'pk': 2, 'k': 'a2'}
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: new_record}
+        await table.invalidate_record(2, subset_class.record_score(new_record))
+        assert_that(
+            await collect_async_iter(table.get_record_subset(0, 3)),
+            contains_inanyorder(
+                has_entries(pk=1, k='a1'), has_entries(pk=2, k='a2')))
+        assert_that(await table.get_record(2), has_entries(pk=2, k='a2'))
+
     async def test_adjust_cached_subset_prunes_old_data(
             self, make_table, db_table):
         table = make_table(AdjustableNumberRangeSubset.with_primary_key('pk'))
