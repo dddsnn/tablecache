@@ -262,14 +262,15 @@ class TestCachedTable:
         db_table.records = {1: {'pk': 1, 'k': 'v2'}}
         assert_that(await table.get_record(1), has_entries(pk=1, k='v1'))
 
-    async def test_get_record_refreshes_invalid_keys(self, table, db_table):
+    async def test_get_record_refreshes_existing_invalid_keys(
+            self, table, db_table):
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
         await table.load()
         db_table.records = {1: {'pk': 1, 'k': 'b1'}}
         await table.invalidate_record(1)
         assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
 
-    async def test_get_record_subset_refreshes_invalid_keys(
+    async def test_get_record_subset_refreshes_existing_invalid_keys(
             self, make_table, db_table):
         table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
@@ -279,6 +280,25 @@ class TestCachedTable:
         assert_that(
             await collect_async_iter(table.get_record_subset(1, 2)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
+
+    async def test_get_record_loads_new_invalid_keys(self, table, db_table):
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        await table.load()
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: {'pk': 2, 'k': 'a2'}}
+        await table.invalidate_record(2)
+        assert_that(await table.get_record(2), has_entries(pk=2, k='a2'))
+
+    async def test_get_record_subset_loads_new_invalid_keys(
+            self, make_table, db_table):
+        table = make_table(tc.NumberRangeSubset.with_primary_key('pk'))
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        await table.load(*_inf_to_inf)
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: {'pk': 2, 'k': 'a2'}}
+        await table.invalidate_record(2)
+        assert_that(
+            await collect_async_iter(table.get_record_subset(1, 3)),
+            contains_inanyorder(
+                has_entries(pk=1, k='a1'), has_entries(pk=2, k='a2')))
 
     async def test_get_record_only_refreshes_once(self, table, db_table):
         db_table.records = {1: {'pk': 1, 'k': 'a1'}}
@@ -321,6 +341,18 @@ class TestCachedTable:
             await collect_async_iter(table.get_record_subset(0, 3)),
             contains_inanyorder(
                 has_entries(pk=0, k='a0'), has_entries(pk=2, k='a2')))
+
+    async def test_invalidate_record_observes_newly_added(
+            self, make_table, db_table):
+        subset_class = AdjustableNumberRangeSubset.with_primary_key('pk')
+        table = make_table(subset_class)
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        await table.load(*_inf_to_inf)
+        new_record = {'pk': 2, 'k': 'a2'}
+        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: new_record}
+        await table.invalidate_record(2)
+        table.cached_subset.observe.assert_called_with(
+            new_record | {'source': 'db'})
 
     async def test_invalidate_record_ignores_nonexistent_keys(
             self, table, db_table):

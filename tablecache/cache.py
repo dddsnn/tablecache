@@ -182,9 +182,13 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         """
         Mark a single record in storage as invalid.
 
-        Data belonging to an invalidated key is guaranteed to be fetched from
-        the DB again before being served to a client. Keys that are no longer
-        found in the DB are deleted. Keys that aren't in cache are ignored.
+        The record with the given primary key is marked as not existing in
+        storage with the same data as in DB. This could be either because the
+        record was updated in the DB, or newly added altogether. Data belonging
+        to an invalidated key is guaranteed to be fetched from the DB again
+        before being served to a client. Keys that are no longer found in the
+        DB are deleted. Keys that aren't in cache at all are loaded
+        immediately.
 
         Implementation note: refreshed records aren't observed for the cached
         subset again. Since record scores aren't allowed to change as per the
@@ -192,13 +196,23 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         """
         try:
             record = await self._storage_table.get_record(primary_key)
+            self._invalidate_flag_existing(primary_key, record)
+        except KeyError:
+            await self._invalidate_add_new(primary_key)
+
+    def _invalidate_flag_existing(self, primary_key, record):
+        score = self.cached_subset.record_score(record)
+        self._invalid_record_repo.flag_invalid(primary_key, score)
+
+    async def _invalidate_add_new(self, primary_key):
+        try:
+            record = await self._db_table.get_record(primary_key)
+            await self._storage_table.put_record(record)
+            self.cached_subset.observe(record)
         except KeyError:
             _logger.debug(
                 f'Ignoring attempt to invalidate primary key {primary_key} '
                 'which doesn\'t exist.')
-            return
-        score = self.cached_subset.record_score(record)
-        self._invalid_record_repo.flag_invalid(primary_key, score)
 
     async def _refresh_invalid(self) -> None:
         _logger.info(

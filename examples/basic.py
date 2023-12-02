@@ -97,6 +97,15 @@ async def main():
         print(f'User 1 still with old name: {await table.get_record(1)}')
         await table.invalidate_record(1)
         print(f'User 1 with new name: {await table.get_record(1)}')
+        # We can also invalidate primary keys that didn't exist in cache at all
+        # yet. This will cause them to be loaded.
+        await postgres_pool.execute(
+            '''
+            INSERT INTO users(user_id, name) VALUES(3, 'User 3');
+            INSERT INTO users_cities(user_id, city_id)
+            SELECT 3, city_id FROM cities LIMIT 1''')
+        await table.invalidate_record(3)
+        print(f'Newly inserted user 3: {await table.get_record(3)}')
     await redis_conn.close()
 
 
