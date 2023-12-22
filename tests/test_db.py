@@ -99,10 +99,10 @@ def insert_user(pool):
 
 
 async def collect_async_iter(i):
-    l = []
+    ls = []
     async for item in i:
-        l.append(item)
-    return l
+        ls.append(item)
+    return ls
 
 
 class TestPostgresTable:

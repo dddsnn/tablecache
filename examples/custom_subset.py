@@ -24,13 +24,13 @@ import pathlib
 import sys
 import typing as t
 
-sys.path.append(str(pathlib.Path(__file__).parent.parent))
-
 import asyncpg
 import redis.asyncio as redis
 
 import tablecache as tc
 import tablecache.types as tp
+
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
 
 # In this example, we have a table of timestamped device data, and we want to
@@ -64,7 +64,7 @@ async def main():
         attribute_codecs={
             'data_id': tc.IntAsStringCodec(),
             'data': tc.IntAsStringCodec(),
-            'ts': tc.UtcDatetimeCodec(),},
+            'ts': tc.UtcDatetimeCodec(), },
         redis_conn=redis_conn,
         redis_table_name='device_data',
     )

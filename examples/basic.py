@@ -20,12 +20,12 @@ import contextlib
 import pathlib
 import sys
 
-sys.path.append(str(pathlib.Path(__file__).parent.parent))
-
 import asyncpg
 import redis.asyncio as redis
 
 import tablecache as tc
+
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
 
 # In this basic example, we have 2 Postgres tables that are joined together,
@@ -77,7 +77,7 @@ async def main():
             'user_id': tc.IntAsStringCodec(),
             'user_name': tc.StringCodec(),
             'user_nickname': tc.Nullable(tc.StringCodec()),
-            'city_name': tc.StringCodec(),},
+            'city_name': tc.StringCodec(), },
         redis_conn=redis_conn,
         redis_table_name='users_cities',
     )

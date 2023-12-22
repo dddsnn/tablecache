@@ -39,6 +39,7 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
     happen. Many methods will raise a ValueError if this wasn't done. Calling
     load() more than once also raises a ValueError.
     """
+
     def __init__(
             self, cached_subset_class: type[CachedSubset],
             db_table: db.DbTable, *, primary_key_name: str,

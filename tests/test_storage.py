@@ -59,10 +59,10 @@ async def conn(wait_for_redis, redis_host):
 
 
 async def collect_async_iter(i):
-    l = []
+    ls = []
     async for item in i:
-        l.append(item)
-    return l
+        ls.append(item)
+    return ls
 
 
 class FailCodec(tc.Codec):
@@ -95,8 +95,8 @@ class TestRedisTable:
     @pytest.fixture
     def make_table(self, conn):
         def factory(
-            table_name='table', primary_key_name='pk', attribute_codecs=None,
-            score_function=op.itemgetter('pk')):
+                table_name='table', primary_key_name='pk',
+                attribute_codecs=None, score_function=op.itemgetter('pk')):
             attribute_codecs = attribute_codecs or {
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
             return tc.RedisTable(
@@ -170,7 +170,7 @@ class TestRedisTable:
         table = make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(),
-                's': BrokenStringReturningCodec(),})
+                's': BrokenStringReturningCodec(), })
         with pytest.raises(tc.CodingError):
             await table.put_record({'pk': 1, 's': 's1'})
 
@@ -614,7 +614,7 @@ class TestRowCodec:
 
         codec = make_codec({
             'i': tc.IntAsStringCodec(),
-            's': BrokenStringReturningCodec(),})
+            's': BrokenStringReturningCodec(), })
         with pytest.raises(tc.CodingError):
             codec.encode({'i': 1, 's': 's1'})
 

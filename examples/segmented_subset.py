@@ -25,13 +25,13 @@ import pathlib
 import sys
 import typing as t
 
-sys.path.append(str(pathlib.Path(__file__).parent.parent))
-
 import asyncpg
 import redis.asyncio as redis
 
 import tablecache as tc
 import tablecache.types as tp
+
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
 
 # This example builds on custom_subset.py, but here each row of data has a
@@ -64,7 +64,7 @@ async def main():
             'data_id': tc.IntAsStringCodec(),
             'device_id': tc.IntAsStringCodec(),
             'data': tc.IntAsStringCodec(),
-            'ts': tc.UtcDatetimeCodec(),},
+            'ts': tc.UtcDatetimeCodec(), },
         redis_conn=redis_conn,
         redis_table_name='device_data',
     )

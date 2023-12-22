@@ -7,3 +7,12 @@ addopts = "-v -l"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 log_level = "INFO"
+
+[tool.autopep8]
+ignore = ""
+
+[tool.flake8]
+per-file-ignores = [
+    "__init__.py: F401",
+    "tests/*.py: F403, F405"
+]

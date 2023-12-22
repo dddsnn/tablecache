@@ -50,6 +50,7 @@ class Nullable[T](Codec[t.Optional[T]]):
     Encodes optional values by using an inner codec for values, and a marker
     for None.
     """
+
     def __init__(self, value_codec: Codec[T]):
         self._value_codec = value_codec
 
@@ -74,6 +75,7 @@ class Array[T](Codec[list[T]]):
     encoded using a 16-bit unsigned integer, so elements must not be over 65535
     bytes long.
     """
+
     def __init__(self, value_codec: Codec[T]):
         self._value_codec = value_codec
         self._length_codec = UnsignedInt16Codec()
@@ -164,6 +166,7 @@ class FloatAsStringCodec(Codec[numbers.Real]):
 
 class EncodedNumberCodec[T: numbers.Number](Codec[T]):
     """Codec that encodes numbers to bytes directly."""
+
     def __init__(self, struct_format: str) -> None:
         self._struct_format = struct_format
 
@@ -283,6 +286,7 @@ class UtcDatetimeCodec(Codec[datetime.datetime]):
     other value results in a ValueError. Naive datetimes are treated as though
     they are UTC. When decoding datetimes in UTC are returned.
     """
+
     def __init__(self):
         self._float_codec = Float64Codec()
 

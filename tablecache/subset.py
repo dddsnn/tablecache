@@ -103,7 +103,9 @@ class CachedSubset(Subset):
     """
     @classmethod
     @abc.abstractmethod
-    def record_score(cls, record: tp.Record) -> numbers.Real:
+    def record_score(
+        cls, record: tp.Record, index_name: str = 'primary_key'
+    ) -> numbers.Real:
         """
         Calculate a record's score.
 
@@ -167,6 +169,7 @@ class All(CachedSubsetWithPrimaryKey):
     Scores are the hash of the primary key. Defines no DB query arguments and
     is not adjustable.
     """
+
     def __repr__(self):
         return f'all (with primary key named {self._primary_key_name})'
 
@@ -204,6 +207,7 @@ class NumberRangeSubset(CachedSubsetWithPrimaryKey):
     primary key. The DB args are a 2-tuple specifying the lower and upper
     bound.
     """
+
     def __init__(self, ge: numbers.Real, lt: numbers.Real) -> None:
         self._ge = ge
         self._lt = lt

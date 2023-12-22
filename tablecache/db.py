@@ -69,6 +69,7 @@ class PostgresTable[PrimaryKey](DbTable[PrimaryKey]):
     have a column functioning as primary key, i.e. one that uniquely identifies
     any row in the table.
     """
+
     def __init__(
             self, pool: asyncpg.pool.Pool, query_subset_string: str,
             query_pks_string: str) -> None:

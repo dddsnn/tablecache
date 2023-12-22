@@ -275,6 +275,7 @@ class PairAsItems:
     A workaround to pass a non-hashable key to redis, since the library expects
     things implementing items().
     """
+
     def __init__(self, key, value):
         self.key = key
         self.value = value
@@ -295,6 +296,7 @@ class AttributeIdMap:
     Also supports iteration, yielding tuples of attribute name, attribute ID,
     and value.
     """
+
     def __init__(self, named_attributes: ca.Mapping[str, t.Any]) -> None:
         self.attribute_names = frozenset(named_attributes)
         self._data = {}
@@ -318,6 +320,7 @@ class RowCodec:
     Encodes and decodes records into bytes. Uses an AttributeIdMap to generate
     small attribute IDs for each of a given set of named attributes.
     """
+
     def __init__(
             self, attribute_codecs: AttributeCodecs,
             num_bytes_attribute_length: int = 2) -> None:
@@ -346,9 +349,9 @@ class RowCodec:
         by the number of bytes configured to store attribute length).
         """
         encoded_record = bytearray()
-        for attribute_name, attribute_id, codec in self._attribute_codecs:
+        for attribute_name, attribute_id, codec_ in self._attribute_codecs:
             encoded_attribute = self._encode_attribute(
-                record, attribute_name, codec)
+                record, attribute_name, codec_)
             encoded_record += attribute_id
             encoded_record += len(encoded_attribute).to_bytes(
                 length=self.num_bytes_attribute_length)
@@ -359,7 +362,7 @@ class RowCodec:
         try:
             attribute = record[attribute_name]
         except KeyError as e:
-            raise ValueError(f'Attribute missing from {record}.')
+            raise ValueError(f'Attribute missing from {record}.') from e
         try:
             encoded_attribute = codec.encode(attribute)
         except Exception as e:
