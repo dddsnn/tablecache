@@ -23,12 +23,10 @@ import typing as t
 import redis.asyncio as redis
 
 import tablecache.codec as codec
-import tablecache.subset as ss
+import tablecache.index as index
 import tablecache.types as tp
 
 type AttributeCodecs = ca.Mapping[str, codec.Codec]
-type ScoreFunction = t.Callable[[ca.Mapping[str, t.Any]], numbers.Real]
-
 
 class CodingError(Exception):
     """
@@ -56,8 +54,9 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def get_record_subset(
-            self, score_min: numbers.Real,
-            score_max: numbers.Real) -> tp.Records:
+            self, index_name: str,
+            score_intervals: ca.Iterable[index.Interval],
+            recheck_predicate: ca.Callable[[tp.Record], bool]) -> tp.Records:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -66,7 +65,7 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def delete_record_subset(
-            self, score_intervals: ca.Iterable[ss.Interval]) -> int:
+            self, score_intervals: ca.Iterable[index.Interval]) -> int:
         raise NotImplementedError
 
 
@@ -74,7 +73,7 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
     def __init__(
             self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
             attribute_codecs: AttributeCodecs,
-            score_function: ScoreFunction) -> None:
+            score_functions: t.Mapping[str, tp.ScoreFunction]) -> None:
         """
         A table stored in Redis.
 
@@ -111,16 +110,15 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
             raise ValueError('Attribute names must be strings.')
+        if primary_key_name not in attribute_codecs:
+            raise ValueError('Codec for primary key is missing.')
+        if 'primary_key' not in score_functions:
+            raise ValueError
         self._conn = conn
         self._table_name = table_name
         self._primary_key_name = primary_key_name
-        try:
-            self._primary_key_codec = attribute_codecs[primary_key_name]
-        except KeyError:
-            raise ValueError('Codec for primary key is missing.')
         self._row_codec = RowCodec(attribute_codecs)
-        self._score_function = score_function
-        self._score_codec = codec.FloatAsStringCodec()
+        self._score_functions = score_functions
 
     @property
     @t.override
@@ -130,8 +128,7 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
     @t.override
     async def clear(self) -> None:
         """Delete all data belonging to this table."""
-        await self._conn.delete(
-            f'{self.table_name}:rows', f'{self.table_name}:key_scores')
+        await self._conn.delete(f'{self.table_name}:rows')
 
     @t.override
     async def put_record(self, record: tp.Record) -> None:
@@ -152,51 +149,35 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         except KeyError as e:
             raise ValueError(
                 f'Record {record} is missing a primary key.') from e
-        encoded_primary_key = await self._maybe_delete_old_record(primary_key)
-        score = self._score_function(record)
-        await self._conn.hset(
-            f'{self.table_name}:key_scores', encoded_primary_key,
-            self._score_codec.encode(score))
+        await self._maybe_delete_old_record(primary_key)
+        primary_key_score = self._score_functions['primary_key'](**record)
         encoded_record = self._row_codec.encode(record)
         await self._conn.zadd(
             f'{self.table_name}:rows',
-            mapping=PairAsItems(memoryview(encoded_record), score))
+            mapping=PairAsItems(memoryview(encoded_record), primary_key_score))
 
     async def _maybe_delete_old_record(self, primary_key):
         try:
-            encoded_primary_key, old_encoded_record, _ = await self._get(
+            old_encoded_record, _ = await self._get(
                 primary_key)
             await self._conn.zrem(
                 f'{self.table_name}:rows', old_encoded_record)
         except KeyError:
-            encoded_primary_key = self._encode_primary_key(primary_key)
-        return encoded_primary_key
-
-    def _encode_primary_key(self, key):
-        try:
-            return self._primary_key_codec.encode(key)
-        except Exception as e:
-            raise CodingError(f'Unable to encode primary key {key}.') from e
+            pass
 
     async def _get(self, primary_key):
-        encoded_primary_key = self._encode_primary_key(primary_key)
-        encoded_score = await self._conn.hget(
-            f'{self.table_name}:key_scores', encoded_primary_key)
-        if encoded_score is None:
-            raise KeyError(
-                f'No record with {self._primary_key_name}={primary_key}.')
-        score = self._score_codec.decode(encoded_score)
+        primary_key_score = self._score_functions['primary_key'](
+            **{self._primary_key_name: primary_key})
         encoded_records = await self._conn.zrange(
-            f'{self.table_name}:rows', score, score, byscore=True)
+            f'{self.table_name}:rows', primary_key_score, primary_key_score,
+            byscore=True)
         for encoded_record in encoded_records:
             decoded_record = self._row_codec.decode(encoded_record)
             if decoded_record[self._primary_key_name] == primary_key:
-                return encoded_primary_key, encoded_record, decoded_record
+                return encoded_record, decoded_record
         # A score exists for that key, but no record with that score. This
         # happens when deleting ranges, where we don't have access to the keys
         # belonging to the scores we delete. Clean this up here.
-        await self._conn.hdel(
-            f'{self.table_name}:key_scores', encoded_primary_key)
         raise KeyError(
             f'No record with {self._primary_key_name}={primary_key}.')
 
@@ -212,11 +193,15 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         which there exists a codec, or an error occurs when decoding the set of
         attributes.
         """
-        _, _, decoded_record = await self._get(primary_key)
+        _, decoded_record = await self._get(primary_key)
         return decoded_record
 
     @t.override
-    async def get_record_subset(self, subset: ss.Subset) -> tp.Records:
+    async def get_record_subset(
+            self, index_name: str,
+            score_intervals: ca.Iterable[index.Interval],
+            recheck_predicate: ca.Callable[[tp.Record], bool] = None
+    ) -> tp.Records:
         """
         Get records with scores within a subset.
 
@@ -227,35 +212,36 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
         No particular order is guaranteed.
         """
+        if index_name != 'primary_key':
+            raise NotImplementedError
         # Prefixing the end of the range with '(' is the Redis way of saying we
         # want the interval to be open on that end.
-        for interval in subset.score_intervals:
+        for interval in score_intervals:
             encoded_records = await self._conn.zrange(
                 f'{self.table_name}:rows', interval.ge, f'({interval.lt}',
                 byscore=True)
             for encoded_record in encoded_records:
-                yield self._row_codec.decode(encoded_record)
+                decoded_record = self._row_codec.decode(encoded_record)
+                if (recheck_predicate is None
+                        or recheck_predicate(decoded_record)):
+                    yield decoded_record
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
         """Delete a record by primary key."""
-        encoded_primary_key = self._encode_primary_key(primary_key)
-        encoded_score = await self._conn.hget(
-            f'{self.table_name}:key_scores', encoded_primary_key)
-        if encoded_score is None:
-            raise KeyError(
-                f'No record with {self._primary_key_name}={primary_key}.')
-        await self._conn.hdel(
-            f'{self.table_name}:key_scores', encoded_primary_key)
+        primary_key_score = self._score_functions['primary_key'](
+            **{self._primary_key_name: primary_key})
         num_removed = await self._conn.zremrangebyscore(
-            f'{self.table_name}:rows', encoded_score, encoded_score)
+            f'{self.table_name}:rows', primary_key_score, primary_key_score)
         if not num_removed:
             raise KeyError(
                 f'No record with {self._primary_key_name}={primary_key}.')
+        if num_removed > 1:
+            raise NotImplementedError
 
     @t.override
     async def delete_record_subset(
-            self, score_intervals: ca.Iterable[ss.Interval]) -> int:
+            self, score_intervals: ca.Iterable[index.Interval]) -> int:
         """
         Delete records with scores in any of the given intervals.
 

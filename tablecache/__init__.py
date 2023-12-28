@@ -38,7 +38,6 @@ from tablecache.codec import (
     UuidCodec,
 )
 from tablecache.db import DbTable, PostgresTable
+from tablecache.index import Adjustment, Indexes, Interval, PrimaryKeyIndexes
 from tablecache.storage import CodingError, RedisTable, StorageTable
-from tablecache.subset import (
-    Adjustment, All, CachedSubset, CachedSubsetWithPrimaryKey, Interval,
-    NumberRangeSubset, Subset)
+from tablecache.types import Record, Records, ScoreFunction

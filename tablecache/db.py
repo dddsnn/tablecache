@@ -20,13 +20,13 @@ import typing as t
 
 import asyncpg.pool
 
-import tablecache.subset as ss
 import tablecache.types as tp
 
 
-class DbTable[PrimaryKey](abc.ABC):
+
+class DbTable(abc.ABC):
     @abc.abstractmethod
-    async def get_record_subset(self, subset: ss.Subset) -> tp.Records:
+    async def get_records(self, query: str, *args: t.Any) -> tp.Records:
         """
         Asynchronously iterate over a subset of records.
 
@@ -34,29 +34,18 @@ class DbTable[PrimaryKey](abc.ABC):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    async def get_records(
-            self, primary_keys: t.Sequence[PrimaryKey]) -> tp.Records:
+
+
+    async def get_record(self, query: str, *args: t.Any) -> tp.Record:
         """
-        Asynchronously iterate over records matching primary keys.
-
-        Yields all records whose primary key matches one in the given sequence.
-        If a key doesn't exist in the table, it is ignored and no error is
-        raised.
         """
-        raise NotImplementedError
-
-    @abc.abstractmethod
-    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
-        """
-        Get a single record by primary key.
-
-        Raises a KeyError if no matching record exists.
-        """
-        raise NotImplementedError
+        try:
+            return await anext(self.get_records(query, *args))
+        except StopAsyncIteration as e:
+            raise KeyError from e
 
 
-class PostgresTable[PrimaryKey](DbTable[PrimaryKey]):
+class PostgresTable(DbTable):
     """
     Postgres table abstraction.
 
@@ -70,9 +59,7 @@ class PostgresTable[PrimaryKey](DbTable[PrimaryKey]):
     any row in the table.
     """
 
-    def __init__(
-            self, pool: asyncpg.pool.Pool, query_subset_string: str,
-            query_pks_string: str) -> None:
+    def __init__(self, pool: asyncpg.pool.Pool) -> None:
         """
         :param pool: A connection pool that is ready to be used (i.e. already
             set up and connected).
@@ -89,27 +76,11 @@ class PostgresTable[PrimaryKey](DbTable[PrimaryKey]):
             be created from a similar base query as the query_subset_string.
         """
         self._pool = pool
-        self.query_subset_string = query_subset_string
-        self.query_pks_string = query_pks_string
+
 
     @t.override
-    async def get_record_subset(self, subset: ss.Subset) -> tp.Records:
+    async def get_records(self, query: str, *args: t.Any) -> tp.Records:
         async with self._pool.acquire() as conn, conn.transaction():
-            cursor = conn.cursor(self.query_subset_string, *subset.db_args)
-            async for record in cursor:
+            async for record in conn.cursor(query, *args):
                 yield record
 
-    @t.override
-    async def get_records(
-            self, primary_keys: t.Sequence[PrimaryKey]) -> tp.Records:
-        async with self._pool.acquire() as conn, conn.transaction():
-            async for record in conn.cursor(self.query_pks_string,
-                                            primary_keys):
-                yield record
-
-    @t.override
-    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
-        try:
-            return await anext(self.get_records([primary_key]))
-        except StopAsyncIteration as e:
-            raise KeyError from e

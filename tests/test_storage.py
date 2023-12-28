@@ -16,7 +16,6 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
-import operator as op
 import unittest.mock as um
 
 from hamcrest import *
@@ -25,6 +24,8 @@ import redis.asyncio as redis
 
 import tablecache.storage as storage
 import tablecache as tc
+
+_inf_to_inf = tc.Interval(float('-inf'), float('inf'))
 
 
 @pytest.fixture(scope='session')
@@ -65,26 +66,18 @@ async def collect_async_iter(i):
     return ls
 
 
+def filter_kwarg(kwarg_name):
+    def filter(**kwargs):
+        return kwargs[kwarg_name]
+    return filter
+
+
 class FailCodec(tc.Codec):
     def encode(self, _):
         raise Exception
 
     def decode(self, _):
         raise Exception
-
-
-class MultiNumberRangeSubset(tc.Subset):
-    def __init__(self, *interval_bounds):
-        self._score_intervals = [
-            tc.Interval(ge, lt) for ge, lt in interval_bounds]
-
-    @property
-    def score_intervals(self):
-        return self._score_intervals
-
-    @property
-    def db_args(self):
-        raise NotImplementedError
 
 
 class TestRedisTable:
@@ -96,13 +89,15 @@ class TestRedisTable:
     def make_table(self, conn):
         def factory(
                 table_name='table', primary_key_name='pk',
-                attribute_codecs=None, score_function=op.itemgetter('pk')):
+                attribute_codecs=None, score_functions=None):
             attribute_codecs = attribute_codecs or {
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
+            score_functions = score_functions or {
+                'primary_key': filter_kwarg(primary_key_name)}
             return tc.RedisTable(
                 conn, table_name=table_name, primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs,
-                score_function=score_function)
+                score_functions=score_functions)
 
         return factory
 
@@ -146,15 +141,12 @@ class TestRedisTable:
         with pytest.raises(ValueError):
             await table.put_record({'pk': 1})
 
-    async def test_put_raises_on_primary_key_encoding_error(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': FailCodec(), 's': tc.StringCodec()})
-        with pytest.raises(tc.CodingError):
-            await table.put_record({'pk': 1, 's': 's1'})
-
-    async def test_put_raises_on_attribute_encoding_error(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec(), 's': FailCodec()})
+    @pytest.mark.parametrize('fail_attribute', ['pk', 's'])
+    async def test_put_raises_on_attribute_encoding_error(
+            self, make_table, fail_attribute):
+        attribute_codecs = {'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
+        attribute_codecs[fail_attribute] = FailCodec()
+        table = make_table(attribute_codecs=attribute_codecs)
         with pytest.raises(tc.CodingError):
             await table.put_record({'pk': 1, 's': 's1'})
 
@@ -174,7 +166,8 @@ class TestRedisTable:
         with pytest.raises(tc.CodingError):
             await table.put_record({'pk': 1, 's': 's1'})
 
-    async def test_put_removes_old_value(self, table, conn):
+    async def test_put_overwrites_old_value_with_same_primary_key(
+            self, table, conn):
         assert await conn.zcard('table:rows') == 0
         await table.put_record({'pk': 1, 's': 'a'})
         await table.put_record({'pk': 1, 's': 'b'})
@@ -188,33 +181,24 @@ class TestRedisTable:
     async def test_put_doesnt_overwrite_other_records_with_same_score(
             self, make_table, conn):
         table = make_table(
-            attribute_codecs={
-                'pk': tc.IntAsStringCodec(), 'i': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('i'))
-        await table.put_record({'pk': 1, 'i': 10})
-        await table.put_record({'pk': 2, 'i': 10})
-        await table.put_record({'pk': 1, 'i': 15})
-        assert_that(await table.get_record(1), has_entries(pk=1, i=15))
-        assert_that(await table.get_record(2), has_entries(pk=2, i=10))
-        assert await conn.zcard('table:rows') == 2
+            score_functions={'primary_key': lambda **kwargs: kwargs['pk'] % 2})
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 3, 's': 's3'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        assert_that(await table.get_record(3), has_entries(pk=3, s='s3'))
+        scores = {
+            s for (_, s) in
+            await conn.zrange(
+                'table:rows', 0, 3, byscore=True, withscores=True)}
+        assert len(scores) == 1
 
     async def test_get_raises_on_nonexistent(self, table):
         with pytest.raises(KeyError):
             await table.get_record(1)
 
-    async def test_get_raises_on_primary_key_encoding_error(self, make_table):
-        await make_table(
-            attribute_codecs={
-                'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
-        ).put_record({'pk': 1, 's': 's1'})
-        table = make_table(
-            attribute_codecs={'pk': FailCodec(), 's': tc.StringCodec()})
-        with pytest.raises(tc.CodingError):
-            await table.get_record(1)
-
     async def test_get_raises_on_missing_attributes(self, make_table):
-        await make_table(attribute_codecs={'pk': tc.IntAsStringCodec()}
-                         ).put_record({'pk': 1})
+        table = make_table(attribute_codecs={'pk': tc.IntAsStringCodec()})
+        await table.put_record({'pk': 1})
         table = make_table(
             attribute_codecs={
                 'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()})
@@ -223,7 +207,7 @@ class TestRedisTable:
 
     async def test_get_raises_on_duplicate_attribute_ids(
             self, make_table, conn):
-        table = make_table(score_function=lambda _: 0)
+        table = make_table(score_functions={'primary_key': lambda **_: 0})
         await table.put_record({'pk': 1, 's': 's1'})
         row = (await conn.zrange('table:rows', 0, -1))[0]
         s_id_index = row.index(b's1') - 3
@@ -291,123 +275,124 @@ class TestRedisTable:
             await table1.get_record(1)
         assert_that(await table2.get_record(1), has_entries(pk=1, s='s2'))
 
-    async def test_get_record_subset_on_empty(self, table):
+    async def test_get_record_subset_on_no_intervals(self, table):
         assert_that(
             await collect_async_iter(
-                table.get_record_subset(tc.All.with_primary_key('pk')())),
+                table.get_record_subset('primary_key', [])),
             empty())
 
-    async def test_get_record_subset_on_one_record(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': 0})
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-50, 51))),
-            contains_inanyorder(has_entries(pk=0)))
+    async def test_get_record_subset_on_empty(self, table):
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        assert_that(await collect_async_iter(records), empty())
 
-    async def test_get_record_subset_on_all_contained(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': -50})
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 50})
+    async def test_get_record_subset_on_one_record(self, table):
+        await table.put_record({'pk': 0, 's': 's1'})
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-50, 51))),
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0, s='s1')))
+
+    async def test_get_record_subset_on_all_contained(self, table):
+        await table.put_record({'pk': -50, 's': 's1'})
+        await table.put_record({'pk': 0, 's': 's2'})
+        await table.put_record({'pk': 50, 's': 's3'})
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        assert_that(
+            await collect_async_iter(records),
             contains_inanyorder(
-                has_entries(pk=-50), has_entries(pk=0), has_entries(pk=50)))
+                has_entries(pk=-50, s='s1'), has_entries(pk=0, s='s2'),
+                has_entries(pk=50, s='s3')))
 
-    async def test_get_record_subset_on_some_not_contained(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': -50})
-        await table.put_record({'pk': -10})
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 49})
-        await table.put_record({'pk': 50})
+    async def test_get_record_subset_on_some_not_contained(self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        records = table.get_record_subset(
+            'primary_key', [tc.Interval(-10, 50)])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 50))),
+            await collect_async_iter(records),
             contains_inanyorder(
                 has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49)))
 
-    async def test_get_record_subset_on_none_contained(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 50})
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(100, 200))),
-            empty())
+    async def test_get_record_subset_on_none_contained(self, table):
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        records = table.get_record_subset(
+            'primary_key', [tc.Interval(100, 150)])
+        assert_that(await collect_async_iter(records), empty())
 
-    async def test_get_record_subset_with_inf_bounds(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 50})
+    async def test_get_record_subset_with_multiple_intervals(self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        await table.put_record({'pk': 60, 's': 's'})
+        records = table.get_record_subset(
+            'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(
-                        float('-inf'), float('inf')))),
-            contains_inanyorder(has_entries(pk=0), has_entries(pk=50)))
-
-    async def test_get_record_subset_with_multiple_intervals(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': -50})
-        await table.put_record({'pk': -10})
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 10})
-        await table.put_record({'pk': 49})
-        await table.put_record({'pk': 50})
-        await table.put_record({'pk': 60})
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    MultiNumberRangeSubset((-10, 5), (40, 51)))),
+            await collect_async_iter(records),
             contains_inanyorder(
                 has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49),
                 has_entries(pk=50)))
 
     async def test_get_record_subset_uses_custom_score_function(
             self, make_table):
-        def pk_minus_10(record):
-            return record['pk'] - 10
+        def pk_minus_10(**kwargs):
+            return kwargs['pk'] - 10
 
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=pk_minus_10)
+            score_functions={'primary_key': pk_minus_10})
         await table.put_record({'pk': 0})
         await table.put_record({'pk': 10})
         await table.put_record({'pk': 59})
         await table.put_record({'pk': 60})
+        records = table.get_record_subset('primary_key', [tc.Interval(0, 50)])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(0, 50))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=10), has_entries(pk=59)))
+
+    async def test_get_record_subset_uses_contains_predicate(self, table):
+        def x_in_s(record):
+            return 'x' in record['s']
+        await table.put_record({'pk': 0, 's': 'aaa'})
+        await table.put_record({'pk': 1, 's': 'bxb'})
+        await table.put_record({'pk': 2, 's': 'cxc'})
+        await table.put_record({'pk': 3, 's': 'ddd'})
+        records = table.get_record_subset('primary_key', [_inf_to_inf], x_in_s)
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
+
+    @pytest.mark.skip(reason='pending implementation')
+    async def test_get_record_subset_with_non_primary_key_index(
+            self, make_table):
+        table = make_table(
+            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            score_functions={
+                'primary_key': filter_kwarg('pk'),
+                'first_char': lambda **r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'haaa'})
+        await table.put_record({'pk': 3, 's': 'iaaa'})
+        records = table.get_record_subset(
+            'first_char', [tc.Interval(ord('d'), ord('i'))])
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
 
     async def test_delete_record_raises_on_nonexistent(self, table):
         await table.put_record({'pk': 0, 's': 's0'})
         with pytest.raises(KeyError):
             await table.delete_record(1)
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 10))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
 
     async def test_delete_record_deletes(self, table):
@@ -415,102 +400,86 @@ class TestRedisTable:
         await table.put_record({'pk': 1, 's': 's1'})
         await table.put_record({'pk': 2, 's': 's2'})
         await table.delete_record(1)
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 10))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=2)))
 
-    async def test_delete_record_subset_on_empty(self, make_table):
+    @pytest.mark.skip(reason='pending implementation')
+    async def test_delete_record_doesnt_deletes_other_records_with_same_score(
+            self, make_table):
         table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        assert await table.delete_record_subset([tc.Interval(0, 50)]) == 0
+            score_functions={'primary_key': lambda **r: r['pk'] % 2})
+        await table.put_record({'pk': 0, 's': 's0'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.delete_record(0)
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 51))),
-            empty())
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=2)))
 
-    async def test_delete_record_subset_deletes_nothing(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': 0})
+    async def test_delete_record_subset_on_empty(self, table):
+        assert await table.delete_record_subset([tc.Interval(0, 50)]) == 0
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_delete_record_subset_deletes_nothing(self, table):
+        await table.put_record({'pk': 0, 's': 's'})
         assert await table.delete_record_subset([]) == 0
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 51))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
 
-    async def test_delete_record_subset_deletes_all(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 10})
-        await table.put_record({'pk': 49})
+    async def test_delete_record_subset_deletes_all(self, table):
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
         assert await table.delete_record_subset([tc.Interval(0, 50)]) == 3
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 51))),
-            empty())
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        assert_that(await collect_async_iter(records), empty())
 
-    async def test_delete_record_subset_deletes_some(self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': -1})
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 50})
-        await table.put_record({'pk': 51})
+    async def test_delete_record_subset_deletes_some(self, table):
+        await table.put_record({'pk': -1, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        await table.put_record({'pk': 51, 's': 's'})
         assert await table.delete_record_subset([tc.Interval(0, 51)]) == 2
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=-1), has_entries(pk=51)))
 
     async def test_delete_record_subset_deletes_multiple_intervals(
-            self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': -50})
-        await table.put_record({'pk': -20})
-        await table.put_record({'pk': -10})
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 10})
-        await table.put_record({'pk': 49})
+            self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -20, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
         num_deleted = await table.delete_record_subset([
             tc.Interval(-40, -9), tc.Interval(10, 11)])
         assert num_deleted == 3
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
+            await collect_async_iter(records),
             contains_inanyorder(
                 has_entries(pk=-50), has_entries(pk=0), has_entries(pk=49)))
 
     async def test_delete_record_subset_deletes_overlapping_intervals(
-            self, make_table):
-        table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
-            score_function=op.itemgetter('pk'))
-        await table.put_record({'pk': 0})
-        await table.put_record({'pk': 10})
-        await table.put_record({'pk': 20})
-        await table.put_record({'pk': 30})
-        await table.put_record({'pk': 40})
+            self, table):
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 20, 's': 's'})
+        await table.put_record({'pk': 30, 's': 's'})
+        await table.put_record({'pk': 40, 's': 's'})
         num_deleted = await table.delete_record_subset([
             tc.Interval(5, 25), tc.Interval(15, 35)])
         assert num_deleted == 3
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-100, 100))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=40)))
 
     async def test_delete_record_raises_if_deleted_in_subset_previously(
@@ -520,10 +489,9 @@ class TestRedisTable:
         await table.delete_record_subset([tc.Interval(1, 10)])
         with pytest.raises(KeyError):
             await table.delete_record(1)
+        records = table.get_record_subset('primary_key', [_inf_to_inf])
         assert_that(
-            await collect_async_iter(
-                table.get_record_subset(
-                    tc.NumberRangeSubset.with_primary_key('pk')(-10, 10))),
+            await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
 
 

@@ -16,7 +16,9 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import collections.abc as ca
+import numbers
 import typing as t
 
 type Record = ca.Mapping[str, t.Any]
 type Records = ca.AsyncIterator[Record]
+type ScoreFunction = ca.Callable[[t.Any], numbers.Real]

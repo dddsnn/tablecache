@@ -21,8 +21,8 @@ import redis.asyncio as redis
 import typing as t
 
 import tablecache.db as db
+import tablecache.index as index
 import tablecache.storage as storage
-import tablecache.subset as ss
 import tablecache.types as tp
 
 _logger = logging.getLogger(__name__)
@@ -41,9 +41,13 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
     """
 
     def __init__(
-            self, cached_subset_class: type[CachedSubset],
-            db_table: db.DbTable, *, primary_key_name: str,
-            attribute_codecs: storage.AttributeCodecs, redis_conn: redis.Redis,
+            self,
+            indexes: index.Indexes,
+            db_table: db.DbTable,
+            *,
+            primary_key_name: str,
+            attribute_codecs: storage.AttributeCodecs,
+            redis_conn: redis.Redis,
             redis_table_name: str) -> None:
         """
         :param cached_subset_class: The type of subset to use. This class is
@@ -67,26 +71,20 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         :param redis_table_name: The name of the table, used as a prefix for
             keys in Redis. Must be unique within the Redis instance.
         """
-        self._cached_subset_class = cached_subset_class
+        self._indexes = indexes
         self._db_table = db_table
         self._storage_table = storage.RedisTable(
             redis_conn, table_name=redis_table_name,
             primary_key_name=primary_key_name,
             attribute_codecs=attribute_codecs,
-            score_function=cached_subset_class.record_score)
+            score_functions=indexes.score_functions)
         self._cached_subset = None
         self._invalid_record_repo = InvalidRecordRepository()
 
-    @property
-    def cached_subset(self) -> CachedSubset:
-        """The subset currently cached."""
-        if not self._cached_subset:
-            raise ValueError('Cache has not been loaded.')
-        return self._cached_subset
 
     async def load(
-            self, *cached_subset_args: list[t.Any],
-            **cached_subset_kwargs: dict[str, t.Any]) -> None:
+            self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
+    ) -> None:
         """
         Load all relevant data from the DB into storage.
 
@@ -96,40 +94,41 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
 
         Raises a ValueError if the cache was already loaded.
         """
-        if self._cached_subset:
-            raise ValueError('Cache has already been loaded.')
-        self._cached_subset = self._cached_subset_class(
-            *cached_subset_args, **cached_subset_kwargs)
         _logger.info(
-            f'Clearing and loading {self.cached_subset} of table '
+            f'Clearing and loading {self._indexes} of table '
             f'{self._storage_table.table_name}.')
         await self._storage_table.clear()
-        num_loaded = await self._load_subset(self.cached_subset)
+        adjustment = self._indexes.adjust(
+            index_name, *index_args, **index_kwargs)
+        num_loaded = await self._load_subset(
+            *self._indexes.db_query_range(
+                index_name, *index_args, **index_kwargs))
         _logger.info(f'Loaded {num_loaded} records.')
 
-    async def _load_subset(self, subset: ss.Subset) -> None:
+    async def _load_subset(self, query, args) -> None:
         num_loaded = 0
-        async for record in self._db_table.get_record_subset(subset):
+        async for record in self._db_table.get_records(query, *args):
             await self._storage_table.put_record(record)
-            self.cached_subset.observe(record)
+            self._indexes.observe(record)
             num_loaded += 1
         return num_loaded
 
     async def adjust_cached_subset(
-            self, **subset_adjust_kwargs: dict[str, t.Any]) -> None:
+            self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
+    ) -> None:
         """
         Adjust the cached subset.
 
         Passes through the arguments to the cached subset's adjust(), and then
         deletes old and loads new records according to the result.
         """
-        adjustment = self.cached_subset.adjust(**subset_adjust_kwargs)
-        _logger.info(
-            f'Adjusting table {self._storage_table.table_name} to '
-            f'{self.cached_subset}.')
+        adjustment = self._indexes.adjust(
+            index_name, *index_args, **index_kwargs)
         num_deleted = await self._storage_table.delete_record_subset(
             adjustment.expire_intervals)
-        num_loaded = await self._load_subset(adjustment.new_subset)
+        num_loaded = await self._load_subset(
+            *self._indexes.db_query_range(
+                index_name, *index_args, **index_kwargs))
         _logger.info(
             f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
 
@@ -154,13 +153,15 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         try:
             return await self._storage_table.get_record(primary_key)
         except KeyError:
-            if isinstance(self.cached_subset, ss.All):
+            if self._indexes.covers('primary_key', primary_key):
                 raise
-            return await self._db_table.get_record(primary_key)
+            query, args = self._indexes.db_query_range(
+                'primary_key', primary_key)
+            return await self._db_table.get_record(query, *args)
 
     async def get_record_subset(
-            self, *subset_args: list[t.Any],
-            **subset_kwargs: dict[str, t.Any]) -> tp.Records:
+            self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
+    ) -> tp.Records:
         """
         Asynchronously iterate over records from a subset.
 
@@ -170,14 +171,34 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         those records. This implies that querying a subset that isn't
         completely in cache (even if just by a little bit) is expensive.
         """
-        subset = self._cached_subset_class(*subset_args, **subset_kwargs)
-        if any(s in subset for s in self._invalid_record_repo.invalid_scores):
-            await self._refresh_invalid()
-        if self.cached_subset.covers(subset):
-            source = self._storage_table
+        if self._indexes.covers(
+                index_name, *index_args, **index_kwargs):
+            has_refreshed = False
+            while True:
+                records = []
+                records_iter = self._storage_table.get_record_subset(
+                    index_name,
+                    self._indexes.storage_intervals(
+                        index_name, *index_args, **index_kwargs))
+                if has_refreshed:
+                    async for record in records_iter:
+                        yield record
+                async for record in records_iter:
+                    if (self._indexes.score_functions['primary_key'](**record)
+                            in self._invalid_record_repo.invalid_scores):
+                        await self._refresh_invalid()
+                        has_refreshed = True
+                        break
+                    records.append(record)
+                else:
+                    for record in records:
+                        yield record
+                    return
         else:
-            source = self._db_table
-        async for record in source.get_record_subset(subset):
+            query, args = self._indexes.db_query_range(
+                index_name, *index_args, **index_kwargs)
+            records = self._db_table.get_records(query, *args)
+        async for record in records:
             yield record
 
     async def invalidate_record(
@@ -211,16 +232,19 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         else:
             try:
                 record = await self._storage_table.get_record(primary_key)
-                score = self.cached_subset.record_score(record)
+                for index_name, score_function in self._indexes.score_functions.items():
+                    score = score_function(**record)
                 self._invalid_record_repo.flag_invalid(primary_key, score)
             except KeyError:
                 await self._invalidate_add_new(primary_key)
 
     async def _invalidate_add_new(self, primary_key):
         try:
-            record = await self._db_table.get_record(primary_key)
+            query, args = self._indexes.db_query_range(
+                'primary_key', primary_key)
+            record = await self._db_table.get_record(query, *args)
             await self._storage_table.put_record(record)
-            self.cached_subset.observe(record)
+            self._indexes.observe(record)
         except KeyError:
             _logger.debug(
                 f'Ignoring attempt to invalidate primary key {primary_key} '
@@ -234,8 +258,10 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
                 await self._storage_table.delete_record(key)
             except KeyError:
                 pass
-        async for record in self._db_table.get_records(
-                self._invalid_record_repo.invalid_primary_keys):
+        query, args = self._indexes.db_query_range(
+            'primary_key', *self._invalid_record_repo.invalid_primary_keys)
+        updated_records = self._db_table.get_records(query, *args)
+        async for record in updated_records:
             await self._storage_table.put_record(record)
         self._invalid_record_repo.clear()
 

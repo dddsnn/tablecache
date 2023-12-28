@@ -106,79 +106,29 @@ async def collect_async_iter(i):
 
 
 class TestPostgresTable:
-    @pytest.fixture
-    def make_table(self, pool):
-        def factory(query_subset_string=None, query_pks_string=None):
-            query_subset_string = query_subset_string or '''
-                SELECT
-                    uc.*, u.name AS user_name, u.age AS user_age,
-                    c.name AS city_name
-                FROM
-                    users u
-                    JOIN users_cities uc USING (user_id)
-                    JOIN cities c USING (city_id)'''
-            query_pks_string = (
-                query_pks_string
-                or f'{query_subset_string} WHERE uc.user_id = ANY ($1)')
-            return tc.PostgresTable(
-                pool, query_subset_string, query_pks_string)
-
-        return factory
+    query_all_string = '''
+        SELECT
+            uc.*, u.name AS user_name, u.age AS user_age, c.name AS city_name
+        FROM
+            users u
+            JOIN users_cities uc USING (user_id)
+            JOIN cities c USING (city_id)'''
+    query_some_string = f'{query_all_string} WHERE uc.user_id = ANY ($1)'
+    query_two_string = f'{query_all_string} WHERE uc.user_id IN ($1, $2)'
 
     @pytest.fixture
-    def table(self, make_table):
-        return make_table()
-
-    async def test_get_record_subset_on_empty(self, table):
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(tc.All.with_primary_key('user_id')())),
-            empty())
-
-    async def test_get_record_subset_on_one(self, table, insert_user):
-        await insert_user(1, 'u1', 1, 11, 'c1')
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(tc.All.with_primary_key('user_id')())),
-            contains_inanyorder(
-                has_entries(
-                    user_id=1, user_name='u1', user_age=1, city_id=11,
-                    city_name='c1')))
-
-    async def test_get_record_subset_on_many(self, table, insert_user):
-        await insert_user(1, 'u1', 1, 11, 'c1')
-        await insert_user(2, 'u2', None, 11, 'c1')
-        await insert_user(3, 'u3', 3, 12, 'c2')
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(tc.All.with_primary_key('user_id')())),
-            contains_inanyorder(
-                has_entries(
-                    user_id=1, user_name='u1', user_age=1, city_id=11,
-                    city_name='c1'),
-                has_entries(
-                    user_id=2, user_name='u2', user_age=None, city_id=11,
-                    city_name='c1'),
-                has_entries(
-                    user_id=3, user_name='u3', user_age=3, city_id=12,
-                    city_name='c2')))
+    def table(self, pool):
+        return tc.PostgresTable(pool)
 
     async def test_get_records_on_empty(self, table):
-        assert_that(await collect_async_iter(table.get_records([])), empty())
-
-    async def test_get_records_on_none(self, table, insert_user):
-        await insert_user(1, 'u1', 1, 11, 'c1')
-        assert_that(await collect_async_iter(table.get_records([])), empty())
-
-    async def test_get_records_on_none_matching(self, table, insert_user):
-        await insert_user(1, 'u1', 1, 11, 'c1')
         assert_that(
-            await collect_async_iter(table.get_records([2, 3])), empty())
+            await collect_async_iter(table.get_records(self.query_all_string)),
+            empty())
 
     async def test_get_records_on_one(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         assert_that(
-            await collect_async_iter(table.get_records([1])),
+            await collect_async_iter(table.get_records(self.query_all_string)),
             contains_inanyorder(
                 has_entries(
                     user_id=1, user_name='u1', user_age=1, city_id=11,
@@ -189,7 +139,7 @@ class TestPostgresTable:
         await insert_user(2, 'u2', None, 11, 'c1')
         await insert_user(3, 'u3', 3, 12, 'c2')
         assert_that(
-            await collect_async_iter(table.get_records([1, 2, 3, 4])),
+            await collect_async_iter(table.get_records(self.query_all_string)),
             contains_inanyorder(
                 has_entries(
                     user_id=1, user_name='u1', user_age=1, city_id=11,
@@ -201,47 +151,25 @@ class TestPostgresTable:
                     user_id=3, user_name='u3', user_age=3, city_id=12,
                     city_name='c2')))
 
+    async def test_get_records_with_args(self, table, insert_user):
+        await insert_user(1, 'u1', 1, 11, 'c1')
+        await insert_user(2, 'u2', None, 11, 'c1')
+        await insert_user(3, 'u3', 3, 12, 'c2')
+        assert_that(
+            await collect_async_iter(
+                table.get_records(self.query_two_string, 2, 3)),
+            contains_inanyorder(
+                has_entries(user_id=2), has_entries(user_id=3)))
+
     async def test_get_record_raises_on_nonexistent(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         with pytest.raises(KeyError):
-            await table.get_record(2)
+            await table.get_record(self.query_some_string, (2,))
 
     async def test_get_record(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         assert_that(
-            await table.get_record(1),
+            await table.get_record(self.query_some_string, (1,)),
             has_entries(
                 user_id=1, user_name='u1', user_age=1, city_id=11,
                 city_name='c1'))
-
-    async def test_get_record_subset_with_custom_subset(
-            self, make_table, insert_user):
-        class AgeRangeSubset(tc.Subset):
-            def __init__(self, age_ge, age_lt):
-                self.age_ge = age_ge
-                self.age_lt = age_lt
-
-            @property
-            def score_intervals(self):
-                return [tc.Interval(self.age_ge, self.age_lt)]
-
-            @property
-            def db_args(self):
-                return (self.age_ge, self.age_lt)
-
-        table = make_table(
-            'SELECT * FROM users WHERE age >= $1 AND age < $2',
-            'SELECT * FROM users WHERE user_id = ANY($1)')
-        for i in range(1, 6):
-            await insert_user(i, f'u{i}', i, 11, 'c1')
-        await insert_user(6, 'u6', None, 11, 'c1')
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset(AgeRangeSubset(-1, 10))),
-            contains_inanyorder(
-                *[has_entries(user_id=i, age=i) for i in range(1, 6)],))
-        assert_that(
-            await
-            collect_async_iter(table.get_record_subset(AgeRangeSubset(2, 4))),
-            contains_inanyorder(
-                *[has_entries(user_id=i, age=i) for i in range(2, 4)],))
