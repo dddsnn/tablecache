@@ -428,40 +428,64 @@ class TestInvalidRecordRepository:
     @pytest.fixture
     def repo(self):
         import tablecache.cache
-        return tablecache.cache.InvalidRecordRepository()
+        return tablecache.cache.InvalidRecordRepository(
+            MultiIndexes())
 
-    def test_primary_key_invalid(self, repo):
-        repo.flag_invalid(1, 101)
-        assert 1 in repo.invalid_primary_keys
-        assert 101 not in repo.invalid_primary_keys
-
-    def test_score_invalid(self, repo):
-        repo.flag_invalid(1, 101)
-        assert 101 in repo.invalid_scores
-        assert 1 not in repo.invalid_scores
-
-    def test_primary_key_not_invalid(self, repo):
-        repo.flag_invalid(1, 101)
+    @pytest.mark.parametrize(
+        'scores', [{}, {'primary_key': 3}, {'primary_key': 3, 'x_range': 110}])
+    def test_primary_key_invalid(self, repo, scores):
+        assert not repo.primary_key_is_invalid(2)
         assert 2 not in repo.invalid_primary_keys
+        repo.flag_invalid(2, scores)
+        assert repo.primary_key_is_invalid(2)
+        assert 2 in repo.invalid_primary_keys
+        for x in scores.values():
+            assert not repo.primary_key_is_invalid(x)
+            assert x not in repo.invalid_primary_keys
 
-    def test_score_not_invalid(self, repo):
-        repo.flag_invalid(1, 101)
-        assert 102 not in repo.invalid_scores
+    def test_score_is_invalid(self, repo):
+        assert not repo.score_is_invalid('primary_key', 2)
+        assert not repo.score_is_invalid('x_range', 110)
+        repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
+        assert repo.score_is_invalid('primary_key', 2)
+        assert repo.score_is_invalid('x_range', 110)
+
+    def test_score_is_invalid_raises_with_unknown_index_name(self, repo):
+        with pytest.raises(KeyError):
+            repo.score_is_invalid('no_such_index', 2)
+
+    def test_primary_key_score_is_invalid_implicitly(self, repo):
+        assert not repo.score_is_invalid('primary_key', 2)
+        repo.flag_invalid(1, {})
+        assert repo.score_is_invalid('primary_key', 2)
+
+    def test_score_is_invalid_raises_on_dirty_index(self, repo):
+        assert not repo.score_is_invalid('x_range', 110)
+        repo.flag_invalid(1, {})
+        with pytest.raises(tc.DirtyIndex):
+            repo.score_is_invalid('x_range', 110)
 
     def test_primary_key_not_invalid_after_clear(self, repo):
-        repo.flag_invalid(1, 101)
+        repo.flag_invalid(1, {})
         repo.clear()
+        assert not repo.primary_key_is_invalid(1)
         assert 1 not in repo.invalid_primary_keys
 
     def test_score_not_invalid_after_clear(self, repo):
-        repo.flag_invalid(1, 101)
+        repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
         repo.clear()
-        assert 101 not in repo.invalid_scores
+        assert not repo.score_is_invalid('primary_key', 2)
+        assert not repo.score_is_invalid('x_range', 110)
+
+    def test_index_not_dirty_after_clean(self, repo):
+        repo.flag_invalid(1, {})
+        repo.clear()
+        repo.score_is_invalid('x_range', 110)
 
     def test_len_is_number_of_primary_keys(self, repo):
         assert len(repo) == 0
-        repo.flag_invalid(1, 101)
-        repo.flag_invalid(2, 102)
+        repo.flag_invalid(1, {})
+        repo.flag_invalid(2, {})
         assert len(repo) == 2
-        repo.flag_invalid(3, 102)
+        repo.flag_invalid(3, {})
         assert len(repo) == 3

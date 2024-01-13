@@ -28,7 +28,14 @@ import tablecache.types as tp
 _logger = logging.getLogger(__name__)
 
 
-class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
+class DirtyIndex(Exception):
+    """
+    Raised to indicate that the queried index is dirty and the cache must be
+    refreshed.
+    """
+
+
+class CachedTable[PrimaryKey]:
     """
     A cached table.
 
@@ -79,8 +86,8 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
             attribute_codecs=attribute_codecs,
             score_functions=indexes.score_functions)
         self._cached_subset = None
-        self._invalid_record_repo = InvalidRecordRepository()
-
+        self._invalid_record_repo = InvalidRecordRepository(
+            indexes.index_names)
 
     async def load(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -148,7 +155,7 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
 
         Raises a KeyError if the key doesn't exist.
         """
-        if primary_key in self._invalid_record_repo.invalid_primary_keys:
+        if self._invalid_record_repo.primary_key_is_invalid(primary_key):
             await self._refresh_invalid()
         try:
             return await self._storage_table.get_record(primary_key)
@@ -266,21 +273,68 @@ class CachedTable[PrimaryKey, CachedSubset: ss.CachedSubset]:
         self._invalid_record_repo.clear()
 
 
-class InvalidRecordRepository:
-    def __init__(self):
-        self.invalid_primary_keys = set()
-        self.invalid_scores = set()
+class InvalidRecordRepository[PrimaryKey]:
+    """
+    A repository of invalid records.
 
-    def __len__(self):
+    Keeps track of which records have been marked as invalid, along with their
+    scores for all indexes.
+    """
+
+    def __init__(self, indexes: index.Indexes) -> None:
+        self._primary_key_score = indexes.primary_key_score
+        self.invalid_primary_keys = set()
+        self._invalid_scores = {index_name: set()
+                                for index_name in indexes.score_functions}
+        self._dirty_indexes = set()
+
+    def __len__(self) -> int:
         return len(self.invalid_primary_keys)
 
-    def flag_invalid(self, primary_key, score):
-        self.invalid_primary_keys.add(primary_key)
-        self.invalid_scores.add(score)
+    def flag_invalid(
+            self, primary_key: PrimaryKey,
+            scores: t.Mapping[str, numbers.Real]) -> None:
+        """
+        Flag a record as invalid.
 
-    def primary_key_is_invalid(self, primary_key):
+        scores maps index names to the record's respective score for that
+        index. These scores are trusted, as there is no way of calculating them
+        here.
+
+        Not all scores have to be provided, but for the ones that aren't the
+        respective index is marked as dirty. This means that future calls to
+        score_is_invalid() for that index will raise an exception, since there
+        is no longer a way to check whether the score is valid or not. One
+        exception to this is the special primary_key index, the score of which
+        can be calculated if it is missing.
+        """
+        self.invalid_primary_keys.add(primary_key)
+        if 'primary_key' not in scores:
+            scores['primary_key'] = self._primary_key_score(
+                primary_key)
+        for index_name, invalid_scores in self._invalid_scores.items():
+            try:
+                invalid_scores.add(scores[index_name])
+            except KeyError:
+                self._dirty_indexes.add(index_name)
+
+    def primary_key_is_invalid(self, primary_key: PrimaryKey) -> bool:
+        """Check whether a primary key is invalid."""
         return primary_key in self.invalid_primary_keys
 
-    def clear(self):
+    def score_is_invalid(self, index_name: str, score: numbers.Real) -> bool:
+        """
+        Check whether a score is invalid
+
+        If the queried index has been marked as dirty, raises DirtyIndex.
+        """
+        if index_name in self._dirty_indexes:
+            raise DirtyIndex
+        return score in self._invalid_scores[index_name]
+
+    def clear(self) -> None:
+        """Reset the state."""
         self.invalid_primary_keys.clear()
-        self.invalid_scores.clear()
+        for invalid_scores in self._invalid_scores.values():
+            invalid_scores.clear()
+        self._dirty_indexes.clear()
