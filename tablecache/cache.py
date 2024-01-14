@@ -28,6 +28,11 @@ import tablecache.types as tp
 _logger = logging.getLogger(__name__)
 
 
+async def _async_generator(xs):
+    for x in xs:
+        yield x
+
+
 class DirtyIndex(Exception):
     """
     Raised to indicate that the queried index is dirty and the cache must be
@@ -186,54 +191,55 @@ class CachedTable[PrimaryKey]:
         completely in cache (even if just by a little bit) is expensive.
         """
         try:
-            fetch_from_storage = self._indexes.covers(
+            get_from_storage = self._indexes.covers(
                 index_name, *index_args, **index_kwargs)
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support coverage check on {index_name}.'
             ) from e
-        if fetch_from_storage:
-            has_refreshed = False
-            needs_refresh = False
-            while True:
-                records = []
-                score_intervals = list(self._indexes.storage_intervals(
-                    index_name, *index_args, **index_kwargs))
-                for interval in score_intervals:
-                    try:
-                        if self._invalid_record_repo.interval_contains_invalid_score(
-                                index_name, interval):
-                            needs_refresh = True
-                            break
-                    except DirtyIndex:
-                        needs_refresh = True
-                        break
-                records_iter = self._storage_table.get_record_subset(
-                    index_name, score_intervals)
-                if has_refreshed:
-                    async for record in records_iter:
-                        yield record
-                    return
-                if not needs_refresh:
-                    async for record in records_iter:
-                        if self._invalid_record_repo.primary_key_is_invalid(
-                                record[self._primary_key_name]):
-                            needs_refresh = True
-                            break
-                        records.append(record)
-                if needs_refresh:
-                    await self._refresh_invalid()
-                    has_refreshed = True
-                else:
-                    for record in records:
-                        yield record
-                    return
+        if get_from_storage:
+            records = await self._check_refresh_and_get_records_from_storage(
+                index_name, *index_args, **index_kwargs)
         else:
             query, args = self._indexes.db_query_range(
                 index_name, *index_args, **index_kwargs)
             records = self._db_table.get_records(query, *args)
         async for record in records:
             yield record
+
+    async def _check_refresh_and_get_records_from_storage(
+            self, index_name, *index_args, **index_kwargs):
+        score_intervals = list(self._indexes.storage_intervals(
+            index_name, *index_args, **index_kwargs))
+        if not self._intervals_are_valid(index_name, score_intervals):
+            return await self._refresh_and_get_records_from_storage(
+                index_name, *index_args, **index_kwargs)
+        records = []
+        async for record in self._storage_table.get_record_subset(
+                index_name, score_intervals):
+            if self._invalid_record_repo.primary_key_is_invalid(
+                    record[self._primary_key_name]):
+                return await self._refresh_and_get_records_from_storage(
+                    index_name, *index_args, **index_kwargs)
+            records.append(record)
+        return _async_generator(records)
+
+    def _intervals_are_valid(self, index_name, score_intervals):
+        for interval in score_intervals:
+            try:
+                if self._invalid_record_repo.interval_contains_invalid_score(
+                        index_name, interval):
+                    return False
+            except DirtyIndex:
+                return False
+        return True
+
+    async def _refresh_and_get_records_from_storage(
+            self, index_name, *index_args, **index_kwargs):
+        await self._refresh_invalid()
+        return self._storage_table.get_record_subset(
+            index_name, self._indexes.storage_intervals(
+                index_name, *index_args, **index_kwargs))
 
     async def invalidate_record(
             self, primary_key: PrimaryKey,
