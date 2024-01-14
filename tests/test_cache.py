@@ -65,11 +65,11 @@ class MultiIndexes(tc.Indexes[int]):
 
     def storage_intervals(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
-            return [tc.Interval(pk+1, pk+1.1) for pk in args]
+            return [tc.Interval(pk + 1, pk + 1.1) for pk in args]
         if index_name == 'x_range':
             ge = kwargs['min']
             lt = kwargs['max']
-            mid = ge + (lt-ge)/2
+            mid = ge + (lt - ge) / 2
             return [
                 tc.Interval(ge + 100, mid + 100),
                 tc.Interval(mid + 100, lt + 100)]
@@ -101,8 +101,8 @@ class MultiIndexes(tc.Indexes[int]):
 
     def covers(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
-            return (self._contains_all
-                    or (args and all(pk in self._pks for pk in args)))
+            return (self._contains_all or
+                    (args and all(pk in self._pks for pk in args)))
         if index_name == 'x_range':
             if self._contains_all:
                 return True
@@ -275,7 +275,7 @@ class TestCachedTable:
 
 
     async def test_get_record_raises_on_nonexistent(self, table, db_table):
-        db_table.records = [{'pk': 1, 'k': 'v1'},  {'pk': 2, 'k': 'v2'}]
+        db_table.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
         await table.load('primary_key')
         with pytest.raises(KeyError):
             await table.get_record(3)
@@ -342,27 +342,27 @@ class TestCachedTable:
                     raise tc.UnsupportedIndexOperation
                 return super().adjust(index_name, *index_args, **index_kwargs)
         table = make_table(Indexes())
-        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         with pytest.raises(ValueError):
             await table.load('x_range', min=12, max=14)
 
     async def test_load_by_other_index(
             self, make_table, db_table, get_storage_table):
         table = make_table(MultiIndexes())
-        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('x_range', min=12, max=14)
         assert_that(
             await collect_async_iter(
                 table.get_record_subset('primary_key', *range(2, 4))),
             contains_inanyorder(
-                *[has_entries(pk=i, x=i+10, source='storage')
+                *[has_entries(pk=i, x=i + 10, source='storage')
                   for i in range(2, 4)]))
         assert_that(
             await collect_async_iter(
                 get_storage_table().get_record_subset(
                     'primary_key',
                     [tc.Interval(float('-inf'), float('inf'))])),
-            contains_inanyorder(*[has_entries(pk=i, x=i+10)
+            contains_inanyorder(*[has_entries(pk=i, x=i + 10)
                                   for i in range(2, 4)]))
 
     async def test_get_record_subset_returns_db_state_if_subset_not_cached(
@@ -426,7 +426,7 @@ class TestCachedTable:
             self, table, db_table):
         db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = [{'pk': 1, 'k': 'a1'},  {'pk': 2, 'k': 'a2'}]
+        db_table.records = [{'pk': 1, 'k': 'a1'}, {'pk': 2, 'k': 'a2'}]
         await table.invalidate_record(2)
         assert_that(
             await collect_async_iter(
@@ -481,7 +481,7 @@ class TestCachedTable:
         db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
         new_record = {'pk': 2, 'k': 'a2'}
-        db_table.records = [{'pk': 1, 'k': 'a1'},  new_record]
+        db_table.records = [{'pk': 1, 'k': 'a1'}, new_record]
         await table.invalidate_record(2)
         indexes.observe_mock.assert_called_with(
             new_record | {'source': 'db'})
@@ -569,7 +569,7 @@ class TestCachedTable:
                     raise tc.UnsupportedIndexOperation
                 return super().adjust(index_name, *index_args, **index_kwargs)
         table = make_table(Indexes())
-        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', *range(2))
         with pytest.raises(ValueError):
             await table.adjust_cached_subset('x_range', min=12, max=14)
@@ -577,13 +577,13 @@ class TestCachedTable:
     async def test_get_records_by_other_index(
             self, make_table, db_table):
         table = make_table(MultiIndexes())
-        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         assert_that(
             await collect_async_iter(
                 table.get_record_subset('x_range', min=12, max=14)),
             contains_inanyorder(
-                *[has_entries(pk=i, x=i+10, source='storage')
+                *[has_entries(pk=i, x=i + 10, source='storage')
                   for i in range(2, 4)]))
 
     async def test_get_records_raises_if_index_doesnt_support_covers(
@@ -594,11 +594,69 @@ class TestCachedTable:
                     raise tc.UnsupportedIndexOperation
                 return super().adjust(index_name, *index_args, **index_kwargs)
         table = make_table(Indexes())
-        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         with pytest.raises(ValueError):
             await collect_async_iter(
                 table.get_record_subset('x_range', min=12, max=14))
+
+    async def test_changing_scores_with_score_hint_dont_return_old_records(
+            self, make_table, db_table):
+        indexes = MultiIndexes()
+        table = make_table(indexes)
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key')
+        db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
+        for primary_key in range(6):
+            new_score = indexes.score_functions['x_range'](x=primary_key + 100)
+            await table.invalidate_record(primary_key, {'x_range': new_score})
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('x_range', min=12, max=14)), empty())
+
+    async def test_changing_scores_with_score_hint_return_new_records(
+            self, make_table, db_table):
+        indexes = MultiIndexes()
+        table = make_table(indexes)
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key')
+        db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
+        for primary_key in range(6):
+            new_score = indexes.score_functions['x_range'](x=primary_key + 100)
+            await table.invalidate_record(primary_key, {'x_range': new_score})
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('x_range', min=100, max=106)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 100, source='storage')
+                  for i in range(6)]))
+
+    async def test_changing_scores_without_score_hint_dont_return_old_records(
+            self, make_table, db_table):
+        table = make_table(MultiIndexes())
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key')
+        db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
+        for primary_key in range(6):
+            await table.invalidate_record(primary_key, {})
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('x_range', min=12, max=14)), empty())
+
+    async def test_changing_scores_without_score_hint_return_new_records(
+            self, make_table, db_table):
+        table = make_table(MultiIndexes())
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key')
+        db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
+        for primary_key in range(6):
+            await table.invalidate_record(primary_key, {})
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('x_range', min=100, max=106)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 100, source='storage')
+                  for i in range(6)]))
 
 
 class TestInvalidRecordRepository:
@@ -620,27 +678,42 @@ class TestInvalidRecordRepository:
             assert not repo.primary_key_is_invalid(x)
             assert x not in repo.invalid_primary_keys
 
-    def test_score_is_invalid(self, repo):
-        assert not repo.score_is_invalid('primary_key', 2)
-        assert not repo.score_is_invalid('x_range', 110)
+    def test_score_invalid(self, repo):
+        assert not repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(float('-inf'), float('inf')))
+        assert not repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(float('-inf'), float('inf')))
         repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
-        assert repo.score_is_invalid('primary_key', 2)
-        assert repo.score_is_invalid('x_range', 110)
+        assert not repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(float('-inf'), 2))
+        assert not repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(float('-inf'), 110))
+        assert repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(2, 2.1))
+        assert repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(110, 110.1))
+        assert not repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(2.1, float('inf')))
+        assert not repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(110.1, float('inf')))
 
-    def test_score_is_invalid_raises_with_unknown_index_name(self, repo):
+    def test_score_invalid_raises_with_unknown_index_name(self, repo):
         with pytest.raises(KeyError):
-            repo.score_is_invalid('no_such_index', 2)
+            repo.interval_contains_invalid_score('no_such_index', 2)
 
-    def test_primary_key_score_is_invalid_implicitly(self, repo):
-        assert not repo.score_is_invalid('primary_key', 2)
+    def test_primary_key_score_invalid_implicitly(self, repo):
+        assert not repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(float('-inf'), float('inf')))
         repo.flag_invalid(1, {})
-        assert repo.score_is_invalid('primary_key', 2)
+        assert repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(2, 2.1))
 
-    def test_score_is_invalid_raises_on_dirty_index(self, repo):
-        assert not repo.score_is_invalid('x_range', 110)
+    def test_score_invalid_raises_on_dirty_index(self, repo):
+        assert not repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(float('-inf'), float('inf')))
         repo.flag_invalid(1, {})
         with pytest.raises(tc.DirtyIndex):
-            repo.score_is_invalid('x_range', 110)
+            repo.interval_contains_invalid_score('x_range', 110)
 
     def test_primary_key_not_invalid_after_clear(self, repo):
         repo.flag_invalid(1, {})
@@ -651,13 +724,16 @@ class TestInvalidRecordRepository:
     def test_score_not_invalid_after_clear(self, repo):
         repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
         repo.clear()
-        assert not repo.score_is_invalid('primary_key', 2)
-        assert not repo.score_is_invalid('x_range', 110)
+        assert not repo.interval_contains_invalid_score(
+            'primary_key', tc.Interval(float('-inf'), float('inf')))
+        assert not repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(float('-inf'), float('inf')))
 
     def test_index_not_dirty_after_clean(self, repo):
         repo.flag_invalid(1, {})
         repo.clear()
-        repo.score_is_invalid('x_range', 110)
+        repo.interval_contains_invalid_score(
+            'x_range', tc.Interval(float('-inf'), float('inf')))
 
     def test_len_is_number_of_primary_keys(self, repo):
         assert len(repo) == 0

@@ -80,12 +80,12 @@ class CachedTable[PrimaryKey]:
         """
         self._indexes = indexes
         self._db_table = db_table
+        self._primary_key_name = primary_key_name
         self._storage_table = storage.RedisTable(
             redis_conn, table_name=redis_table_name,
             primary_key_name=primary_key_name,
             attribute_codecs=attribute_codecs,
             score_functions=indexes.score_functions)
-        self._cached_subset = None
         self._invalid_record_repo = InvalidRecordRepository(indexes)
 
     async def load(
@@ -194,25 +194,36 @@ class CachedTable[PrimaryKey]:
             ) from e
         if fetch_from_storage:
             has_refreshed = False
+            needs_refresh = False
             while True:
                 records = []
+                score_intervals = list(self._indexes.storage_intervals(
+                    index_name, *index_args, **index_kwargs))
+                for interval in score_intervals:
+                    try:
+                        if self._invalid_record_repo.interval_contains_invalid_score(
+                                index_name, interval):
+                            needs_refresh = True
+                            break
+                    except DirtyIndex:
+                        needs_refresh = True
+                        break
                 records_iter = self._storage_table.get_record_subset(
-                    index_name,
-                    self._indexes.storage_intervals(
-                        index_name, *index_args, **index_kwargs))
+                    index_name, score_intervals)
                 if has_refreshed:
                     async for record in records_iter:
                         yield record
                     return
-                async for record in records_iter:
-                    if self._invalid_record_repo.score_is_invalid(
-                            'primary_key',
-                            self._indexes.score_functions['primary_key'](
-                                **record)):
-                        await self._refresh_invalid()
-                        has_refreshed = True
-                        break
-                    records.append(record)
+                if not needs_refresh:
+                    async for record in records_iter:
+                        if self._invalid_record_repo.primary_key_is_invalid(
+                                record[self._primary_key_name]):
+                            needs_refresh = True
+                            break
+                        records.append(record)
+                if needs_refresh:
+                    await self._refresh_invalid()
+                    has_refreshed = True
                 else:
                     for record in records:
                         yield record
@@ -226,7 +237,7 @@ class CachedTable[PrimaryKey]:
 
     async def invalidate_record(
             self, primary_key: PrimaryKey,
-            score_hints: t.Optional[t.Mapping[str, numbers.Real]] = None
+            new_scores: t.Optional[t.Mapping[str, numbers.Real]] = None
     ) -> None:
         """
         Mark a single record in storage as invalid.
@@ -250,20 +261,14 @@ class CachedTable[PrimaryKey]:
         change even when the record does (as per the Subset contract), this
         isn't an issue. Records that were newly added are observed so the
         subset can add their scores.
+
         """
-        if score_hints is not None or False:
-            self._invalid_record_repo.flag_invalid(primary_key, score_hints)
-        else:
-            try:
-                record = await self._storage_table.get_record(primary_key)
-                invalid_scores = {
-                    index_name: score_function(**record)
-                    for index_name, score_function
-                    in self._indexes.score_functions.items()}
-                self._invalid_record_repo.flag_invalid(
-                    primary_key, invalid_scores)
-            except KeyError:
-                await self._invalidate_add_new(primary_key)
+        new_scores = new_scores or {}
+        try:
+            await self._storage_table.get_record(primary_key)
+            self._invalid_record_repo.flag_invalid(primary_key, new_scores)
+        except KeyError:
+            await self._invalidate_add_new(primary_key)
 
     async def _invalidate_add_new(self, primary_key):
         try:
@@ -341,15 +346,17 @@ class InvalidRecordRepository[PrimaryKey]:
         """Check whether a primary key is invalid."""
         return primary_key in self.invalid_primary_keys
 
-    def score_is_invalid(self, index_name: str, score: numbers.Real) -> bool:
+    def interval_contains_invalid_score(
+            self, index_name: str, interval: index.Interval) -> bool:
         """
-        Check whether a score is invalid
+        Check whether the interval contains an invalid score.
 
         If the queried index has been marked as dirty, raises DirtyIndex.
         """
         if index_name in self._dirty_indexes:
             raise DirtyIndex
-        return score in self._invalid_scores[index_name]
+        return any(
+            score in interval for score in self._invalid_scores[index_name])
 
     def clear(self) -> None:
         """Reset the state."""
