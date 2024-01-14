@@ -86,8 +86,7 @@ class CachedTable[PrimaryKey]:
             attribute_codecs=attribute_codecs,
             score_functions=indexes.score_functions)
         self._cached_subset = None
-        self._invalid_record_repo = InvalidRecordRepository(
-            indexes.index_names)
+        self._invalid_record_repo = InvalidRecordRepository(indexes)
 
     async def load(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -190,9 +189,12 @@ class CachedTable[PrimaryKey]:
                 if has_refreshed:
                     async for record in records_iter:
                         yield record
+                    return
                 async for record in records_iter:
-                    if (self._indexes.score_functions['primary_key'](**record)
-                            in self._invalid_record_repo.invalid_scores):
+                    if self._invalid_record_repo.score_is_invalid(
+                            'primary_key',
+                            self._indexes.score_functions['primary_key'](
+                                **record)):
                         await self._refresh_invalid()
                         has_refreshed = True
                         break
@@ -210,7 +212,8 @@ class CachedTable[PrimaryKey]:
 
     async def invalidate_record(
             self, primary_key: PrimaryKey,
-            score_hint: t.Optional[numbers.Real] = None) -> None:
+            score_hints: t.Optional[t.Mapping[str, numbers.Real]] = None
+    ) -> None:
         """
         Mark a single record in storage as invalid.
 
@@ -234,14 +237,17 @@ class CachedTable[PrimaryKey]:
         isn't an issue. Records that were newly added are observed so the
         subset can add their scores.
         """
-        if score_hint is not None:
-            self._invalid_record_repo.flag_invalid(primary_key, score_hint)
+        if score_hints is not None or False:
+            self._invalid_record_repo.flag_invalid(primary_key, score_hints)
         else:
             try:
                 record = await self._storage_table.get_record(primary_key)
-                for index_name, score_function in self._indexes.score_functions.items():
-                    score = score_function(**record)
-                self._invalid_record_repo.flag_invalid(primary_key, score)
+                invalid_scores = {
+                    index_name: score_function(**record)
+                    for index_name, score_function
+                    in self._indexes.score_functions.items()}
+                self._invalid_record_repo.flag_invalid(
+                    primary_key, invalid_scores)
             except KeyError:
                 await self._invalidate_add_new(primary_key)
 
@@ -284,8 +290,7 @@ class InvalidRecordRepository[PrimaryKey]:
     def __init__(self, indexes: index.Indexes) -> None:
         self._primary_key_score = indexes.primary_key_score
         self.invalid_primary_keys = set()
-        self._invalid_scores = {index_name: set()
-                                for index_name in indexes.score_functions}
+        self._invalid_scores = {n: set() for n in indexes.index_names}
         self._dirty_indexes = set()
 
     def __len__(self) -> int:

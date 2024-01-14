@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-from tablecache.cache import CachedTable
+from tablecache.cache import CachedTable, DirtyIndex
 from tablecache.codec import (
     Array,
     BoolCodec,
@@ -38,6 +38,8 @@ from tablecache.codec import (
     UuidCodec,
 )
 from tablecache.db import DbTable, PostgresTable
-from tablecache.index import Adjustment, Indexes, Interval, PrimaryKeyIndexes
+from tablecache.index import (
+    Adjustment, Indexes, Interval, PrimaryKeyIndexes,
+    UnsupportedIndexOperation)
 from tablecache.storage import CodingError, RedisTable, StorageTable
 from tablecache.types import Record, Records, ScoreFunction

@@ -406,7 +406,7 @@ class TestRedisTable:
             contains_inanyorder(has_entries(pk=0), has_entries(pk=2)))
 
     @pytest.mark.skip(reason='pending implementation')
-    async def test_delete_record_doesnt_deletes_other_records_with_same_score(
+    async def test_delete_record_doesnt_delete_other_records_with_same_score(
             self, make_table):
         table = make_table(
             score_functions={'primary_key': lambda **r: r['pk'] % 2})

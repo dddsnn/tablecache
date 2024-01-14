@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import numbers
 import unittest.mock as um
 
 from hamcrest import *
@@ -30,25 +31,113 @@ async def collect_async_iter(i):
     return ls
 
 
+class ObservingIndexes(tc.PrimaryKeyIndexes):
+    def __init__(self):
+        super().__init__('pk', 'query_all_pks', 'query_some_pks')
+        self.observe_mock = um.Mock()
+
+    def observe(self, *args, **kwargs):
+        super().observe(*args, **kwargs)
+        self.observe_mock(*args, **kwargs)
+
+
+class MultiIndexes(tc.Indexes[int]):
+    def __init__(self):
+        self._contains_all = False
+        self._pks = set()
+        self._range = None
+
+    @property
+    def score_functions(self):
+        return {
+            'primary_key': lambda **r: r['pk'] + 1,
+            'x_range': lambda **r: r['x'] + 100}
+
+    def primary_key_score(self, primary_key):
+        return self.score_functions['primary_key'](pk=primary_key)
+
+    def storage_intervals(self, index_name, *args, **kwargs):
+        if index_name == 'primary_key':
+            return [tc.Interval(pk+1, pk+1.1) for pk in args]
+        if index_name == 'x_range':
+            ge = kwargs['min']
+            lt = kwargs['max']
+            mid = ge + (lt-ge)/2
+            return [
+                tc.Interval(ge + 100, mid + 100),
+                tc.Interval(mid + 100, lt + 100)]
+        raise NotImplementedError
+
+    def db_query_range(self, index_name, *args, **kwargs):
+        if index_name == 'primary_key':
+            if args:
+                return 'query_some_pks', (args,)
+            return 'query_all_pks', ()
+        if index_name == 'x_range':
+            return 'query_x_range', (kwargs['min'], kwargs['max'])
+        raise NotImplementedError
+
+    def adjust(self, index_name, *args, **kwargs):
+        if index_name == 'primary_key':
+            self._range = None
+            if args:
+                self._contains_all = False
+                self._primary_keys = set(args)
+            else:
+                self._contains_all = True
+                self._primary_keys = set()
+        if index_name == 'x_range':
+            self._contains_all = False
+            self._primary_keys = set()
+            self._range = (kwargs['min'], kwargs['max'])
+        return tc.Adjustment([], index_name, args, kwargs)
+
+    def covers(self, index_name, *args, **kwargs):
+        if index_name == 'primary_key':
+            return (self._contains_all
+                    or (args and all(pk in self._pks for pk in args)))
+        if index_name == 'x_range':
+            if self._contains_all:
+                return True
+            if self._range is None:
+                return False
+            loaded_ge, loaded_lt = self._range
+            ge, lt = kwargs['min'], kwargs['max']
+            return loaded_ge <= ge <= lt <= loaded_lt
+        raise NotImplementedError
+
+    def observe(self, record):
+        self._pks.add(record['pk'])
+
+
 class MockDbTable(tc.DbTable):
     def __init__(self):
-        self.records = {}
+        self.records = []
 
     async def get_records(self, query, *args):
         if not args:
-            assert query == 'query_all'
-            def key_matches(_): return True
-        else:
-            assert query == 'query_some'
+            assert query == 'query_all_pks'
+            def record_matches(_): return True
+        elif query == 'query_some_pks':
             assert_that(
                 args,
                 all_of(
                     instance_of(tuple),
                     contains_exactly(instance_of(tuple))))
 
-            def key_matches(k): return k in args[0]
-        for key, record in self.records.items():
-            if key_matches(key):
+            def record_matches(r): return r['pk'] in args[0]
+        else:
+            assert query == 'query_x_range'
+            assert_that(
+                args,
+                all_of(
+                    instance_of(tuple),
+                    contains_exactly(
+                        instance_of(numbers.Real), instance_of(numbers.Real))))
+            ge, lt = args
+            def record_matches(r): return ge <= r['x'] < lt
+        for record in self.records:
+            if record_matches(record):
                 yield self._make_record(record)
 
     def _make_record(self, record):
@@ -56,13 +145,16 @@ class MockDbTable(tc.DbTable):
 
 
 class MockStorageTable(tc.StorageTable):
-    def __init__(self, conn, **kwargs):
-        self.score_functions = kwargs['score_functions']
+    def __init__(
+            self, conn, *, table_name, primary_key_name, attribute_codecs,
+            score_functions):
         assert conn == 'conn_not_needed_for_mock'
-        assert kwargs['attribute_codecs'] == (
-            'attribute_codecs_not_needed_for_mock')
-        assert kwargs['table_name'] == 'table_name_not_needed_for_mock'
+        assert attribute_codecs == 'attribute_codecs_not_needed_for_mock'
+        assert table_name == 'table_name_not_needed_for_mock'
+        self._score_functions = score_functions
+        self._primary_key_name = primary_key_name
         self.records = {}
+        self._indexes = {}
 
     @property
     def table_name(self):
@@ -70,56 +162,60 @@ class MockStorageTable(tc.StorageTable):
 
     async def clear(self):
         self.records = {}
+        self._indexes = {}
 
     async def put_record(self, record):
-        primary_key = self.score_functions['primary_key'](**record)
+        primary_key = record[self._primary_key_name]
         self.records[primary_key] = record
+        for index_name, score_function in self._score_functions.items():
+            score = score_function(**record)
+            self._indexes.setdefault(index_name, {}).setdefault(
+                score, set()).add(primary_key)
 
     async def get_record(self, primary_key):
-        record = self._make_record(self.records[primary_key])
-        return record
+        return self._make_record(self.records[primary_key])
 
     async def get_record_subset(
             self, index_name, score_intervals, recheck_predicate=None):
-        if index_name != 'primary_key':
-            raise NotImplementedError
         score_intervals = list(score_intervals)
         for key, record in self.records.items():
             if recheck_predicate and not recheck_predicate(record):
                 continue
             for interval in score_intervals:
-                if key in interval:
+                if self._score_functions[index_name](**record) in interval:
                     yield self._make_record(record)
                     break
 
     def _make_record(self, record):
         return record | {'source': 'storage'}
 
-    async def delete_record(self, primary_key) -> None:
+    async def delete_record(self, primary_key):
         del self.records[primary_key]
+        self._delete_index_entries(primary_key)
+
+    def _delete_index_entries(self, primary_key):
+        for index in self._indexes.values():
+            for score, primary_keys in list(index.items()):
+                primary_keys.discard(primary_key)
+                if not primary_keys:
+                    del index[score]
 
     async def delete_record_subset(self, score_intervals):
         num_deleted = 0
         for primary_key in list(self.records):
-            if any(primary_key in i for i in score_intervals):
+            primary_key_score = self._score_functions['primary_key'](
+                **{self._primary_key_name: primary_key})
+            if any(primary_key_score in i for i in score_intervals):
                 del self.records[primary_key]
+                self._delete_index_entries(primary_key)
                 num_deleted += 1
         return num_deleted
 
 
 class TestCachedTable:
-    class Indexes(tc.PrimaryKeyIndexes):
-        def __init__(self):
-            super().__init__('pk', 'query_all', 'query_some')
-            self.observe_mock = um.Mock()
-
-        def observe(self, *args, **kwargs):
-            super().observe(*args, **kwargs)
-            self.observe_mock(*args, **kwargs)
-
     @pytest.fixture
     def indexes(self):
-        return self.Indexes()
+        return ObservingIndexes()
 
     @pytest.fixture
     def db_table(self):
@@ -164,7 +260,7 @@ class TestCachedTable:
         return make_table()
 
     async def test_load_and_get_record(self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'v1'}, 2: {'pk': 2, 'k': 'v2'}}
+        db_table.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
         await table.load('primary_key')
         assert_that(
             await table.get_record(1),
@@ -172,13 +268,13 @@ class TestCachedTable:
 
 
     async def test_get_record_raises_on_nonexistent(self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'v1'}, 2: {'pk': 2, 'k': 'v2'}}
+        db_table.records = [{'pk': 1, 'k': 'v1'},  {'pk': 2, 'k': 'v2'}]
         await table.load('primary_key')
         with pytest.raises(KeyError):
             await table.get_record(3)
 
     async def test_get_record_subset_all(self, table, db_table):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key')
         assert_that(
             await collect_async_iter(
@@ -187,7 +283,7 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(6)]))
 
     async def test_get_record_subset_only_some(self, table, db_table):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key')
         assert_that(
             await collect_async_iter(
@@ -197,7 +293,7 @@ class TestCachedTable:
 
     async def test_loads_only_specified_subset(
             self, table, db_table, get_storage_table):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 2, 4)
         assert_that(
             await collect_async_iter(
@@ -208,17 +304,17 @@ class TestCachedTable:
 
     async def test_load_observes_loaded_records(
             self, table, db_table, indexes):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 2, 4)
         expected_observations = await collect_async_iter(
-            db_table.get_records('query_some', (2, 4)))
+            db_table.get_records('query_some_pks', (2, 4)))
         assert_that(
             indexes.observe_mock.call_args_list,
             contains_inanyorder(*[um.call(r) for r in expected_observations]))
 
     async def test_load_clears_storage_first(
             self, table, db_table, get_storage_table):
-        db_table.records = {1: {'pk': 1, 'k': 'v1'}}
+        db_table.records = [{'pk': 1, 'k': 'v1'}]
         get_storage_table().records = {2: {'pk': 2, 'k': 'v2'}}
         assert_that(await table.get_record(2), has_entries(k='v2'))
         await table.load('primary_key')
@@ -229,7 +325,7 @@ class TestCachedTable:
 
     async def test_get_record_subset_returns_db_state_if_subset_not_cached(
             self, table, db_table):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', *range(2, 4))
         assert_that(
             await collect_async_iter(
@@ -239,13 +335,13 @@ class TestCachedTable:
 
     async def test_get_record_also_checks_db_in_case_not_in_cached_subset(
             self, table, db_table):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', *range(2, 4))
         assert_that(await table.get_record(1), has_entries(pk=1, source='db'))
 
     async def test_get_record_doesnt_check_db_if_all_in_cache(
             self, table, db_table, get_storage_table):
-        db_table.records = {i: {'pk': i} for i in range(6)}
+        db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 1)
         del get_storage_table().records[1]
         with pytest.raises(KeyError):
@@ -253,24 +349,24 @@ class TestCachedTable:
 
     async def test_doesnt_automatically_reflect_db_state(
             self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'v1'}}
+        db_table.records = [{'pk': 1, 'k': 'v1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'v2'}}
+        db_table.records = [{'pk': 1, 'k': 'v2'}]
         assert_that(await table.get_record(1), has_entries(pk=1, k='v1'))
 
     async def test_get_record_refreshes_existing_invalid_keys(
             self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'b1'}}
+        db_table.records = [{'pk': 1, 'k': 'b1'}]
         await table.invalidate_record(1)
         assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
 
     async def test_get_record_subset_refreshes_existing_invalid_keys(
             self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'b1'}}
+        db_table.records = [{'pk': 1, 'k': 'b1'}]
         await table.invalidate_record(1)
         assert_that(
             await collect_async_iter(
@@ -278,17 +374,17 @@ class TestCachedTable:
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
     async def test_get_record_loads_new_invalid_keys(self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: {'pk': 2, 'k': 'a2'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}, {'pk': 2, 'k': 'a2'}]
         await table.invalidate_record(2)
         assert_that(await table.get_record(2), has_entries(pk=2, k='a2'))
 
     async def test_get_record_subset_loads_new_invalid_keys(
             self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: {'pk': 2, 'k': 'a2'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'},  {'pk': 2, 'k': 'a2'}]
         await table.invalidate_record(2)
         assert_that(
             await collect_async_iter(
@@ -297,40 +393,40 @@ class TestCachedTable:
                 has_entries(pk=1, k='a1'), has_entries(pk=2, k='a2')))
 
     async def test_get_record_only_refreshes_once(self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'b1'}}
+        db_table.records = [{'pk': 1, 'k': 'b1'}]
         await table.invalidate_record(1)
         await table.get_record(1)
-        db_table.records = {1: {'pk': 1, 'k': 'c1'}}
+        db_table.records = [{'pk': 1, 'k': 'c1'}]
         assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
 
     async def test_get_record_subset_only_refreshes_once(
             self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'b1'}}
+        db_table.records = [{'pk': 1, 'k': 'b1'}]
         await table.invalidate_record(1)
         await collect_async_iter(table.get_record_subset('primary_key', 1, 2))
-        db_table.records = {1: {'pk': 1, 'k': 'c1'}}
+        db_table.records = [{'pk': 1, 'k': 'c1'}]
         assert_that(
             await collect_async_iter(
                 table.get_record_subset('primary_key', 1, 2)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
     async def test_get_record_deletes_invalid_keys(self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: {'pk': 2, 'k': 'a2'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}, {'pk': 2, 'k': 'a2'}]
         await table.load('primary_key')
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.invalidate_record(2)
         with pytest.raises(KeyError):
             await table.get_record(2)
 
     async def test_get_record_subset_deletes_invalid_keys(
             self, table, db_table):
-        db_table.records = {i: {'pk': i, 'k': f'a{i}'} for i in range(3)}
+        db_table.records = [{'pk': i, 'k': f'a{i}'} for i in range(3)]
         await table.load('primary_key')
-        db_table.records = {0: {'pk': 0, 'k': 'a0'}, 2: {'pk': 2, 'k': 'a2'}}
+        db_table.records = [{'pk': 0, 'k': 'a0'}, {'pk': 2, 'k': 'a2'}]
         await table.invalidate_record(1)
         assert_that(
             await collect_async_iter(
@@ -340,17 +436,17 @@ class TestCachedTable:
 
     async def test_invalidate_record_observes_newly_added(
             self, table, db_table, indexes):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
         new_record = {'pk': 2, 'k': 'a2'}
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}, 2: new_record}
+        db_table.records = [{'pk': 1, 'k': 'a1'},  new_record]
         await table.invalidate_record(2)
         indexes.observe_mock.assert_called_with(
             new_record | {'source': 'db'})
 
     async def test_invalidate_record_ignores_nonexistent_keys(
             self, table, db_table):
-        db_table.records = {1: {'pk': 1, 'k': 'a1'}}
+        db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
         await table.invalidate_record(2)
         with pytest.raises(KeyError):
@@ -358,7 +454,7 @@ class TestCachedTable:
         assert_that(await table.get_record(1), has_entries(pk=1, k='a1'))
 
     async def test_adjust_cached_subset_prunes_old_data(self, table, db_table):
-        db_table.records = {i: {'pk': i} for i in range(4)}
+        db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', 0, 1)
         assert_that(
             await collect_async_iter(
@@ -379,7 +475,7 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_loads_new_data(
             self, table, db_table):
-        db_table.records = {i: {'pk': i} for i in range(4)}
+        db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         assert_that(
             await collect_async_iter(
@@ -395,13 +491,13 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_doesnt_introduce_duplicates(
             self, make_table, db_table):
-        class Indexes(self.Indexes):
+        class Indexes(ObservingIndexes):
             def adjust(self, index_name, *primary_keys):
                 assert index_name == 'primary_key'
                 return tc.Adjustment([], 'primary_key', primary_keys, {})
 
         table = make_table(indexes=Indexes())
-        db_table.records = {i: {'pk': i} for i in range(4)}
+        db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         await table.adjust_cached_subset('primary_key', *range(4))
         assert_that(
@@ -412,16 +508,47 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_observes_new_records(
             self, table, db_table, indexes):
-        db_table.records = {i: {'pk': i} for i in range(4)}
+        db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         await table.adjust_cached_subset('primary_key', *range(4))
         expected_observations = await collect_async_iter(
-            db_table.get_records('query_some', (2, 3)))
+            db_table.get_records('query_some_pks', (2, 3)))
         assert_that(
             indexes.observe_mock.call_args_list,
             contains_inanyorder(
                 *[anything() for _ in range(4)],
                 *[um.call(r) for r in expected_observations]))
+
+    async def test_load_by_other_index(
+            self, make_table, db_table, get_storage_table):
+        table = make_table(MultiIndexes())
+        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        await table.load('x_range', min=12, max=14)
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('primary_key', *range(2, 4))),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i+10, source='storage')
+                  for i in range(2, 4)]))
+        assert_that(
+            await collect_async_iter(
+                get_storage_table().get_record_subset(
+                    'primary_key',
+                    [tc.Interval(float('-inf'), float('inf'))])),
+            contains_inanyorder(*[has_entries(pk=i, x=i+10)
+                                  for i in range(2, 4)]))
+
+    async def test_get_records_by_other_index(
+            self, make_table, db_table):
+        table = make_table(MultiIndexes())
+        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        await table.load('primary_key')
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('x_range', min=12, max=14)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i+10, source='storage')
+                  for i in range(2, 4)]))
 
 
 class TestInvalidRecordRepository:

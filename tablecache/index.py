@@ -25,6 +25,10 @@ import typing as t
 import tablecache.types as tp
 
 
+class UnsupportedIndexOperation(Exception):
+    pass
+
+
 @dc.dataclass(frozen=True)
 class Interval:
     """
@@ -48,10 +52,19 @@ class Adjustment:
     index_kwargs: dict[str, t.Any]
 
 
-class Indexes(abc.ABC):
+class Indexes[PrimaryKey](abc.ABC):
+    @property
+    def index_names(self) -> t.Iterable[str]:
+        """Return names of all indexes."""
+        return self.score_functions.keys()
+
     @property
     @abc.abstractmethod
     def score_functions(self) -> t.Mapping[str, tp.ScoreFunction]:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def primary_key_score(self, primary_key: PrimaryKey) -> numbers.Real:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -92,7 +105,8 @@ class Indexes(abc.ABC):
         """
 
 
-class PrimaryKeyIndexes(Indexes):
+class PrimaryKeyIndexes(Indexes[numbers.Real]):
+
     def __init__(
             self, primary_key_name: str, query_all_string: str,
             query_some_string: str) -> None:
@@ -109,8 +123,11 @@ class PrimaryKeyIndexes(Indexes):
     def _extract_primary_key(self, **kwargs):
         return kwargs[self._primary_key_name]
 
+    def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
+        return primary_key
+
     def storage_intervals(
-            self, index_name: str, *primary_keys: t.Any
+            self, index_name: str, *primary_keys: numbers.Real
     ) -> ca.Iterable[Interval]:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
@@ -119,7 +136,8 @@ class PrimaryKeyIndexes(Indexes):
                 primary_key, math.nextafter(primary_key, float('inf')))
 
     def db_query_range(
-            self, index_name: str, *primary_keys: t.Any) -> tuple[str, tuple]:
+            self, index_name: str, *primary_keys: numbers.Real
+    ) -> tuple[str, tuple]:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         if not primary_keys:
@@ -127,7 +145,7 @@ class PrimaryKeyIndexes(Indexes):
         return self._query_some_string, (primary_keys,)
 
     def adjust(
-            self, index_name: str, *primary_keys: t.Any) -> Adjustment:
+            self, index_name: str, *primary_keys: numbers.Real) -> Adjustment:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         if self._covers_all:
@@ -146,7 +164,7 @@ class PrimaryKeyIndexes(Indexes):
             [Interval(float('-inf'), float('inf'))], 'primary_key',
             primary_keys, {})
 
-    def covers(self, index_name: str, *primary_keys: t.Any) -> bool:
+    def covers(self, index_name: str, *primary_keys: numbers.Real) -> bool:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         if self._covers_all:
