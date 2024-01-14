@@ -198,8 +198,13 @@ class CachedTable[PrimaryKey]:
                 f'Indexes don\'t support coverage check on {index_name}.'
             ) from e
         if get_from_storage:
-            records = await self._check_refresh_and_get_records_from_storage(
-                index_name, *index_args, **index_kwargs)
+            if len(self._invalid_record_repo) == 0:
+                records = self._storage_table.get_record_subset(
+                    index_name, self._indexes.storage_intervals(
+                        index_name, *index_args, **index_kwargs))
+            else:
+                records = await self._check_and_get_records_from_storage(
+                    index_name, *index_args, **index_kwargs)
         else:
             query, args = self._indexes.db_query_range(
                 index_name, *index_args, **index_kwargs)
@@ -207,7 +212,7 @@ class CachedTable[PrimaryKey]:
         async for record in records:
             yield record
 
-    async def _check_refresh_and_get_records_from_storage(
+    async def _check_and_get_records_from_storage(
             self, index_name, *index_args, **index_kwargs):
         score_intervals = list(self._indexes.storage_intervals(
             index_name, *index_args, **index_kwargs))
