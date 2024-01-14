@@ -31,14 +31,21 @@ async def collect_async_iter(i):
     return ls
 
 
-class ObservingIndexes(tc.PrimaryKeyIndexes):
+class SpyIndexes(tc.PrimaryKeyIndexes):
     def __init__(self):
         super().__init__('pk', 'query_all_pks', 'query_some_pks')
+        self.adjust_mock = um.Mock()
         self.observe_mock = um.Mock()
 
+    def adjust(self, *args, **kwargs):
+        result = super().adjust(*args, **kwargs)
+        self.adjust_mock(*args, **kwargs)
+        return result
+
     def observe(self, *args, **kwargs):
-        super().observe(*args, **kwargs)
+        result = super().observe(*args, **kwargs)
         self.observe_mock(*args, **kwargs)
+        return result
 
 
 class MultiIndexes(tc.Indexes[int]):
@@ -215,7 +222,7 @@ class MockStorageTable(tc.StorageTable):
 class TestCachedTable:
     @pytest.fixture
     def indexes(self):
-        return ObservingIndexes()
+        return SpyIndexes()
 
     @pytest.fixture
     def db_table(self):
@@ -322,6 +329,41 @@ class TestCachedTable:
         with pytest.raises(KeyError):
             await table.get_record(2)
 
+    async def test_load_adjusts_indexes(self, table, db_table, indexes):
+        db_table.records = [{'pk': i} for i in range(6)]
+        await table.load('primary_key', 2, 4)
+        indexes.adjust_mock.assert_called_once_with('primary_key', 2, 4)
+
+    async def test_load_raises_if_index_doesnt_support_adjusting(
+            self, make_table, db_table):
+        class Indexes(MultiIndexes):
+            def adjust(self, index_name, *index_args, **index_kwargs):
+                if index_name == 'x_range':
+                    raise tc.UnsupportedIndexOperation
+                return super().adjust(index_name, *index_args, **index_kwargs)
+        table = make_table(Indexes())
+        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        with pytest.raises(ValueError):
+            await table.load('x_range', min=12, max=14)
+
+    async def test_load_by_other_index(
+            self, make_table, db_table, get_storage_table):
+        table = make_table(MultiIndexes())
+        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        await table.load('x_range', min=12, max=14)
+        assert_that(
+            await collect_async_iter(
+                table.get_record_subset('primary_key', *range(2, 4))),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i+10, source='storage')
+                  for i in range(2, 4)]))
+        assert_that(
+            await collect_async_iter(
+                get_storage_table().get_record_subset(
+                    'primary_key',
+                    [tc.Interval(float('-inf'), float('inf'))])),
+            contains_inanyorder(*[has_entries(pk=i, x=i+10)
+                                  for i in range(2, 4)]))
 
     async def test_get_record_subset_returns_db_state_if_subset_not_cached(
             self, table, db_table):
@@ -491,7 +533,7 @@ class TestCachedTable:
 
     async def test_adjust_cached_subset_doesnt_introduce_duplicates(
             self, make_table, db_table):
-        class Indexes(ObservingIndexes):
+        class Indexes(SpyIndexes):
             def adjust(self, index_name, *primary_keys):
                 assert index_name == 'primary_key'
                 return tc.Adjustment([], 'primary_key', primary_keys, {})
@@ -519,24 +561,18 @@ class TestCachedTable:
                 *[anything() for _ in range(4)],
                 *[um.call(r) for r in expected_observations]))
 
-    async def test_load_by_other_index(
-            self, make_table, db_table, get_storage_table):
-        table = make_table(MultiIndexes())
+    async def test_adjust_cached_subset_raises_if_index_doesnt_support(
+            self, make_table, db_table):
+        class Indexes(MultiIndexes):
+            def adjust(self, index_name, *index_args, **index_kwargs):
+                if index_name == 'x_range':
+                    raise tc.UnsupportedIndexOperation
+                return super().adjust(index_name, *index_args, **index_kwargs)
+        table = make_table(Indexes())
         db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
-        await table.load('x_range', min=12, max=14)
-        assert_that(
-            await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2, 4))),
-            contains_inanyorder(
-                *[has_entries(pk=i, x=i+10, source='storage')
-                  for i in range(2, 4)]))
-        assert_that(
-            await collect_async_iter(
-                get_storage_table().get_record_subset(
-                    'primary_key',
-                    [tc.Interval(float('-inf'), float('inf'))])),
-            contains_inanyorder(*[has_entries(pk=i, x=i+10)
-                                  for i in range(2, 4)]))
+        await table.load('primary_key', *range(2))
+        with pytest.raises(ValueError):
+            await table.adjust_cached_subset('x_range', min=12, max=14)
 
     async def test_get_records_by_other_index(
             self, make_table, db_table):
@@ -549,6 +585,20 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, x=i+10, source='storage')
                   for i in range(2, 4)]))
+
+    async def test_get_records_raises_if_index_doesnt_support_covers(
+            self, make_table, db_table):
+        class Indexes(MultiIndexes):
+            def covers(self, index_name, *index_args, **index_kwargs):
+                if index_name == 'x_range':
+                    raise tc.UnsupportedIndexOperation
+                return super().adjust(index_name, *index_args, **index_kwargs)
+        table = make_table(Indexes())
+        db_table.records = [{'pk': i, 'x': i+10} for i in range(6)]
+        await table.load('primary_key')
+        with pytest.raises(ValueError):
+            await collect_async_iter(
+                table.get_record_subset('x_range', min=12, max=14))
 
 
 class TestInvalidRecordRepository:

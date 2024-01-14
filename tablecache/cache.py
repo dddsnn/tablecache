@@ -104,8 +104,12 @@ class CachedTable[PrimaryKey]:
             f'Clearing and loading {self._indexes} of table '
             f'{self._storage_table.table_name}.')
         await self._storage_table.clear()
-        adjustment = self._indexes.adjust(
-            index_name, *index_args, **index_kwargs)
+        try:
+            adjustment = self._indexes.adjust(
+                index_name, *index_args, **index_kwargs)
+        except index.UnsupportedIndexOperation as e:
+            raise ValueError(
+                f'Indexes don\'t support adjusting by {index_name}.') from e
         num_loaded = await self._load_subset(
             *self._indexes.db_query_range(
                 index_name, *index_args, **index_kwargs))
@@ -128,8 +132,12 @@ class CachedTable[PrimaryKey]:
         Passes through the arguments to the cached subset's adjust(), and then
         deletes old and loads new records according to the result.
         """
-        adjustment = self._indexes.adjust(
-            index_name, *index_args, **index_kwargs)
+        try:
+            adjustment = self._indexes.adjust(
+                index_name, *index_args, **index_kwargs)
+        except index.UnsupportedIndexOperation as e:
+            raise ValueError(
+                f'Indexes don\'t support adjusting by {index_name}.') from e
         num_deleted = await self._storage_table.delete_record_subset(
             adjustment.expire_intervals)
         num_loaded = await self._load_subset(
@@ -177,8 +185,14 @@ class CachedTable[PrimaryKey]:
         those records. This implies that querying a subset that isn't
         completely in cache (even if just by a little bit) is expensive.
         """
-        if self._indexes.covers(
-                index_name, *index_args, **index_kwargs):
+        try:
+            fetch_from_storage = self._indexes.covers(
+                index_name, *index_args, **index_kwargs)
+        except index.UnsupportedIndexOperation as e:
+            raise ValueError(
+                f'Indexes don\'t support coverage check on {index_name}.'
+            ) from e
+        if fetch_from_storage:
             has_refreshed = False
             while True:
                 records = []
