@@ -9,7 +9,7 @@ testpaths = ["tests"]
 log_level = "INFO"
 
 [tool.autopep8]
-ignore = ""
+select = "E,W"
 
 [tool.flake8]
 per-file-ignores = [
