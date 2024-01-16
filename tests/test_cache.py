@@ -479,6 +479,29 @@ class TestCachedTable:
             contains_inanyorder(
                 has_entries(pk=0, k='a0'), has_entries(pk=2, k='a2')))
 
+    async def test_get_records_uses_recheck_predicate(
+            self, make_table, db_table):
+        class RecheckOnlyIndexes(tc.PrimaryKeyIndexes):
+            def __init__(self):
+                super().__init__('pk', 'query_all_pks', 'query_some_pks')
+
+            @property
+            def score_functions(self):
+                return {'primary_key': lambda **_: 0}
+
+            def storage_records_spec(self, index_name, *primary_keys):
+                return tc.StorageRecordsSpec(
+                    index_name, [tc.Interval(0, 1)],
+                    lambda r: r['pk'] in primary_keys)
+        table = make_table(RecheckOnlyIndexes())
+        db_table.records = [{'pk': i} for i in range(3)]
+        await table.load('primary_key')
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', 0, 2)),
+            contains_inanyorder(
+                has_entries(pk=0), has_entries(pk=2)))
+
     async def test_invalidate_record_observes_newly_added(
             self, table, db_table, indexes):
         db_table.records = [{'pk': 1, 'k': 'a1'}]

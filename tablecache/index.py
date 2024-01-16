@@ -134,7 +134,8 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
         return kwargs[self._primary_key_name]
 
     def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
-        return primary_key
+        return self.score_functions['primary_key'](
+            **{self._primary_key_name: primary_key})
 
     def storage_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
