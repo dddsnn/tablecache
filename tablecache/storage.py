@@ -17,7 +17,6 @@
 
 import abc
 import collections.abc as ca
-import numbers
 import typing as t
 
 import redis.asyncio as redis
@@ -53,10 +52,8 @@ class StorageTable[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def get_record_subset(
-            self, index_name: str,
-            score_intervals: ca.Iterable[index.Interval],
-            recheck_predicate: ca.Callable[[tp.Record], bool]) -> tp.Records:
+    async def get_records(
+            self, records_spec: index.StorageRecordsSpec) -> tp.Records:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -197,11 +194,8 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         return decoded_record
 
     @t.override
-    async def get_record_subset(
-            self, index_name: str,
-            score_intervals: ca.Iterable[index.Interval],
-            recheck_predicate: ca.Callable[[tp.Record], bool] = None
-    ) -> tp.Records:
+    async def get_records(
+            self, records_spec: index.StorageRecordsSpec) -> tp.Records:
         """
         Get records with scores within a subset.
 
@@ -212,18 +206,17 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
         No particular order is guaranteed.
         """
-        if index_name != 'primary_key':
+        if records_spec.index_name != 'primary_key':
             raise NotImplementedError
         # Prefixing the end of the range with '(' is the Redis way of saying we
         # want the interval to be open on that end.
-        for interval in score_intervals:
+        for interval in records_spec.score_intervals:
             encoded_records = await self._conn.zrange(
                 f'{self.table_name}:rows', interval.ge, f'({interval.lt}',
                 byscore=True)
             for encoded_record in encoded_records:
                 decoded_record = self._row_codec.decode(encoded_record)
-                if (recheck_predicate is None
-                        or recheck_predicate(decoded_record)):
+                if records_spec.recheck_predicate(decoded_record):
                     yield decoded_record
 
     @t.override

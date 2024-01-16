@@ -275,55 +275,58 @@ class TestRedisTable:
             await table1.get_record(1)
         assert_that(await table2.get_record(1), has_entries(pk=1, s='s2'))
 
-    async def test_get_record_subset_on_no_intervals(self, table):
+    async def test_get_records_on_no_intervals(self, table):
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', [])),
+                table.get_records(tc.StorageRecordsSpec('primary_key', []))),
             empty())
 
-    async def test_get_record_subset_on_empty(self, table):
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+    async def test_get_records_on_empty(self, table):
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(await collect_async_iter(records), empty())
 
-    async def test_get_record_subset_on_one_record(self, table):
+    async def test_get_records_on_one_record(self, table):
         await table.put_record({'pk': 0, 's': 's1'})
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0, s='s1')))
 
-    async def test_get_record_subset_on_all_contained(self, table):
+    async def test_get_records_on_all_contained(self, table):
         await table.put_record({'pk': -50, 's': 's1'})
         await table.put_record({'pk': 0, 's': 's2'})
         await table.put_record({'pk': 50, 's': 's3'})
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
                 has_entries(pk=-50, s='s1'), has_entries(pk=0, s='s2'),
                 has_entries(pk=50, s='s3')))
 
-    async def test_get_record_subset_on_some_not_contained(self, table):
+    async def test_get_records_on_some_not_contained(self, table):
         await table.put_record({'pk': -50, 's': 's'})
         await table.put_record({'pk': -10, 's': 's'})
         await table.put_record({'pk': 0, 's': 's'})
         await table.put_record({'pk': 49, 's': 's'})
         await table.put_record({'pk': 50, 's': 's'})
-        records = table.get_record_subset(
-            'primary_key', [tc.Interval(-10, 50)])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(-10, 50)]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
                 has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49)))
 
-    async def test_get_record_subset_on_none_contained(self, table):
+    async def test_get_records_on_none_contained(self, table):
         await table.put_record({'pk': 0, 's': 's'})
         await table.put_record({'pk': 50, 's': 's'})
-        records = table.get_record_subset(
-            'primary_key', [tc.Interval(100, 150)])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(100, 150)]))
         assert_that(await collect_async_iter(records), empty())
 
-    async def test_get_record_subset_with_multiple_intervals(self, table):
+    async def test_get_records_with_multiple_intervals(self, table):
         await table.put_record({'pk': -50, 's': 's'})
         await table.put_record({'pk': -10, 's': 's'})
         await table.put_record({'pk': 0, 's': 's'})
@@ -331,15 +334,16 @@ class TestRedisTable:
         await table.put_record({'pk': 49, 's': 's'})
         await table.put_record({'pk': 50, 's': 's'})
         await table.put_record({'pk': 60, 's': 's'})
-        records = table.get_record_subset(
-            'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)])
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
                 has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49),
                 has_entries(pk=50)))
 
-    async def test_get_record_subset_uses_custom_score_function(
+    async def test_get_records_uses_custom_score_function(
             self, make_table):
         def pk_minus_10(**kwargs):
             return kwargs['pk'] - 10
@@ -351,25 +355,27 @@ class TestRedisTable:
         await table.put_record({'pk': 10})
         await table.put_record({'pk': 59})
         await table.put_record({'pk': 60})
-        records = table.get_record_subset('primary_key', [tc.Interval(0, 50)])
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(0, 50)]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=10), has_entries(pk=59)))
 
-    async def test_get_record_subset_uses_contains_predicate(self, table):
+    async def test_get_records_uses_contains_predicate(self, table):
         def x_in_s(record):
             return 'x' in record['s']
         await table.put_record({'pk': 0, 's': 'aaa'})
         await table.put_record({'pk': 1, 's': 'bxb'})
         await table.put_record({'pk': 2, 's': 'cxc'})
         await table.put_record({'pk': 3, 's': 'ddd'})
-        records = table.get_record_subset('primary_key', [_inf_to_inf], x_in_s)
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf], x_in_s))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
 
     @pytest.mark.skip(reason='pending implementation')
-    async def test_get_record_subset_with_non_primary_key_index(
+    async def test_get_records_with_non_primary_key_index(
             self, make_table):
         table = make_table(
             attribute_codecs={'pk': tc.IntAsStringCodec()},
@@ -380,8 +386,9 @@ class TestRedisTable:
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.put_record({'pk': 2, 's': 'haaa'})
         await table.put_record({'pk': 3, 's': 'iaaa'})
-        records = table.get_record_subset(
-            'first_char', [tc.Interval(ord('d'), ord('i'))])
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('d'), ord('i'))]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
@@ -390,7 +397,8 @@ class TestRedisTable:
         await table.put_record({'pk': 0, 's': 's0'})
         with pytest.raises(KeyError):
             await table.delete_record(1)
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
@@ -400,7 +408,8 @@ class TestRedisTable:
         await table.put_record({'pk': 1, 's': 's1'})
         await table.put_record({'pk': 2, 's': 's2'})
         await table.delete_record(1)
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=2)))
@@ -413,20 +422,23 @@ class TestRedisTable:
         await table.put_record({'pk': 0, 's': 's0'})
         await table.put_record({'pk': 2, 's': 's2'})
         await table.delete_record(0)
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=2)))
 
     async def test_delete_record_subset_on_empty(self, table):
         assert await table.delete_record_subset([tc.Interval(0, 50)]) == 0
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(await collect_async_iter(records), empty())
 
     async def test_delete_record_subset_deletes_nothing(self, table):
         await table.put_record({'pk': 0, 's': 's'})
         assert await table.delete_record_subset([]) == 0
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
@@ -436,7 +448,8 @@ class TestRedisTable:
         await table.put_record({'pk': 10, 's': 's'})
         await table.put_record({'pk': 49, 's': 's'})
         assert await table.delete_record_subset([tc.Interval(0, 50)]) == 3
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(await collect_async_iter(records), empty())
 
     async def test_delete_record_subset_deletes_some(self, table):
@@ -445,7 +458,8 @@ class TestRedisTable:
         await table.put_record({'pk': 50, 's': 's'})
         await table.put_record({'pk': 51, 's': 's'})
         assert await table.delete_record_subset([tc.Interval(0, 51)]) == 2
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=-1), has_entries(pk=51)))
@@ -461,7 +475,8 @@ class TestRedisTable:
         num_deleted = await table.delete_record_subset([
             tc.Interval(-40, -9), tc.Interval(10, 11)])
         assert num_deleted == 3
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -477,7 +492,8 @@ class TestRedisTable:
         num_deleted = await table.delete_record_subset([
             tc.Interval(5, 25), tc.Interval(15, 35)])
         assert num_deleted == 3
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=40)))
@@ -489,7 +505,8 @@ class TestRedisTable:
         await table.delete_record_subset([tc.Interval(1, 10)])
         with pytest.raises(KeyError):
             await table.delete_record(1)
-        records = table.get_record_subset('primary_key', [_inf_to_inf])
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))

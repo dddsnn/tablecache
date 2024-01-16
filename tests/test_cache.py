@@ -63,16 +63,18 @@ class MultiIndexes(tc.Indexes[int]):
     def primary_key_score(self, primary_key):
         return self.score_functions['primary_key'](pk=primary_key)
 
-    def storage_intervals(self, index_name, *args, **kwargs):
+    def storage_records_spec(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
-            return [tc.Interval(pk + 1, pk + 1.1) for pk in args]
+            return tc.StorageRecordsSpec(
+                index_name, [tc.Interval(pk + 1, pk + 1.1) for pk in args])
         if index_name == 'x_range':
             ge = kwargs['min']
             lt = kwargs['max']
             mid = ge + (lt - ge) / 2
-            return [
-                tc.Interval(ge + 100, mid + 100),
-                tc.Interval(mid + 100, lt + 100)]
+            return tc.StorageRecordsSpec(
+                index_name, [
+                    tc.Interval(ge + 100, mid + 100),
+                    tc.Interval(mid + 100, lt + 100)])
         raise NotImplementedError
 
     def db_query_range(self, index_name, *args, **kwargs):
@@ -182,14 +184,13 @@ class MockStorageTable(tc.StorageTable):
     async def get_record(self, primary_key):
         return self._make_record(self.records[primary_key])
 
-    async def get_record_subset(
-            self, index_name, score_intervals, recheck_predicate=None):
-        score_intervals = list(score_intervals)
+    async def get_records(self, records_spec):
         for key, record in self.records.items():
-            if recheck_predicate and not recheck_predicate(record):
+            if not records_spec.recheck_predicate(record):
                 continue
-            for interval in score_intervals:
-                if self._score_functions[index_name](**record) in interval:
+            for interval in records_spec.score_intervals:
+                score_function = self._score_functions[records_spec.index_name]
+                if score_function(**record) in interval:
                     yield self._make_record(record)
                     break
 
@@ -304,9 +305,10 @@ class TestCachedTable:
         await table.load('primary_key', 2, 4)
         assert_that(
             await collect_async_iter(
-                get_storage_table().get_record_subset(
-                    'primary_key',
-                    [tc.Interval(float('-inf'), float('inf'))])),
+                get_storage_table().get_records(
+                    tc.StorageRecordsSpec(
+                        'primary_key',
+                        [tc.Interval(float('-inf'), float('inf'))]))),
             contains_inanyorder(*[has_entries(pk=i) for i in [2, 4]]))
 
     async def test_load_observes_loaded_records(
@@ -359,9 +361,10 @@ class TestCachedTable:
                   for i in range(2, 4)]))
         assert_that(
             await collect_async_iter(
-                get_storage_table().get_record_subset(
-                    'primary_key',
-                    [tc.Interval(float('-inf'), float('inf'))])),
+                get_storage_table().get_records(
+                    tc.StorageRecordsSpec(
+                        'primary_key',
+                        [tc.Interval(float('-inf'), float('inf'))]))),
             contains_inanyorder(*[has_entries(pk=i, x=i + 10)
                                   for i in range(2, 4)]))
 

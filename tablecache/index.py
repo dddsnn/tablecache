@@ -45,6 +45,16 @@ class Interval:
 
 
 @dc.dataclass(frozen=True)
+class StorageRecordsSpec:
+    @staticmethod
+    def _always_use_record(_):
+        return True
+    index_name: str
+    score_intervals: list[Interval]
+    recheck_predicate: ca.Callable[[tp.Record], bool] = _always_use_record
+
+
+@dc.dataclass(frozen=True)
 class Adjustment:
     expire_intervals: ca.Iterable[Interval]
     index_name: t.Optional[str]
@@ -68,9 +78,9 @@ class Indexes[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def storage_intervals(
+    def storage_records_spec(
         self, index_name: str, *args: t.Any, **kwargs: t.Any
-    ) -> ca.Iterable[Interval]:
+    ) -> StorageRecordsSpec:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -126,14 +136,15 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
     def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
         return primary_key
 
-    def storage_intervals(
+    def storage_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
-    ) -> ca.Iterable[Interval]:
+    ) -> StorageRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
-        for primary_key in primary_keys:
-            yield Interval(
-                primary_key, math.nextafter(primary_key, float('inf')))
+        intervals = [Interval(
+            primary_key, math.nextafter(primary_key, float('inf')))
+            for primary_key in primary_keys]
+        return StorageRecordsSpec(index_name, intervals)
 
     def db_query_range(
             self, index_name: str, *primary_keys: numbers.Real

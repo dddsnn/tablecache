@@ -199,8 +199,8 @@ class CachedTable[PrimaryKey]:
             ) from e
         if get_from_storage:
             if len(self._invalid_record_repo) == 0:
-                records = self._storage_table.get_record_subset(
-                    index_name, self._indexes.storage_intervals(
+                records = self._storage_table.get_records(
+                    self._indexes.storage_records_spec(
                         index_name, *index_args, **index_kwargs))
             else:
                 records = await self._check_and_get_records_from_storage(
@@ -214,14 +214,14 @@ class CachedTable[PrimaryKey]:
 
     async def _check_and_get_records_from_storage(
             self, index_name, *index_args, **index_kwargs):
-        score_intervals = list(self._indexes.storage_intervals(
-            index_name, *index_args, **index_kwargs))
-        if not self._intervals_are_valid(index_name, score_intervals):
+        records_spec = self._indexes.storage_records_spec(
+            index_name, *index_args, **index_kwargs)
+        if not self._intervals_are_valid(records_spec):
             return await self._refresh_and_get_records_from_storage(
                 index_name, *index_args, **index_kwargs)
         records = []
-        async for record in self._storage_table.get_record_subset(
-                index_name, score_intervals):
+        async for record in self._storage_table.get_records(
+                records_spec):
             if self._invalid_record_repo.primary_key_is_invalid(
                     record[self._primary_key_name]):
                 return await self._refresh_and_get_records_from_storage(
@@ -229,11 +229,11 @@ class CachedTable[PrimaryKey]:
             records.append(record)
         return _async_generator(records)
 
-    def _intervals_are_valid(self, index_name, score_intervals):
-        for interval in score_intervals:
+    def _intervals_are_valid(self, records_spec):
+        for interval in records_spec.score_intervals:
             try:
                 if self._invalid_record_repo.interval_contains_invalid_score(
-                        index_name, interval):
+                        records_spec.index_name, interval):
                     return False
             except DirtyIndex:
                 return False
@@ -242,8 +242,8 @@ class CachedTable[PrimaryKey]:
     async def _refresh_and_get_records_from_storage(
             self, index_name, *index_args, **index_kwargs):
         await self._refresh_invalid()
-        return self._storage_table.get_record_subset(
-            index_name, self._indexes.storage_intervals(
+        return self._storage_table.get_records(
+            self._indexes.storage_records_spec(
                 index_name, *index_args, **index_kwargs))
 
     async def invalidate_record(
