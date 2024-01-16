@@ -281,21 +281,21 @@ class TestCachedTable:
         with pytest.raises(KeyError):
             await table.get_record(3)
 
-    async def test_get_record_subset_all(self, table, db_table):
+    async def test_get_records_all(self, table, db_table):
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key')
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(6))),
+                table.get_records('primary_key', *range(6))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(6)]))
 
-    async def test_get_record_subset_only_some(self, table, db_table):
+    async def test_get_records_only_some(self, table, db_table):
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key')
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2, 4))),
+                table.get_records('primary_key', *range(2, 4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2, 4)]))
 
@@ -355,7 +355,7 @@ class TestCachedTable:
         await table.load('x_range', min=12, max=14)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2, 4))),
+                table.get_records('primary_key', *range(2, 4))),
             contains_inanyorder(
                 *[has_entries(pk=i, x=i + 10, source='storage')
                   for i in range(2, 4)]))
@@ -368,13 +368,13 @@ class TestCachedTable:
             contains_inanyorder(*[has_entries(pk=i, x=i + 10)
                                   for i in range(2, 4)]))
 
-    async def test_get_record_subset_returns_db_state_if_subset_not_cached(
+    async def test_get_records_returns_db_state_if_subset_not_cached(
             self, table, db_table):
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', *range(2, 4))
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2, 5))),
+                table.get_records('primary_key', *range(2, 5))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(2, 5)]))
 
@@ -407,7 +407,7 @@ class TestCachedTable:
         await table.invalidate_record(1)
         assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
 
-    async def test_get_record_subset_refreshes_existing_invalid_keys(
+    async def test_get_records_refreshes_existing_invalid_keys(
             self, table, db_table):
         db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
@@ -415,7 +415,7 @@ class TestCachedTable:
         await table.invalidate_record(1)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', 1)),
+                table.get_records('primary_key', 1)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
     async def test_get_record_loads_new_invalid_keys(self, table, db_table):
@@ -425,7 +425,7 @@ class TestCachedTable:
         await table.invalidate_record(2)
         assert_that(await table.get_record(2), has_entries(pk=2, k='a2'))
 
-    async def test_get_record_subset_loads_new_invalid_keys(
+    async def test_get_records_loads_new_invalid_keys(
             self, table, db_table):
         db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
@@ -433,7 +433,7 @@ class TestCachedTable:
         await table.invalidate_record(2)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', 1, 2)),
+                table.get_records('primary_key', 1, 2)),
             contains_inanyorder(
                 has_entries(pk=1, k='a1'), has_entries(pk=2, k='a2')))
 
@@ -446,17 +446,17 @@ class TestCachedTable:
         db_table.records = [{'pk': 1, 'k': 'c1'}]
         assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
 
-    async def test_get_record_subset_only_refreshes_once(
+    async def test_get_records_only_refreshes_once(
             self, table, db_table):
         db_table.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
         db_table.records = [{'pk': 1, 'k': 'b1'}]
         await table.invalidate_record(1)
-        await collect_async_iter(table.get_record_subset('primary_key', 1, 2))
+        await collect_async_iter(table.get_records('primary_key', 1, 2))
         db_table.records = [{'pk': 1, 'k': 'c1'}]
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', 1, 2)),
+                table.get_records('primary_key', 1, 2)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
     async def test_get_record_deletes_invalid_keys(self, table, db_table):
@@ -467,7 +467,7 @@ class TestCachedTable:
         with pytest.raises(KeyError):
             await table.get_record(2)
 
-    async def test_get_record_subset_deletes_invalid_keys(
+    async def test_get_records_deletes_invalid_keys(
             self, table, db_table):
         db_table.records = [{'pk': i, 'k': f'a{i}'} for i in range(3)]
         await table.load('primary_key')
@@ -475,7 +475,7 @@ class TestCachedTable:
         await table.invalidate_record(1)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(3))),
+                table.get_records('primary_key', *range(3))),
             contains_inanyorder(
                 has_entries(pk=0, k='a0'), has_entries(pk=2, k='a2')))
 
@@ -503,18 +503,18 @@ class TestCachedTable:
         await table.load('primary_key', 0, 1)
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2))),
+                table.get_records('primary_key', *range(2))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
         await table.adjust_cached_subset('primary_key', *range(2, 4))
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2, 4))),
+                table.get_records('primary_key', *range(2, 4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2, 4)]))
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(0, 4))),
+                table.get_records('primary_key', *range(0, 4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(4)]))
 
@@ -524,13 +524,13 @@ class TestCachedTable:
         await table.load('primary_key', *range(2))
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(2))),
+                table.get_records('primary_key', *range(2))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
         await table.adjust_cached_subset('primary_key')
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(4))),
+                table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
@@ -547,7 +547,7 @@ class TestCachedTable:
         await table.adjust_cached_subset('primary_key', *range(4))
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('primary_key', *range(4))),
+                table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
@@ -584,7 +584,7 @@ class TestCachedTable:
         await table.load('primary_key')
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('x_range', min=12, max=14)),
+                table.get_records('x_range', min=12, max=14)),
             contains_inanyorder(
                 *[has_entries(pk=i, x=i + 10, source='storage')
                   for i in range(2, 4)]))
@@ -601,7 +601,7 @@ class TestCachedTable:
         await table.load('primary_key')
         with pytest.raises(ValueError):
             await collect_async_iter(
-                table.get_record_subset('x_range', min=12, max=14))
+                table.get_records('x_range', min=12, max=14))
 
     async def test_changing_scores_with_score_hint_dont_return_old_records(
             self, make_table, db_table):
@@ -615,7 +615,7 @@ class TestCachedTable:
             await table.invalidate_record(primary_key, {'x_range': new_score})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('x_range', min=12, max=14)), empty())
+                table.get_records('x_range', min=12, max=14)), empty())
 
     async def test_changing_scores_with_score_hint_return_new_records(
             self, make_table, db_table):
@@ -629,7 +629,7 @@ class TestCachedTable:
             await table.invalidate_record(primary_key, {'x_range': new_score})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('x_range', min=100, max=106)),
+                table.get_records('x_range', min=100, max=106)),
             contains_inanyorder(
                 *[has_entries(pk=i, x=i + 100, source='storage')
                   for i in range(6)]))
@@ -644,7 +644,7 @@ class TestCachedTable:
             await table.invalidate_record(primary_key, {})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('x_range', min=12, max=14)), empty())
+                table.get_records('x_range', min=12, max=14)), empty())
 
     async def test_changing_scores_without_score_hint_return_new_records(
             self, make_table, db_table):
@@ -656,7 +656,7 @@ class TestCachedTable:
             await table.invalidate_record(primary_key, {})
         assert_that(
             await collect_async_iter(
-                table.get_record_subset('x_range', min=100, max=106)),
+                table.get_records('x_range', min=100, max=106)),
             contains_inanyorder(
                 *[has_entries(pk=i, x=i + 100, source='storage')
                   for i in range(6)]))

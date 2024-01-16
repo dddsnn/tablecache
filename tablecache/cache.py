@@ -178,7 +178,7 @@ class CachedTable[PrimaryKey]:
                 'primary_key', primary_key)
             return await self._db_table.get_record(query, *args)
 
-    async def get_record_subset(
+    async def get_records(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
     ) -> tp.Records:
         """
