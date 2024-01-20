@@ -148,54 +148,50 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         except KeyError as e:
             raise ValueError(
                 f'Record {record} is missing a primary key.') from e
-        await self._maybe_delete_old_record(primary_key)
+        try:
+            await self.delete_record(primary_key)
+        except KeyError:
+            pass
         encoded_record = self._row_codec.encode(record)
         primary_key_score = self._score_functions['primary_key'](**record)
         await self._conn.zadd(
             f'{self.table_name}:primary_key',
             mapping=PairAsItems(memoryview(encoded_record), primary_key_score))
+        await self._modify_index_entries(record, primary_key_score, 1)
+
+    async def _modify_index_entries(self, record, primary_key_score, inc):
+        assert inc == -1 or inc == 1
         for index_name, score_function in self._score_functions.items():
-            score = score_function(**record)
             if index_name == 'primary_key':
                 continue
-            encoded_scores = await self._conn.zrange(
-                f'{self.table_name}:{index_name}', score, score, byscore=True)
-            for encoded_score in encoded_scores:
-                count, _, existing_primary_key_score = struct.unpack(
-                    'Idd', encoded_score)
-                if existing_primary_key_score == primary_key_score:
-                    await self._conn.zrem(
-                        f'{self.table_name}:{index_name}', encoded_score)
-                    count += 1
-                    break
-            else:
-                count = 1
-            mapping = PairAsItems(struct.pack(
-                'Idd', count, score, primary_key_score), score)
+            index_score = score_function(**record)
+            encoded_primary_key_scores = await self._conn.zrange(
+                f'{self.table_name}:{index_name}', index_score, index_score,
+                byscore=True)
+            await self._update_index_reference_count(
+                index_name, index_score, encoded_primary_key_scores,
+                primary_key_score, inc)
+
+    async def _update_index_reference_count(
+            self, index_name, index_score, encoded_primary_key_scores,
+            primary_key_score, inc):
+        for encoded_primary_key_score in encoded_primary_key_scores:
+            current_count, _, existing_primary_key_score = struct.unpack(
+                'Idd', encoded_primary_key_score)
+            if existing_primary_key_score == primary_key_score:
+                await self._conn.zrem(
+                    f'{self.table_name}:{index_name}',
+                    encoded_primary_key_score)
+                break
+        else:
+            current_count = 0
+        new_count = current_count + inc
+        if new_count > 0:
+            index_entry = struct.pack(
+                'Idd', new_count, index_score, primary_key_score)
+            mapping = PairAsItems(index_entry, index_score)
             await self._conn.zadd(
                 f'{self.table_name}:{index_name}', mapping=mapping)
-
-    async def _maybe_delete_old_record(self, primary_key):
-        try:
-            await self.delete_record(primary_key)
-        except KeyError:
-            pass
-
-    async def _get(self, primary_key):
-        primary_key_score = self._score_functions['primary_key'](
-            **{self._primary_key_name: primary_key})
-        encoded_records = await self._conn.zrange(
-            f'{self.table_name}:primary_key', primary_key_score,
-            primary_key_score, byscore=True)
-        for encoded_record in encoded_records:
-            decoded_record = self._row_codec.decode(encoded_record)
-            if decoded_record[self._primary_key_name] == primary_key:
-                return encoded_record, decoded_record
-        # A score exists for that key, but no record with that score. This
-        # happens when deleting ranges, where we don't have access to the keys
-        # belonging to the scores we delete. Clean this up here.
-        raise KeyError(
-            f'No record with {self._primary_key_name}={primary_key}.')
 
     @t.override
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
@@ -209,8 +205,34 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         which there exists a codec, or an error occurs when decoding the set of
         attributes.
         """
-        _, decoded_record = await self._get(primary_key)
+        _, decoded_record = await self._get_record(primary_key)
         return decoded_record
+
+    async def _get_record(self, primary_key):
+        primary_key_score = self._score_functions['primary_key'](
+            **{self._primary_key_name: primary_key})
+        records = self._get_records_by_primary_key_score(
+            [index.Interval(primary_key_score, primary_key_score)],
+            lambda r: r[self._primary_key_name] == primary_key)
+        async for encoded_record, decoded_record in records:
+            return encoded_record, decoded_record
+        raise KeyError(
+            f'No record with {self._primary_key_name}={primary_key}.')
+
+    async def _get_records_by_primary_key_score(
+            self, primary_key_score_intervals, recheck_predicate,
+            upper_inclusive=True):
+        for interval in primary_key_score_intervals:
+            # Prefixing the end of the range with '(' is the Redis way of
+            # saying we want the interval to be open on that end.
+            upper = interval.lt if upper_inclusive else f'({interval.lt}'
+            encoded_records = await self._conn.zrange(
+                f'{self.table_name}:primary_key', interval.ge, upper,
+                byscore=True)
+            for encoded_record in encoded_records:
+                decoded_record = self._row_codec.decode(encoded_record)
+                if recheck_predicate(decoded_record):
+                    yield encoded_record, decoded_record
 
     @t.override
     async def get_records(
@@ -225,58 +247,42 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
         No particular order is guaranteed.
         """
+        async for _, decoded_record in self._get_records(records_spec):
+            yield decoded_record
+
+    async def _get_records(self, records_spec):
         if records_spec.index_name == 'primary_key':
+            upper_inclusive = False
             primary_key_score_intervals = records_spec.score_intervals
         else:
+            upper_inclusive = True
             primary_key_scores = []
             for interval in records_spec.score_intervals:
-                encoded_scores = await self._conn.zrange(
+                encoded_primary_key_scores = await self._conn.zrange(
                     f'{self.table_name}:{records_spec.index_name}',
                     interval.ge, f'({interval.lt}', byscore=True)
-                for encoded_score in encoded_scores:
+                for encoded_primary_key_score in encoded_primary_key_scores:
                     primary_key_scores.append(
-                        struct.unpack('Idd', encoded_score)[2])
-            import math
-            primary_key_score_intervals = [index.Interval(s, math.nextafter(
-                s, float('inf'))) for s in primary_key_scores]
-        # Prefixing the end of the range with '(' is the Redis way of saying we
-        # want the interval to be open on that end.
-        for interval in primary_key_score_intervals:
-            encoded_records = await self._conn.zrange(
-                f'{self.table_name}:primary_key', interval.ge,
-                f'({interval.lt}', byscore=True)
-            for encoded_record in encoded_records:
-                decoded_record = self._row_codec.decode(encoded_record)
-                if records_spec.recheck_predicate(decoded_record):
-                    yield decoded_record
+                        struct.unpack('Idd', encoded_primary_key_score)[2])
+            primary_key_score_intervals = [
+                index.Interval(s, s) for s in primary_key_scores]
+        records = self._get_records_by_primary_key_score(
+            primary_key_score_intervals, records_spec.recheck_predicate,
+            upper_inclusive)
+        async for encoded_record, decoded_record in records:
+            yield encoded_record, decoded_record
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
         """Delete a record by primary key."""
-        record = await self.get_record(primary_key)
+        encoded_record, decoded_record = await self._get_record(primary_key)
+        await self._delete_record(encoded_record, decoded_record)
+
+    async def _delete_record(self, encoded_record, decoded_record):
         primary_key_score = self._score_functions['primary_key'](
-            **{self._primary_key_name: primary_key})
-        for index_name, score_function in self._score_functions.items():
-            if index_name == 'primary_key':
-                continue
-            score = score_function(**record)
-            encoded_scores = await self._conn.zrange(
-                f'{self.table_name}:{index_name}', score, score, byscore=True)
-            for encoded_score in encoded_scores:
-                count, _, existing_primary_key_score = struct.unpack(
-                    'Idd', encoded_score)
-                if existing_primary_key_score == primary_key_score:
-                    await self._conn.zrem(
-                        f'{self.table_name}:{index_name}', encoded_score)
-                    count -= 1
-                    if count > 0:
-                        mapping = PairAsItems(struct.pack(
-                            'Idd', count, score, primary_key_score), score)
-                        # PERF all zadd calls in one++++++++++++++
-                        await self._conn.zadd(
-                            f'{self.table_name}:{index_name}', mapping=mapping)
-                    break
-        await self._conn.zrem(f'{self.table_name}:primary_key', memoryview(self._row_codec.encode(record)))
+            **decoded_record)
+        await self._modify_index_entries(decoded_record, primary_key_score, -1)
+        await self._conn.zrem(f'{self.table_name}:primary_key', encoded_record)
 
     @t.override
     async def delete_records(
@@ -286,10 +292,10 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
         Returns the number of records deleted.
         """
-        records = self.get_records(records_spec)
         num_deleted = 0
-        async for record in records:
-            await self.delete_record(record[self._primary_key_name])
+        async for encoded_record, decoded_record in (
+                self._get_records(records_spec)):
+            await self._delete_record(encoded_record, decoded_record)
             num_deleted += 1
         return num_deleted
 
