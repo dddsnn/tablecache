@@ -42,28 +42,64 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def clear(self) -> None:
+        """Delete all data belonging to this table."""
         raise NotImplementedError
 
     @abc.abstractmethod
     async def put_record(self, record: tp.Record) -> None:
+        """
+        Store a record.
+
+        May raise an exception if the record is invalid in some way.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
+        """
+        Retrieve a previously stored record by primary key.
+
+        Raises a KeyError if no record with that primary key exists.
+
+        May raise other exceptions if there is a problem in retrieving the
+        record.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def get_records(
             self, records_spec: index.StorageRecordsSpec) -> tp.Records:
+        """
+        Get multiple records.
+
+        Asynchronously iterates over all records that match the recods spec.
+        That's all records that have a score in the specified index that is
+        contained in one of the specified intervals, and additionally match the
+        recheck predicate.
+
+        Records are guaranteed to be unique as long as the record_spec's
+        intervals don't overlap (as per their contract).
+
+        No particular order is guaranteed.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def delete_record(self, primary_key: PrimaryKey) -> None:
+        """Delete a record by primary key."""
         raise NotImplementedError
 
     @abc.abstractmethod
     async def delete_records(
             self, records_spec: index.StorageRecordsSpec) -> int:
+        """
+        Delete multiple records.
+
+        Deletes exactly those records that would have been returned by
+        get_records() when called with the same argument.
+
+        Returns the number of records deleted.
+        """
         raise NotImplementedError
 
 
@@ -80,15 +116,30 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         uniquely identifies it within the table. Only attributes for which a
         codec is specified are stored.
 
-        Each record is also associated with a score, which can be used to get
-        many elements with scores in a given subset.
+        Each record is also associated with one or more index scores, one for
+        each of the given score functions. At the very least, there has to be
+        one for the primary key (called primary_key), which returns a score for
+        the primary key. Other than the primary key itself, the score needs not
+        be unique. Score functions for other indexes may be defined, which
+        allow queries for multiple records via intervals of scores.
 
-        Records are serialized to byte strings and stored in Redis as elements
-        of a sorted set. This is used for fast queries by score subset. For
-        queries by primary key, a spearate hash stores the score for each
-        element used to find elements in the set with matching scores. All
-        matching elements have to be iterated here, which implies that getting
-        by primary key is slow if there are many elements with the same score.
+        Each index is stored as a Redis sorted set with the key
+        <table_name>:<index_name>. The primary_key takes on the special role of
+        storing the records themselves. They are serialized to byte strings
+        using the attribute codecs, and can be accessed via their primary key
+        score. Other indexes only store, for their respective index score, the
+        primary key score for the record. That means there is a layer of
+        indirection in getting records via another index.
+
+        Neither primary key nor other indexes' scores need be unique, so each
+        index score may map to multiple primary key scores, each of which may
+        belong to different primary keys. All of these primary key scores need
+        to be checked (the wrong ones are filtered out via a recheck
+        predicate). This implies firstly that it can be costly if lots of
+        records have equal index scores. Secondly, the index needs to keep
+        track of the number of primary key scores it maps to. This is stored as
+        a 32-bit unsigned integer, so there is a hard limit of 2**32-1 primary
+        key scores that each index score may map to.
 
         :param conn: An async Redis connection. The connection will not be
             closed and needs to be cleaned up from the outside.
@@ -96,14 +147,14 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
             Redis. Must be unique within the Redis instance.
         :param primary_key_name: The name of the attribute to be used as
             primary key. Must also be present in attribute_codecs.
-        :param attribute_codecs: Dictionary of codecs for record attributes.
-            Must map attribute names (string) to tablecache.Codec instances
-            that are able to en-/decode the corresponding values. Only
-            attributes present here are stored.
-        :param score_function: A function that extracts a score from a record.
-            A record's score must not change, even if the record is changed,
-            i.e. it must be derived only from immutable fields. Getting the
-            primary key or its hash may be a good option.
+        :param attribute_codecs: A dictionary of codecs for record attributes.
+            Must map attribute names (strings) to Codec instances that are able
+            to en-/decode the corresponding values. Only attributes present
+            here are stored.
+        :param score_functions: A dictionary mapping index names (strings) to
+            score functions. A score function takes records attributes as
+            kwargs and returns a number that can be represented as a 64-bit
+            float. Must contain at least one function for the primary_key.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
@@ -111,7 +162,7 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
         if primary_key_name not in attribute_codecs:
             raise ValueError('Codec for primary key is missing.')
         if 'primary_key' not in score_functions:
-            raise ValueError
+            raise ValueError('Missing primary_key score function.')
         self._conn = conn
         self._table_name = table_name
         self._primary_key_name = primary_key_name
@@ -125,7 +176,6 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
     @t.override
     async def clear(self) -> None:
-        """Delete all data belonging to this table."""
         for index_name in self._score_functions:
             await self._conn.delete(f'{self.table_name}:{index_name}')
 
@@ -237,16 +287,6 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
     @t.override
     async def get_records(
             self, records_spec: index.StorageRecordsSpec) -> tp.Records:
-        """
-        Get records with scores within a subset.
-
-        Asynchronously iterates over all records with a score within the given
-        subset. The lower bound is inclusive, the upper bound exclusive, so a
-        record with score s is yielded if there is an interval i in the
-        subset's score_intervals with s in i.
-
-        No particular order is guaranteed.
-        """
         async for _, decoded_record in self._get_records(records_spec):
             yield decoded_record
 
@@ -274,7 +314,6 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
-        """Delete a record by primary key."""
         encoded_record, decoded_record = await self._get_record(primary_key)
         await self._delete_record(encoded_record, decoded_record)
 
@@ -287,11 +326,6 @@ class RedisTable[PrimaryKey](StorageTable[PrimaryKey]):
     @t.override
     async def delete_records(
             self, records_spec: index.StorageRecordsSpec) -> int:
-        """
-        Delete records with scores in any of the given intervals.
-
-        Returns the number of records deleted.
-        """
         num_deleted = 0
         async for encoded_record, decoded_record in (
                 self._get_records(records_spec)):
