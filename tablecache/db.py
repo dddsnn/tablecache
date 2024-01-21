@@ -20,13 +20,14 @@ import typing as t
 
 import asyncpg.pool
 
+import tablecache.index as index
 import tablecache.types as tp
 
 
 
 class DbTable(abc.ABC):
     @abc.abstractmethod
-    async def get_records(self, query: str, *args: t.Any) -> tp.Records:
+    async def get_records(self, records_spec: index.DbRecordsSpec) -> tp.Records:
         """
         Asynchronously iterate over a subset of records.
 
@@ -34,13 +35,11 @@ class DbTable(abc.ABC):
         """
         raise NotImplementedError
 
-
-
-    async def get_record(self, query: str, *args: t.Any) -> tp.Record:
+    async def get_record(self, records_spec: index.DbRecordsSpec) -> tp.Record:
         """
         """
         try:
-            return await anext(self.get_records(query, *args))
+            return await anext(self.get_records(records_spec))
         except StopAsyncIteration as e:
             raise KeyError from e
 
@@ -77,10 +76,10 @@ class PostgresTable(DbTable):
         """
         self._pool = pool
 
-
     @t.override
-    async def get_records(self, query: str, *args: t.Any) -> tp.Records:
+    async def get_records(
+            self, records_spec: index.DbRecordsSpec) -> tp.Records:
         async with self._pool.acquire() as conn, conn.transaction():
-            async for record in conn.cursor(query, *args):
+            async for record in conn.cursor(
+                    records_spec.query, *records_spec.args):
                 yield record
-

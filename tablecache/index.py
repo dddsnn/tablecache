@@ -55,9 +55,15 @@ class StorageRecordsSpec:
 
 
 @dc.dataclass(frozen=True)
+class DbRecordsSpec:
+    query: str
+    args: tuple
+
+
+@dc.dataclass(frozen=True)
 class Adjustment:
     expire_spec: t.Optional[StorageRecordsSpec]
-    new_spec: t.Optional[tuple[str, list]]
+    new_spec: t.Optional[DbRecordsSpec]
 
 
 class Indexes[PrimaryKey](abc.ABC):
@@ -82,9 +88,9 @@ class Indexes[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def db_query_range(
-        self, index_name: str, *args: t.Any, **kwargs: t.Any
-    ) -> tuple[str, tuple]:
+    def db_records_spec(
+            self, index_name: str, *args: t.Any, **kwargs: t.Any
+    ) -> DbRecordsSpec:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -96,13 +102,8 @@ class Indexes[PrimaryKey](abc.ABC):
     @abc.abstractmethod
     def covers(
             self, index_name: str, *args: t.Any, **kwargs: t.Any) -> bool:
-        raise NotImplementedError
 
-    # @abc.abstractmethod
-    # def covers_subset(
-    #         self, index_name: str, *args: t.Any,
-    #         **kwargs:t.Any) -> bool:
-    #     raise NotImplementedError
+        raise NotImplementedError
 
     def observe(self, record: tp.Record) -> None:
         """
@@ -145,14 +146,14 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
             for primary_key in primary_keys]
         return StorageRecordsSpec(index_name, intervals)
 
-    def db_query_range(
+    def db_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
-    ) -> tuple[str, tuple]:
+    ) -> DbRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         if not primary_keys:
-            return self._query_all_string, ()
-        return self._query_some_string, (primary_keys,)
+            return DbRecordsSpec(self._query_all_string, ())
+        return DbRecordsSpec(self._query_some_string, (primary_keys,))
 
     def adjust(
             self, index_name: str, *primary_keys: numbers.Real) -> Adjustment:
@@ -166,15 +167,15 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
             return Adjustment(
                 StorageRecordsSpec(
                     'primary_key', [Interval(float('-inf'), float('inf'))]),
-                self.db_query_range('primary_key', *primary_keys))
+                self.db_records_spec('primary_key', *primary_keys))
         if not primary_keys:
             self._covers_all = True
-            return Adjustment(None, self.db_query_range('primary_key'))
+            return Adjustment(None, self.db_records_spec('primary_key'))
         self._primary_keys = set(primary_keys)
         return Adjustment(
             StorageRecordsSpec(
                 'primary_key', [Interval(float('-inf'), float('inf'))]),
-            self.db_query_range('primary_key', *primary_keys))
+            self.db_records_spec('primary_key', *primary_keys))
 
     def covers(self, index_name: str, *primary_keys: numbers.Real) -> bool:
         if index_name != 'primary_key':

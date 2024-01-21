@@ -77,13 +77,14 @@ class MultiIndexes(tc.Indexes[int]):
                     tc.Interval(mid + 100, lt + 100)])
         raise NotImplementedError
 
-    def db_query_range(self, index_name, *args, **kwargs):
+    def db_records_spec(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
             if args:
-                return 'query_some_pks', (args,)
-            return 'query_all_pks', ()
+                return tc.DbRecordsSpec('query_some_pks', (args,))
+            return tc.DbRecordsSpec('query_all_pks', ())
         if index_name == 'x_range':
-            return 'query_x_range', (kwargs['min'], kwargs['max'])
+            return tc.DbRecordsSpec(
+                'query_x_range', (kwargs['min'], kwargs['max']))
         raise NotImplementedError
 
     def adjust(self, index_name, *args, **kwargs):
@@ -98,7 +99,7 @@ class MultiIndexes(tc.Indexes[int]):
             return tc.Adjustment(
                 tc.StorageRecordsSpec(
                     'primary_key', [tc.Interval(float('-inf'), float('inf'))]),
-                self.db_query_range('primary_key', *args))
+                self.db_records_spec('primary_key', *args))
         if index_name == 'x_range':
             self._contains_all = False
             self._primary_keys = set()
@@ -106,7 +107,7 @@ class MultiIndexes(tc.Indexes[int]):
             return tc.Adjustment(
                 tc.StorageRecordsSpec(
                     'primary_key', [tc.Interval(float('-inf'), float('inf'))]),
-                self.db_query_range('x_range', **kwargs))
+                self.db_records_spec('x_range', **kwargs))
         raise NotImplementedError
 
     def covers(self, index_name, *args, **kwargs):
@@ -131,27 +132,27 @@ class MockDbTable(tc.DbTable):
     def __init__(self):
         self.records = []
 
-    async def get_records(self, query, *args):
-        if not args:
-            assert query == 'query_all_pks'
+    async def get_records(self, records_spec):
+        if not records_spec.args:
+            assert records_spec.query == 'query_all_pks'
             def record_matches(_): return True
-        elif query == 'query_some_pks':
+        elif records_spec.query == 'query_some_pks':
             assert_that(
-                args,
+                records_spec.args,
                 all_of(
                     instance_of(tuple),
                     contains_exactly(instance_of(tuple))))
 
-            def record_matches(r): return r['pk'] in args[0]
+            def record_matches(r): return r['pk'] in records_spec.args[0]
         else:
-            assert query == 'query_x_range'
+            assert records_spec.query == 'query_x_range'
             assert_that(
-                args,
+                records_spec.args,
                 all_of(
                     instance_of(tuple),
                     contains_exactly(
                         instance_of(numbers.Real), instance_of(numbers.Real))))
-            ge, lt = args
+            ge, lt = records_spec.args
             def record_matches(r): return ge <= r['x'] < lt
         for record in self.records:
             if record_matches(record):
@@ -319,7 +320,8 @@ class TestCachedTable:
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 2, 4)
         expected_observations = await collect_async_iter(
-            db_table.get_records('query_some_pks', (2, 4)))
+            db_table.get_records(
+                tc.DbRecordsSpec('query_some_pks', ((2, 4),))))
         assert_that(
             indexes.observe_mock.call_args_list,
             contains_inanyorder(*[um.call(r) for r in expected_observations]))
@@ -610,7 +612,7 @@ class TestCachedTable:
         class Indexes(SpyIndexes):
             def adjust(self, index_name, *primary_keys):
                 return tc.Adjustment(
-                    None, self.db_query_range(index_name, *primary_keys))
+                    None, self.db_records_spec(index_name, *primary_keys))
         table = make_table(indexes=Indexes())
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
@@ -627,7 +629,8 @@ class TestCachedTable:
         await table.load('primary_key', *range(2))
         await table.adjust_cached_subset('primary_key', *range(4))
         expected_observations = await collect_async_iter(
-            db_table.get_records('query_some_pks', (2, 3)))
+            db_table.get_records(
+                tc.DbRecordsSpec('query_some_pks', ((2, 3),))))
         assert_that(
             indexes.observe_mock.call_args_list,
             contains_inanyorder(

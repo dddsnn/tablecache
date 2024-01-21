@@ -39,7 +39,7 @@ from tablecache.codec import (
 )
 from tablecache.db import DbTable, PostgresTable
 from tablecache.index import (
-    Adjustment, Indexes, Interval, PrimaryKeyIndexes, StorageRecordsSpec,
-    UnsupportedIndexOperation)
+    Adjustment, DbRecordsSpec, Indexes, Interval, PrimaryKeyIndexes,
+    StorageRecordsSpec, UnsupportedIndexOperation)
 from tablecache.storage import CodingError, RedisTable, StorageTable
 from tablecache.types import Record, Records, ScoreFunction

@@ -115,12 +115,12 @@ class CachedTable[PrimaryKey]:
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support adjusting by {index_name}.') from e
-        num_loaded = await self._load_subset(*adjustment.new_spec)
+        num_loaded = await self._load_subset(adjustment.new_spec)
         _logger.info(f'Loaded {num_loaded} records.')
 
-    async def _load_subset(self, query, args) -> None:
+    async def _load_subset(self, db_records_spec):
         num_loaded = 0
-        async for record in self._db_table.get_records(query, *args):
+        async for record in self._db_table.get_records(db_records_spec):
             await self._storage_table.put_record(record)
             self._indexes.observe(record)
             num_loaded += 1
@@ -147,7 +147,7 @@ class CachedTable[PrimaryKey]:
         else:
             num_deleted = 0
         if adjustment.new_spec:
-            num_loaded = await self._load_subset(*adjustment.new_spec)
+            num_loaded = await self._load_subset(adjustment.new_spec)
         else:
             num_loaded = 0
         if num_deleted or num_loaded:
@@ -177,9 +177,9 @@ class CachedTable[PrimaryKey]:
         except KeyError:
             if self._indexes.covers('primary_key', primary_key):
                 raise
-            query, args = self._indexes.db_query_range(
+            db_records_spec = self._indexes.db_records_spec(
                 'primary_key', primary_key)
-            return await self._db_table.get_record(query, *args)
+            return await self._db_table.get_record(db_records_spec)
 
     async def get_records(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -209,9 +209,9 @@ class CachedTable[PrimaryKey]:
                 records = await self._check_and_get_records_from_storage(
                     index_name, *index_args, **index_kwargs)
         else:
-            query, args = self._indexes.db_query_range(
+            db_records_spec = self._indexes.db_records_spec(
                 index_name, *index_args, **index_kwargs)
-            records = self._db_table.get_records(query, *args)
+            records = self._db_table.get_records(db_records_spec)
         async for record in records:
             yield record
 
@@ -286,9 +286,9 @@ class CachedTable[PrimaryKey]:
 
     async def _invalidate_add_new(self, primary_key):
         try:
-            query, args = self._indexes.db_query_range(
+            db_records_spec = self._indexes.db_records_spec(
                 'primary_key', primary_key)
-            record = await self._db_table.get_record(query, *args)
+            record = await self._db_table.get_record(db_records_spec)
             await self._storage_table.put_record(record)
             self._indexes.observe(record)
         except KeyError:
@@ -304,9 +304,9 @@ class CachedTable[PrimaryKey]:
                 await self._storage_table.delete_record(key)
             except KeyError:
                 pass
-        query, args = self._indexes.db_query_range(
+        db_records_spec = self._indexes.db_records_spec(
             'primary_key', *self._invalid_record_repo.invalid_primary_keys)
-        updated_records = self._db_table.get_records(query, *args)
+        updated_records = self._db_table.get_records(db_records_spec)
         async for record in updated_records:
             await self._storage_table.put_record(record)
         self._invalid_record_repo.clear()

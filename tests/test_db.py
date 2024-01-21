@@ -106,15 +106,19 @@ async def collect_async_iter(i):
 
 
 class TestPostgresTable:
-    query_all_string = '''
-        SELECT
-            uc.*, u.name AS user_name, u.age AS user_age, c.name AS city_name
-        FROM
-            users u
-            JOIN users_cities uc USING (user_id)
-            JOIN cities c USING (city_id)'''
-    query_some_string = f'{query_all_string} WHERE uc.user_id = ANY ($1)'
-    query_two_string = f'{query_all_string} WHERE uc.user_id IN ($1, $2)'
+    def query_spec(self, *user_ids):
+        query_string = '''
+            SELECT
+                uc.*, u.name AS user_name, u.age AS user_age,
+                c.name AS city_name
+            FROM
+                users u
+                JOIN users_cities uc USING (user_id)
+                JOIN cities c USING (city_id)'''
+        if user_ids:
+            query_string += ' WHERE uc.user_id IN ({})'.format(
+                ','.join(f'${i}' for i in range(1, len(user_ids) + 1)))
+        return tc.DbRecordsSpec(query_string, tuple(user_ids))
 
     @pytest.fixture
     def table(self, pool):
@@ -122,13 +126,13 @@ class TestPostgresTable:
 
     async def test_get_records_on_empty(self, table):
         assert_that(
-            await collect_async_iter(table.get_records(self.query_all_string)),
+            await collect_async_iter(table.get_records(self.query_spec())),
             empty())
 
     async def test_get_records_on_one(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         assert_that(
-            await collect_async_iter(table.get_records(self.query_all_string)),
+            await collect_async_iter(table.get_records(self.query_spec())),
             contains_inanyorder(
                 has_entries(
                     user_id=1, user_name='u1', user_age=1, city_id=11,
@@ -139,7 +143,7 @@ class TestPostgresTable:
         await insert_user(2, 'u2', None, 11, 'c1')
         await insert_user(3, 'u3', 3, 12, 'c2')
         assert_that(
-            await collect_async_iter(table.get_records(self.query_all_string)),
+            await collect_async_iter(table.get_records(self.query_spec())),
             contains_inanyorder(
                 has_entries(
                     user_id=1, user_name='u1', user_age=1, city_id=11,
@@ -157,19 +161,19 @@ class TestPostgresTable:
         await insert_user(3, 'u3', 3, 12, 'c2')
         assert_that(
             await collect_async_iter(
-                table.get_records(self.query_two_string, 2, 3)),
+                table.get_records(self.query_spec(2, 3))),
             contains_inanyorder(
                 has_entries(user_id=2), has_entries(user_id=3)))
 
     async def test_get_record_raises_on_nonexistent(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         with pytest.raises(KeyError):
-            await table.get_record(self.query_some_string, (2,))
+            await table.get_record(self.query_spec(2))
 
     async def test_get_record(self, table, insert_user):
         await insert_user(1, 'u1', 1, 11, 'c1')
         assert_that(
-            await table.get_record(self.query_some_string, (1,)),
+            await table.get_record(self.query_spec(1)),
             has_entries(
                 user_id=1, user_name='u1', user_age=1, city_id=11,
                 city_name='c1'))
