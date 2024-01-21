@@ -95,11 +95,19 @@ class MultiIndexes(tc.Indexes[int]):
             else:
                 self._contains_all = True
                 self._primary_keys = set()
+            return tc.Adjustment(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval(float('-inf'), float('inf'))]),
+                self.db_query_range('primary_key', *args))
         if index_name == 'x_range':
             self._contains_all = False
             self._primary_keys = set()
             self._range = (kwargs['min'], kwargs['max'])
-        return tc.Adjustment([], index_name, args, kwargs)
+            return tc.Adjustment(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval(float('-inf'), float('inf'))]),
+                self.db_query_range('x_range', **kwargs))
+        raise NotImplementedError
 
     def covers(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
@@ -185,7 +193,7 @@ class MockStorageTable(tc.StorageTable):
         return self._make_record(self.records[primary_key])
 
     async def get_records(self, records_spec):
-        for key, record in self.records.items():
+        for record in self.records.values():
             if not records_spec.recheck_predicate(record):
                 continue
             for interval in records_spec.score_intervals:
@@ -208,16 +216,11 @@ class MockStorageTable(tc.StorageTable):
                 if not primary_keys:
                     del index[score]
 
-    async def delete_record_subset(self, score_intervals):
-        num_deleted = 0
-        for primary_key in list(self.records):
-            primary_key_score = self._score_functions['primary_key'](
-                **{self._primary_key_name: primary_key})
-            if any(primary_key_score in i for i in score_intervals):
-                del self.records[primary_key]
-                self._delete_index_entries(primary_key)
-                num_deleted += 1
-        return num_deleted
+    async def delete_records(self, records_spec):
+        delete = [r async for r in self.get_records(records_spec)]
+        for record in delete:
+            await self.delete_record(record[self._primary_key_name])
+        return len(delete)
 
 
 class TestCachedTable:
@@ -368,7 +371,7 @@ class TestCachedTable:
             contains_inanyorder(*[has_entries(pk=i, x=i + 10)
                                   for i in range(2, 4)]))
 
-    async def test_get_records_returns_db_state_if_subset_not_cached(
+    async def test_get_records_returns_db_state_if_not_cached(
             self, table, db_table):
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', *range(2, 4))
@@ -378,7 +381,7 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(2, 5)]))
 
-    async def test_get_record_also_checks_db_in_case_not_in_cached_subset(
+    async def test_get_record_also_checks_db_in_case_not_cached(
             self, table, db_table):
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', *range(2, 4))
@@ -541,8 +544,30 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(4)]))
 
-    async def test_adjust_cached_subset_loads_new_data(
-            self, table, db_table):
+    async def test_adjust_cached_subset_prunes_no_old_data(
+            self, make_table, db_table):
+        class Indexes(SpyIndexes):
+            def adjust(self, *args, **kwargs):
+                adjustment = super().adjust(*args)
+                if 'delete_nothing' in kwargs:
+                    assert adjustment.expire_spec is None
+                return adjustment
+        table = make_table(indexes=Indexes())
+        db_table.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key', 0, 1)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', *range(2))),
+            contains_inanyorder(
+                *[has_entries(pk=i, source='storage') for i in range(2)]))
+        await table.adjust_cached_subset('primary_key', delete_nothing=True)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', *range(4))),
+            contains_inanyorder(
+                *[has_entries(pk=i, source='storage') for i in range(4)]))
+
+    async def test_adjust_cached_subset_loads_new_data(self, table, db_table):
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         assert_that(
@@ -557,13 +582,35 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
+    async def test_adjust_cached_subset_loads_no_new_data(
+            self, make_table, db_table):
+        class Indexes(SpyIndexes):
+            def adjust(self, index_name, *args, **kwargs):
+                adjustment = super().adjust(index_name, *args)
+                if 'load_nothing' in kwargs:
+                    return tc.Adjustment(None, adjustment.expire_spec)
+                return adjustment
+        table = make_table(indexes=Indexes())
+        db_table.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key', *range(2))
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', *range(2))),
+            contains_inanyorder(
+                *[has_entries(pk=i, source='storage') for i in range(2)]))
+        await table.adjust_cached_subset('primary_key', load_nothing=True)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', *range(4))),
+            contains_inanyorder(
+                *[has_entries(pk=i, source='storage') for i in range(2)]))
+
     async def test_adjust_cached_subset_doesnt_introduce_duplicates(
             self, make_table, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, index_name, *primary_keys):
-                assert index_name == 'primary_key'
-                return tc.Adjustment([], 'primary_key', primary_keys, {})
-
+                return tc.Adjustment(
+                    None, self.db_query_range(index_name, *primary_keys))
         table = make_table(indexes=Indexes())
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))

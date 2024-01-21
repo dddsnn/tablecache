@@ -115,9 +115,7 @@ class CachedTable[PrimaryKey]:
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support adjusting by {index_name}.') from e
-        num_loaded = await self._load_subset(
-            *self._indexes.db_query_range(
-                index_name, *index_args, **index_kwargs))
+        num_loaded = await self._load_subset(*adjustment.new_spec)
         _logger.info(f'Loaded {num_loaded} records.')
 
     async def _load_subset(self, query, args) -> None:
@@ -143,13 +141,18 @@ class CachedTable[PrimaryKey]:
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support adjusting by {index_name}.') from e
-        num_deleted = await self._storage_table.delete_record_subset(
-            adjustment.expire_intervals)
-        num_loaded = await self._load_subset(
-            *self._indexes.db_query_range(
-                index_name, *index_args, **index_kwargs))
-        _logger.info(
-            f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
+        if adjustment.expire_spec:
+            num_deleted = await self._storage_table.delete_records(
+                adjustment.expire_spec)
+        else:
+            num_deleted = 0
+        if adjustment.new_spec:
+            num_loaded = await self._load_subset(*adjustment.new_spec)
+        else:
+            num_loaded = 0
+        if num_deleted or num_loaded:
+            _logger.info(
+                f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
 
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         """
