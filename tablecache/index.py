@@ -18,15 +18,19 @@
 import abc
 import collections.abc as ca
 import dataclasses as dc
+import itertools as it
 import math
 import numbers
+import operator as op
 import typing as t
 
 import tablecache.types as tp
 
 
 class UnsupportedIndexOperation(Exception):
-    pass
+    """
+    Raised to signal that a certain operation is not supported on an index.
+    """
 
 
 @dc.dataclass(frozen=True)
@@ -46,9 +50,31 @@ class Interval:
 
 @dc.dataclass(frozen=True)
 class StorageRecordsSpec:
+    """
+    A specification of records in storage.
+
+    Represents a (possibly empty) set of records in a storage table. These are
+    all those which have an index score in the index with the given name which
+    is contained in any of the given intervals.
+
+    Additionally, the record must satifsy the recheck predicate, i.e. it must
+    return True when called with the record. The default recheck predicate
+    accepts any record (i.e. only the index score is important). This predicate
+    can be used to query the storage for a range of records that may contain
+    some undesirable ones, and then filtering those out.
+
+    The score intervals must not overlap.
+    """
     @staticmethod
     def _always_use_record(_):
         return True
+
+    def __post_init__(self):
+        for left, right in it.pairwise(
+                sorted(self.score_intervals, key=op.attrgetter('ge'))):
+            if left.lt > right.ge:
+                raise ValueError('Intervals overlap.')
+
     index_name: str
     score_intervals: list[Interval]
     recheck_predicate: ca.Callable[[tp.Record], bool] = _always_use_record
@@ -56,12 +82,24 @@ class StorageRecordsSpec:
 
 @dc.dataclass(frozen=True)
 class DbRecordsSpec:
+    """A specification of records in the DB."""
     query: str
     args: tuple
 
 
 @dc.dataclass(frozen=True)
 class Adjustment:
+    """
+    A specification of an adjustment to be made to the cache.
+
+    Specifies records that should be expired from the cache's storage, as well
+    as ones that should be loaded from the DB and put into storage.
+
+    The records specified via the expire_spec need not necessarily exist in
+    storage. Likewise, ones specified via new_spec may already exist. Setting
+    either to None signals that no records should be expired or loaded,
+    respectively.
+    """
     expire_spec: t.Optional[StorageRecordsSpec]
     new_spec: t.Optional[DbRecordsSpec]
 

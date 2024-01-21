@@ -642,23 +642,6 @@ class TestRedisTable:
             contains_inanyorder(
                 has_entries(pk=-50), has_entries(pk=0), has_entries(pk=49)))
 
-    async def test_delete_records_deletes_overlapping_intervals(
-            self, table):
-        await table.put_record({'pk': 0, 's': 's'})
-        await table.put_record({'pk': 10, 's': 's'})
-        await table.put_record({'pk': 20, 's': 's'})
-        await table.put_record({'pk': 30, 's': 's'})
-        await table.put_record({'pk': 40, 's': 's'})
-        num_deleted = await table.delete_records(
-            tc.StorageRecordsSpec(
-                'primary_key', [tc.Interval(5, 25), tc.Interval(15, 35)]))
-        assert num_deleted == 3
-        records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
-        assert_that(
-            await collect_async_iter(records),
-            contains_inanyorder(has_entries(pk=0), has_entries(pk=40)))
-
     async def test_delete_records_with_non_primary_key_index(
             self, make_table):
         table = make_table(
