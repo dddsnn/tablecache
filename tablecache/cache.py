@@ -22,7 +22,7 @@ import typing as t
 
 import tablecache.db as db
 import tablecache.index as index
-import tablecache.storage as storage
+import tablecache.redis
 import tablecache.types as tp
 
 _logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ class CachedTable[PrimaryKey]:
             db_table: db.DbTable,
             *,
             primary_key_name: str,
-            attribute_codecs: storage.AttributeCodecs,
+            attribute_codecs: tablecache.redis.AttributeCodecs,
             redis_conn: redis.Redis,
             redis_table_name: str) -> None:
         """
@@ -86,7 +86,7 @@ class CachedTable[PrimaryKey]:
         self._indexes = indexes
         self._db_table = db_table
         self._primary_key_name = primary_key_name
-        self._storage_table = storage.RedisTable(
+        self._storage_table = tablecache.redis.RedisTable(
             redis_conn, table_name=redis_table_name,
             primary_key_name=primary_key_name,
             attribute_codecs=attribute_codecs,

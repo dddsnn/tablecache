@@ -22,8 +22,9 @@ from hamcrest import *
 import pytest
 import redis.asyncio as redis
 
-import tablecache.storage as storage
 import tablecache as tc
+import tablecache.redis as tcr
+import tablecache.redis.storage as storage
 
 _inf_to_inf = tc.Interval(float('-inf'), float('inf'))
 
@@ -72,7 +73,7 @@ def filter_kwarg(kwarg_name):
     return filter
 
 
-class FailCodec(tc.Codec):
+class FailCodec(tcr.Codec):
     def encode(self, _):
         raise Exception
 
@@ -91,10 +92,10 @@ class TestRedisTable:
                 table_name='table', primary_key_name='pk',
                 attribute_codecs=None, score_functions=None):
             attribute_codecs = attribute_codecs or {
-                'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
+                'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
             score_functions = score_functions or {
                 'primary_key': filter_kwarg(primary_key_name)}
-            return tc.RedisTable(
+            return tcr.RedisTable(
                 conn, table_name=table_name, primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs,
                 score_functions=score_functions)
@@ -110,14 +111,14 @@ class TestRedisTable:
         with pytest.raises(ValueError):
             make_table(
                 attribute_codecs={
-                    'pk': tc.IntAsStringCodec(), 1: tc.StringCodec()})
+                    'pk': tcr.IntAsStringCodec(), 1: tcr.StringCodec()})
 
     async def test_construction_raises_if_primary_key_missing_from_codec(
             self, make_table):
         with pytest.raises(ValueError):
             make_table(
                 primary_key_name='pk',
-                attribute_codecs={'s': tc.StringCodec()})
+                attribute_codecs={'s': tcr.StringCodec()})
 
     async def test_put_record_get_record(self, table):
         await table.put_record({'pk': 1, 's': 's1'})
@@ -144,15 +145,16 @@ class TestRedisTable:
     @pytest.mark.parametrize('fail_attribute', ['pk', 's'])
     async def test_put_record_raises_on_attribute_encoding_error(
             self, make_table, fail_attribute):
-        attribute_codecs = {'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()}
+        attribute_codecs = {
+            'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
         attribute_codecs[fail_attribute] = FailCodec()
         table = make_table(attribute_codecs=attribute_codecs)
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             await table.put_record({'pk': 1, 's': 's1'})
 
     async def test_put_record_raises_if_attribute_doesnt_encode_to_bytes(
             self, make_table):
-        class BrokenStringReturningCodec(tc.Codec):
+        class BrokenStringReturningCodec(tcr.Codec):
             def encode(self, _):
                 return 'a string (supposed to be bytes)'
 
@@ -161,9 +163,9 @@ class TestRedisTable:
 
         table = make_table(
             attribute_codecs={
-                'pk': tc.IntAsStringCodec(),
+                'pk': tcr.IntAsStringCodec(),
                 's': BrokenStringReturningCodec(), })
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             await table.put_record({'pk': 1, 's': 's1'})
 
     async def test_put_record_overwrites_old_value_with_same_primary_key(
@@ -266,12 +268,12 @@ class TestRedisTable:
             await table.get_record(1)
 
     async def test_get_record_raises_on_missing_attributes(self, make_table):
-        table = make_table(attribute_codecs={'pk': tc.IntAsStringCodec()})
+        table = make_table(attribute_codecs={'pk': tcr.IntAsStringCodec()})
         await table.put_record({'pk': 1})
         table = make_table(
             attribute_codecs={
-                'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()})
-        with pytest.raises(tc.CodingError):
+                'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
+        with pytest.raises(tcr.RedisCodingError):
             await table.get_record(1)
 
     async def test_get_record_raises_on_duplicate_attribute_ids(
@@ -285,18 +287,18 @@ class TestRedisTable:
         false_row = row + s_id + (6).to_bytes(length=2) + b'foobar'
         await conn.delete('table:primary_key')
         await conn.zadd('table:primary_key', {false_row: 0})
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             await table.get_record(1)
 
     async def test_get_record_raises_on_attribute_decoding_error(
             self, make_table):
         table = make_table(
             attribute_codecs={
-                'pk': tc.IntAsStringCodec(), 's': tc.StringCodec()})
+                'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
         await table.put_record({'pk': 1, 's': 's1'})
         table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec(), 's': FailCodec()})
-        with pytest.raises(tc.CodingError):
+            attribute_codecs={'pk': tcr.IntAsStringCodec(), 's': FailCodec()})
+        with pytest.raises(tcr.RedisCodingError):
             await table.get_record(1)
 
     async def test_get_record_handles_records_with_equal_scores(
@@ -309,7 +311,7 @@ class TestRedisTable:
         assert_that(await table.get_record(2), has_entries(pk=2))
 
     async def test_uses_custom_codec(self, make_table):
-        class WeirdTupleCodec(tc.Codec):
+        class WeirdTupleCodec(tcr.Codec):
             def encode(self, t):
                 return repr(t).encode()
 
@@ -319,7 +321,7 @@ class TestRedisTable:
 
         table = make_table(
             attribute_codecs={
-                'pk': tc.IntAsStringCodec(), 't': WeirdTupleCodec()})
+                'pk': tcr.IntAsStringCodec(), 't': WeirdTupleCodec()})
         await table.put_record({'pk': 1, 't': (5, 'x')})
         assert_that(
             await table.get_record(1),
@@ -436,7 +438,7 @@ class TestRedisTable:
             return kwargs['pk'] - 10
 
         table = make_table(
-            attribute_codecs={'pk': tc.IntAsStringCodec()},
+            attribute_codecs={'pk': tcr.IntAsStringCodec()},
             score_functions={'primary_key': pk_minus_10})
         await table.put_record({'pk': 0})
         await table.put_record({'pk': 10})
@@ -792,7 +794,7 @@ class TestRowCodec:
     def make_codec(self):
         def factory(attribute_codecs=None):
             attribute_codecs = attribute_codecs or {
-                'i': tc.IntAsStringCodec(), 's': tc.StringCodec()}
+                'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
             return storage.RowCodec(attribute_codecs)
 
         return factory
@@ -814,13 +816,13 @@ class TestRowCodec:
             codec.encode({'i': 1})
 
     def test_encode_raises_on_attribute_encoding_error(self, make_codec):
-        codec = make_codec({'i': tc.IntAsStringCodec(), 's': FailCodec()})
-        with pytest.raises(tc.CodingError):
+        codec = make_codec({'i': tcr.IntAsStringCodec(), 's': FailCodec()})
+        with pytest.raises(tcr.RedisCodingError):
             codec.encode({'i': 1, 's': 's1'})
 
     def test_encode_raises_if_attribute_doesnt_encode_to_bytes(
             self, make_codec):
-        class BrokenStringReturningCodec(tc.Codec):
+        class BrokenStringReturningCodec(tcr.Codec):
             def encode(self, _):
                 return 'a string (supposed to be bytes)'
 
@@ -828,13 +830,13 @@ class TestRowCodec:
                 raise Exception
 
         codec = make_codec({
-            'i': tc.IntAsStringCodec(),
+            'i': tcr.IntAsStringCodec(),
             's': BrokenStringReturningCodec(), })
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.encode({'i': 1, 's': 's1'})
 
     def test_encode_raises_if_encoded_attribute_is_too_long(self, make_codec):
-        class LargeValueCodec(tc.Codec):
+        class LargeValueCodec(tcr.Codec):
             def encode(self, length):
                 return length * b'x'
 
@@ -842,7 +844,7 @@ class TestRowCodec:
                 raise Exception
 
         codec = make_codec({'l': LargeValueCodec()})
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.encode({'l': codec.max_attribute_length + 1})
 
     def test_decode_raises_on_non_bytes_arg(self, codec):
@@ -851,9 +853,10 @@ class TestRowCodec:
 
     def test_decode_raises_on_missing_attributes(self, make_codec):
         encoded = bytes(
-            make_codec({'i': tc.IntAsStringCodec()}).encode({'i': 1}))
-        codec = make_codec({'i': tc.IntAsStringCodec(), 's': tc.StringCodec()})
-        with pytest.raises(tc.CodingError):
+            make_codec({'i': tcr.IntAsStringCodec()}).encode({'i': 1}))
+        codec = make_codec(
+            {'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(encoded)
 
     def test_decode_raises_on_duplicate_attribute_ids(self, codec):
@@ -864,50 +867,50 @@ class TestRowCodec:
         false_encoded = bytes(
             encoded + s_id + (6).to_bytes(length=2) + b'foobar')
         assert_that(codec.decode(false_encoded[:-9]), has_entries(i=1, s='s1'))
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_on_attribute_decoding_error(self, make_codec):
         encoded = bytes(
-            make_codec({'s': tc.StringCodec()}).encode({'s': 's1'}))
+            make_codec({'s': tcr.StringCodec()}).encode({'s': 's1'}))
         codec = make_codec({'s': FailCodec()})
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(encoded)
 
     def test_decode_raises_on_unknown_attribute_ids(self, make_codec):
-        codec = make_codec({'s': tc.StringCodec()})
+        codec = make_codec({'s': tcr.StringCodec()})
         encoded = bytes(codec.encode({'s': 's1'}))
         assert len(encoded) == 5 and encoded.endswith(b's1')
         false_encoded = encoded + bytes([encoded[0] + 1]) + encoded[1:]
         assert_that(codec.decode(false_encoded[:5]), has_entries(s='s1'))
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_if_attribute_value_ends_unexpectedly(
             self, make_codec):
-        codec = make_codec({'s': tc.StringCodec()})
+        codec = make_codec({'s': tcr.StringCodec()})
         encoded = bytes(codec.encode({'s': 'foobar'}))
         assert len(encoded) == 9 and encoded.endswith(b'foobar')
         assert int.from_bytes(encoded[1:3]) == 6
         false_encoded = encoded[:-1]
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_if_attribute_header_ends_after_id(self, make_codec):
-        codec = make_codec({'s1': tc.StringCodec(), 's2': tc.StringCodec()})
+        codec = make_codec({'s1': tcr.StringCodec(), 's2': tcr.StringCodec()})
         encoded = bytes(codec.encode({'s1': 's1', 's2': 's2'}))
         assert len(encoded) == 10 and encoded[3:4] == encoded[8:9] == b's'
         false_encoded = encoded[:6]
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_if_attribute_header_ends_in_the_middle_of_length(
             self, make_codec):
-        codec = make_codec({'s1': tc.StringCodec(), 's2': tc.StringCodec()})
+        codec = make_codec({'s1': tcr.StringCodec(), 's2': tcr.StringCodec()})
         encoded = bytes(codec.encode({'s1': 's1', 's2': 's2'}))
         assert len(encoded) == 10 and encoded[3:4] == encoded[8:9] == b's'
         false_encoded = encoded[:7]
-        with pytest.raises(tc.CodingError):
+        with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
 

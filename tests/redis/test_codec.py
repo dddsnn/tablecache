@@ -23,77 +23,77 @@ import uuid
 
 import pytest
 
-import tablecache as tc
+import tablecache.redis as tcr
 
 
 class TestNullable:
     @pytest.mark.parametrize('value', [0, 1, 234])
     def test_encode_decode_non_null_values(self, value):
-        codec = tc.Nullable(tc.IntAsStringCodec())
+        codec = tcr.Nullable(tcr.IntAsStringCodec())
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
         assert decoded == value
 
     def test_encode_decode_null(self):
-        codec = tc.Nullable(tc.IntAsStringCodec())
+        codec = tcr.Nullable(tcr.IntAsStringCodec())
         encoded = codec.encode(None)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
         assert decoded is None
 
     def test_encode_raises_from_underlying_codec(self):
-        codec = tc.Nullable(tc.IntAsStringCodec())
+        codec = tcr.Nullable(tcr.IntAsStringCodec())
         with pytest.raises(ValueError):
             codec.encode('not a number')
 
     @pytest.mark.parametrize('encoded', [b'', b'\x00not a number'])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.Nullable(tc.IntAsStringCodec())
+        codec = tcr.Nullable(tcr.IntAsStringCodec())
         with pytest.raises(ValueError):
             codec.decode(encoded)
 
 
 class TestArray:
     def test_encode_decode_on_empty(self):
-        codec = tc.Array(tc.StringCodec())
+        codec = tcr.Array(tcr.StringCodec())
         encoded = codec.encode([])
         assert isinstance(encoded, bytes)
         assert codec.decode(encoded) == []
 
     @pytest.mark.parametrize('value', [['a'], ['a', 'b']])
     def test_encode_decode(self, value):
-        codec = tc.Array(tc.StringCodec())
+        codec = tcr.Array(tcr.StringCodec())
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
         assert decoded == value
 
     def test_encode_decode_handles_empty_element(self):
-        codec = tc.Array(tc.StringCodec())
+        codec = tcr.Array(tcr.StringCodec())
         encoded = codec.encode(['', 'a'])
         assert isinstance(encoded, bytes)
         assert codec.decode(encoded) == ['', 'a']
 
     @pytest.mark.parametrize('value', [1, 'asd'])
     def test_encode_raises_on_non_list(self, value):
-        codec = tc.Array(tc.StringCodec())
+        codec = tcr.Array(tcr.StringCodec())
         with pytest.raises(ValueError):
             codec.encode(value)
 
     def test_encode_raises_from_underlying_codec(self):
-        codec = tc.Array(tc.StringCodec())
+        codec = tcr.Array(tcr.StringCodec())
         with pytest.raises(ValueError):
             codec.encode([1])
 
     def test_encode_raises_on_oversized_value(self):
-        codec = tc.Array(tc.StringCodec())
+        codec = tcr.Array(tcr.StringCodec())
         with pytest.raises(ValueError):
             codec.encode(65536 * 'x')
 
     @pytest.mark.parametrize('encoded', [b'x00', b'\x00\x01', b'\x00\x01\x42'])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.Array(tc.UnsignedInt16Codec())
+        codec = tcr.Array(tcr.UnsignedInt16Codec())
         with pytest.raises(ValueError):
             codec.decode(encoded)
 
@@ -101,7 +101,7 @@ class TestArray:
 class TestBoolCodec:
     @pytest.mark.parametrize('value', [True, False])
     def test_encode_decode_identity(self, value):
-        codec = tc.BoolCodec()
+        codec = tcr.BoolCodec()
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
@@ -109,13 +109,13 @@ class TestBoolCodec:
 
     @pytest.mark.parametrize('value', [None, 0, 1, '', 'foo', bool])
     def test_encode_raises_on_invalid(self, value):
-        codec = tc.BoolCodec()
+        codec = tcr.BoolCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
 
     @pytest.mark.parametrize('encoded', [b'', b'\x00\x00', b'\x02', b'\xff'])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.BoolCodec()
+        codec = tcr.BoolCodec()
         with pytest.raises(ValueError):
             codec.decode(encoded)
 
@@ -123,7 +123,7 @@ class TestBoolCodec:
 class TestStringCodec:
     @pytest.mark.parametrize('value', ['', 'foo', 'äöüß'])
     def test_encode_decode_identity(self, value):
-        codec = tc.StringCodec()
+        codec = tcr.StringCodec()
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
@@ -131,7 +131,7 @@ class TestStringCodec:
 
     @pytest.mark.parametrize('value', [None, 0, 1, b'not a string'])
     def test_encode_raises_on_invalid(self, value):
-        codec = tc.StringCodec()
+        codec = tcr.StringCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
 
@@ -139,7 +139,7 @@ class TestStringCodec:
 class TestIntAsStringCodec:
     @pytest.mark.parametrize('value', [0, 1, -1, sys.maxsize + 1])
     def test_encode_decode_identity(self, value):
-        codec = tc.IntAsStringCodec()
+        codec = tcr.IntAsStringCodec()
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
@@ -147,14 +147,14 @@ class TestIntAsStringCodec:
 
     @pytest.mark.parametrize('value', [None, 'not a number', 1.1, int])
     def test_encode_raises_on_invalid(self, value):
-        codec = tc.IntAsStringCodec()
+        codec = tcr.IntAsStringCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
 
     @pytest.mark.parametrize(
         'encoded', [b'not a number', b'', b'\x00', b'1.1'])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.IntAsStringCodec()
+        codec = tcr.IntAsStringCodec()
         with pytest.raises(ValueError):
             codec.decode(encoded)
 
@@ -166,7 +166,7 @@ class TestFloatAsStringCodec:
             float('inf'),
             float('-inf')])
     def test_encode_decode_identity(self, value):
-        codec = tc.FloatAsStringCodec()
+        codec = tcr.FloatAsStringCodec()
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
@@ -179,7 +179,7 @@ class TestFloatAsStringCodec:
     def test_all_nans_are_default_nan(self, nan_hex):
         value, = struct.unpack('>d', bytes.fromhex(nan_hex))
         assert math.isnan(value)
-        codec = tc.FloatAsStringCodec()
+        codec = tcr.FloatAsStringCodec()
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
         decoded = codec.decode(encoded)
@@ -188,27 +188,27 @@ class TestFloatAsStringCodec:
 
     @pytest.mark.parametrize('value', [None, 'not a number', float])
     def test_encode_raises_on_invalid(self, value):
-        codec = tc.FloatAsStringCodec()
+        codec = tcr.FloatAsStringCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
 
     @pytest.mark.parametrize('encoded', [b'not a number', b'', b'\x00'])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.FloatAsStringCodec()
+        codec = tcr.FloatAsStringCodec()
         with pytest.raises(ValueError):
             codec.decode(encoded)
 
 
 @pytest.mark.parametrize(
     'codec,num_bytes,min_value,max_value', [
-        (tc.SignedInt8Codec(), 1, -2**7, 2**7 - 1),
-        (tc.SignedInt16Codec(), 2, -2**15, 2**15 - 1),
-        (tc.SignedInt32Codec(), 4, -2**31, 2**31 - 1),
-        (tc.SignedInt64Codec(), 8, -2**63, 2**63 - 1),
-        (tc.UnsignedInt8Codec(), 1, 0, 2**8 - 1),
-        (tc.UnsignedInt16Codec(), 2, 0, 2**16 - 1),
-        (tc.UnsignedInt32Codec(), 4, 0, 2**32 - 1),
-        (tc.UnsignedInt64Codec(), 8, 0, 2**64 - 1),])
+        (tcr.SignedInt8Codec(), 1, -2**7, 2**7 - 1),
+        (tcr.SignedInt16Codec(), 2, -2**15, 2**15 - 1),
+        (tcr.SignedInt32Codec(), 4, -2**31, 2**31 - 1),
+        (tcr.SignedInt64Codec(), 8, -2**63, 2**63 - 1),
+        (tcr.UnsignedInt8Codec(), 1, 0, 2**8 - 1),
+        (tcr.UnsignedInt16Codec(), 2, 0, 2**16 - 1),
+        (tcr.UnsignedInt32Codec(), 4, 0, 2**32 - 1),
+        (tcr.UnsignedInt64Codec(), 8, 0, 2**64 - 1),])
 class TestEncodedIntCodecs:
     def test_encode_decode_identity(
             self, codec, num_bytes, min_value, max_value):
@@ -237,12 +237,12 @@ class TestEncodedIntCodecs:
 @pytest.mark.parametrize(
     'codec,num_bytes,min_value,max_value', [
         (
-            tc.Float32Codec(),
+            tcr.Float32Codec(),
             4,
             struct.unpack('>f', bytes.fromhex('ff7fffff'))[0],
             struct.unpack('>f', bytes.fromhex('7f7fffff'))[0],
         ),
-        (tc.Float64Codec(), 8, -sys.float_info.max, sys.float_info.max),])
+        (tcr.Float64Codec(), 8, -sys.float_info.max, sys.float_info.max),])
 class TestEncodedFloatCodecs:
     def test_encode_decode_identity(
             self, codec, num_bytes, min_value, max_value):
@@ -302,7 +302,7 @@ class TestEncodedFloatCodecs:
 class TestUuidCodec:
     @pytest.mark.parametrize('hex', [16 * '00', 15 * '00' + '01', 16 * 'ff'])
     def test_encode_decode_identity(self, hex):
-        codec = tc.UuidCodec()
+        codec = tcr.UuidCodec()
         value = uuid.UUID(hex=hex)
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
@@ -311,14 +311,14 @@ class TestUuidCodec:
 
     @pytest.mark.parametrize('value', [None, 16 * '00', 16 * b'\x00', 's', 1])
     def test_encode_raises_on_invalid(self, value):
-        codec = tc.UuidCodec()
+        codec = tcr.UuidCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
 
     @pytest.mark.parametrize(
         'encoded', [b'', b'\x00', 15 * b'\x00', 17 * b'\x00', 16 * '00'])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.UuidCodec()
+        codec = tcr.UuidCodec()
         with pytest.raises(ValueError):
             codec.decode(encoded)
 
@@ -326,7 +326,7 @@ class TestUuidCodec:
 class TestUtcDatetimeCodec:
     @pytest.mark.parametrize('ts', [0, 1.5, 1000, -100000, 1700000000])
     def test_encode_decode_identity(self, ts):
-        codec = tc.UtcDatetimeCodec()
+        codec = tcr.UtcDatetimeCodec()
         value = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
         encoded = codec.encode(value)
         assert isinstance(encoded, bytes)
@@ -334,7 +334,7 @@ class TestUtcDatetimeCodec:
         assert decoded == value
 
     def test_encodes_naive_datetimes_to_utc(self):
-        codec = tc.UtcDatetimeCodec()
+        codec = tcr.UtcDatetimeCodec()
         value = datetime.datetime.fromtimestamp(
             10000, tz=datetime.timezone.utc).replace(tzinfo=None)
         encoded = codec.encode(value)
@@ -343,12 +343,12 @@ class TestUtcDatetimeCodec:
 
     @pytest.mark.parametrize('value', [None, 0, datetime.datetime])
     def test_encode_raises_on_non_datetime(self, value):
-        codec = tc.UtcDatetimeCodec()
+        codec = tcr.UtcDatetimeCodec()
         with pytest.raises(ValueError):
             codec.encode(value)
 
     def test_encode_raises_on_non_utc(self):
-        codec = tc.UtcDatetimeCodec()
+        codec = tcr.UtcDatetimeCodec()
         not_utc = datetime.timezone(datetime.timedelta(seconds=3600))
         with pytest.raises(ValueError):
             codec.encode(datetime.datetime.fromtimestamp(1000, tz=not_utc))
@@ -359,6 +359,6 @@ class TestUtcDatetimeCodec:
             struct.pack('>d', float('inf')),
             struct.pack('>d', float('nan'))])
     def test_decode_raises_on_invalid(self, encoded):
-        codec = tc.UtcDatetimeCodec()
+        codec = tcr.UtcDatetimeCodec()
         with pytest.raises(ValueError):
             codec.decode(encoded)

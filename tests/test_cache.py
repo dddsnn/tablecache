@@ -247,9 +247,9 @@ class TestCachedTable:
             storage_table_instance['instance'] = mock_storage_table
             return mock_storage_table
 
-        import tablecache.storage
+        import tablecache.redis
         monkeypatch.setattr(
-            tablecache.storage, 'RedisTable', make_mock_storage_table)
+            tablecache.redis, 'RedisTable', make_mock_storage_table)
 
         def factory(indexes=indexes):
             return tc.CachedTable(

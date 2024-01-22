@@ -251,8 +251,8 @@ class Float32Codec(EncodedFloatCodec):
     @t.override
     def encode(self, value: numbers.Real) -> bytes:
         encoded = super().encode(value)
-        if not math.isinf(value) and (value < self._min_value
-                                      or value > self._max_value):
+        if not math.isinf(value) and (value < self._min_value or
+                                      value > self._max_value):
             raise ValueError('Value is outside of float32 range.')
         return encoded
 
