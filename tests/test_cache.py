@@ -163,12 +163,7 @@ class MockDbTable(tc.DbTable):
 
 
 class MockStorageTable(tc.StorageTable):
-    def __init__(
-            self, conn, *, table_name, primary_key_name, attribute_codecs,
-            score_functions):
-        assert conn == 'conn_not_needed_for_mock'
-        assert attribute_codecs == 'attribute_codecs_not_needed_for_mock'
-        assert table_name == 'table_name_not_needed_for_mock'
+    def __init__(self, *, primary_key_name, score_functions):
         self._score_functions = score_functions
         self._primary_key_name = primary_key_name
         self.records = {}
@@ -234,42 +229,20 @@ class TestCachedTable:
         return MockDbTable()
 
     @pytest.fixture
-    def storage_table_instance(self):
-        return {}
-
-    @pytest.fixture
-    def make_table(
-            self, indexes, db_table, storage_table_instance, monkeypatch):
-        def make_mock_storage_table(*args, **kwargs):
-            if 'instance' in storage_table_instance:
-                raise Exception('Can only have one mock storage table.')
-            mock_storage_table = MockStorageTable(*args, **kwargs)
-            storage_table_instance['instance'] = mock_storage_table
-            return mock_storage_table
-
-        import tablecache.redis
-        monkeypatch.setattr(
-            tablecache.redis, 'RedisTable', make_mock_storage_table)
-
+    def make_tables(self, indexes, db_table):
         def factory(indexes=indexes):
-            return tc.CachedTable(
-                indexes, db_table, primary_key_name='pk',
-                attribute_codecs='attribute_codecs_not_needed_for_mock',
-                redis_conn='conn_not_needed_for_mock',
-                redis_table_name='table_name_not_needed_for_mock')
+            storage_table = MockStorageTable(
+                primary_key_name='pk', score_functions=indexes.score_functions)
+            cached_table = tc.CachedTable(
+                indexes, db_table, storage_table, primary_key_name='pk')
+            return cached_table, storage_table
 
         return factory
 
     @pytest.fixture
-    def get_storage_table(self, storage_table_instance):
-        def getter():
-            return storage_table_instance['instance']
-
-        return getter
-
-    @pytest.fixture
-    def table(self, make_table):
-        return make_table()
+    def table(self, make_tables):
+        table, _ = make_tables()
+        return table
 
     async def test_load_and_get_record(self, table, db_table):
         db_table.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
@@ -304,12 +277,13 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(2, 4)]))
 
     async def test_loads_only_specified_subset(
-            self, table, db_table, get_storage_table):
+            self, make_tables, db_table):
+        table, storage_table = make_tables()
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 2, 4)
         assert_that(
             await collect_async_iter(
-                get_storage_table().get_records(
+                storage_table.get_records(
                     tc.StorageRecordsSpec(
                         'primary_key',
                         [tc.Interval(float('-inf'), float('inf'))]))),
@@ -326,10 +300,10 @@ class TestCachedTable:
             indexes.observe_mock.call_args_list,
             contains_inanyorder(*[um.call(r) for r in expected_observations]))
 
-    async def test_load_clears_storage_first(
-            self, table, db_table, get_storage_table):
+    async def test_load_clears_storage_first(self, make_tables, db_table):
+        table, storage_table = make_tables()
         db_table.records = [{'pk': 1, 'k': 'v1'}]
-        get_storage_table().records = {2: {'pk': 2, 'k': 'v2'}}
+        storage_table.records = {2: {'pk': 2, 'k': 'v2'}}
         assert_that(await table.get_record(2), has_entries(k='v2'))
         await table.load('primary_key')
         assert_that(await table.get_record(1), has_entries(k='v1'))
@@ -342,20 +316,19 @@ class TestCachedTable:
         indexes.adjust_mock.assert_called_once_with('primary_key', 2, 4)
 
     async def test_load_raises_if_index_doesnt_support_adjusting(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class Indexes(MultiIndexes):
             def adjust(self, index_name, *index_args, **index_kwargs):
                 if index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
                 return super().adjust(index_name, *index_args, **index_kwargs)
-        table = make_table(Indexes())
+        table, _ = make_tables(Indexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         with pytest.raises(ValueError):
             await table.load('x_range', min=12, max=14)
 
-    async def test_load_by_other_index(
-            self, make_table, db_table, get_storage_table):
-        table = make_table(MultiIndexes())
+    async def test_load_by_other_index(self, make_tables, db_table):
+        table, storage_table = make_tables(MultiIndexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('x_range', min=12, max=14)
         assert_that(
@@ -366,7 +339,7 @@ class TestCachedTable:
                   for i in range(2, 4)]))
         assert_that(
             await collect_async_iter(
-                get_storage_table().get_records(
+                storage_table.get_records(
                     tc.StorageRecordsSpec(
                         'primary_key',
                         [tc.Interval(float('-inf'), float('inf'))]))),
@@ -390,10 +363,11 @@ class TestCachedTable:
         assert_that(await table.get_record(1), has_entries(pk=1, source='db'))
 
     async def test_get_record_doesnt_check_db_if_all_in_cache(
-            self, table, db_table, get_storage_table):
+            self, make_tables, db_table):
+        table, storage_table = make_tables()
         db_table.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 1)
-        del get_storage_table().records[1]
+        del storage_table.records[1]
         with pytest.raises(KeyError):
             await table.get_record(1)
 
@@ -485,7 +459,7 @@ class TestCachedTable:
                 has_entries(pk=0, k='a0'), has_entries(pk=2, k='a2')))
 
     async def test_get_records_uses_recheck_predicate(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class RecheckOnlyIndexes(tc.PrimaryKeyIndexes):
             def __init__(self):
                 super().__init__('pk', 'query_all_pks', 'query_some_pks')
@@ -498,7 +472,7 @@ class TestCachedTable:
                 return tc.StorageRecordsSpec(
                     index_name, [tc.Interval(0, 1)],
                     lambda r: r['pk'] in primary_keys)
-        table = make_table(RecheckOnlyIndexes())
+        table, _ = make_tables(RecheckOnlyIndexes())
         db_table.records = [{'pk': i} for i in range(3)]
         await table.load('primary_key')
         assert_that(
@@ -547,14 +521,14 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='db') for i in range(4)]))
 
     async def test_adjust_cached_subset_prunes_no_old_data(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, *args, **kwargs):
                 adjustment = super().adjust(*args)
                 if 'delete_nothing' in kwargs:
                     assert adjustment.expire_spec is None
                 return adjustment
-        table = make_table(indexes=Indexes())
+        table, _ = make_tables(indexes=Indexes())
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', 0, 1)
         assert_that(
@@ -585,14 +559,14 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
     async def test_adjust_cached_subset_loads_no_new_data(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, index_name, *args, **kwargs):
                 adjustment = super().adjust(index_name, *args)
                 if 'load_nothing' in kwargs:
                     return tc.Adjustment(None, adjustment.expire_spec)
                 return adjustment
-        table = make_table(indexes=Indexes())
+        table, _ = make_tables(indexes=Indexes())
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         assert_that(
@@ -608,12 +582,12 @@ class TestCachedTable:
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
 
     async def test_adjust_cached_subset_doesnt_introduce_duplicates(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, index_name, *primary_keys):
                 return tc.Adjustment(
                     None, self.db_records_spec(index_name, *primary_keys))
-        table = make_table(indexes=Indexes())
+        table, _ = make_tables(indexes=Indexes())
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         await table.adjust_cached_subset('primary_key', *range(4))
@@ -638,21 +612,21 @@ class TestCachedTable:
                 *[um.call(r) for r in expected_observations]))
 
     async def test_adjust_cached_subset_raises_if_index_doesnt_support(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class Indexes(MultiIndexes):
             def adjust(self, index_name, *index_args, **index_kwargs):
                 if index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
                 return super().adjust(index_name, *index_args, **index_kwargs)
-        table = make_table(Indexes())
+        table, _ = make_tables(Indexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', *range(2))
         with pytest.raises(ValueError):
             await table.adjust_cached_subset('x_range', min=12, max=14)
 
     async def test_get_records_by_other_index(
-            self, make_table, db_table):
-        table = make_table(MultiIndexes())
+            self, make_tables, db_table):
+        table, _ = make_tables(MultiIndexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         assert_that(
@@ -663,13 +637,13 @@ class TestCachedTable:
                   for i in range(2, 4)]))
 
     async def test_get_records_raises_if_index_doesnt_support_covers(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         class Indexes(MultiIndexes):
             def covers(self, index_name, *index_args, **index_kwargs):
                 if index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
                 return super().adjust(index_name, *index_args, **index_kwargs)
-        table = make_table(Indexes())
+        table, _ = make_tables(Indexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         with pytest.raises(ValueError):
@@ -677,9 +651,9 @@ class TestCachedTable:
                 table.get_records('x_range', min=12, max=14))
 
     async def test_changing_scores_with_score_hint_dont_return_old_records(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         indexes = MultiIndexes()
-        table = make_table(indexes)
+        table, _ = make_tables(indexes)
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
@@ -691,9 +665,9 @@ class TestCachedTable:
                 table.get_records('x_range', min=12, max=14)), empty())
 
     async def test_changing_scores_with_score_hint_return_new_records(
-            self, make_table, db_table):
+            self, make_tables, db_table):
         indexes = MultiIndexes()
-        table = make_table(indexes)
+        table, _ = make_tables(indexes)
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
@@ -708,8 +682,8 @@ class TestCachedTable:
                   for i in range(6)]))
 
     async def test_changing_scores_without_score_hint_dont_return_old_records(
-            self, make_table, db_table):
-        table = make_table(MultiIndexes())
+            self, make_tables, db_table):
+        table, _ = make_tables(MultiIndexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]
@@ -720,8 +694,8 @@ class TestCachedTable:
                 table.get_records('x_range', min=12, max=14)), empty())
 
     async def test_changing_scores_without_score_hint_return_new_records(
-            self, make_table, db_table):
-        table = make_table(MultiIndexes())
+            self, make_tables, db_table):
+        table, _ = make_tables(MultiIndexes())
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key')
         db_table.records = [{'pk': i, 'x': i + 100} for i in range(6)]

@@ -17,12 +17,11 @@
 
 import logging
 import numbers
-import redis.asyncio as redis
 import typing as t
 
 import tablecache.db as db
 import tablecache.index as index
-import tablecache.redis
+import tablecache.storage as storage
 import tablecache.types as tp
 
 _logger = logging.getLogger(__name__)
@@ -53,14 +52,9 @@ class CachedTable[PrimaryKey]:
     """
 
     def __init__(
-            self,
-            indexes: index.Indexes,
-            db_table: db.DbTable,
-            *,
-            primary_key_name: str,
-            attribute_codecs: tablecache.redis.AttributeCodecs,
-            redis_conn: redis.Redis,
-            redis_table_name: str) -> None:
+            self, indexes: index.Indexes, db_table: db.DbTable,
+            storage_table: storage.StorageTable, *, primary_key_name: str
+    ) -> None:
         """
         :param cached_subset_class: The type of subset to use. This class is
             used in various methods that deal with subsets, like load() and
@@ -85,12 +79,8 @@ class CachedTable[PrimaryKey]:
         """
         self._indexes = indexes
         self._db_table = db_table
+        self._storage_table = storage_table
         self._primary_key_name = primary_key_name
-        self._storage_table = tablecache.redis.RedisTable(
-            redis_conn, table_name=redis_table_name,
-            primary_key_name=primary_key_name,
-            attribute_codecs=attribute_codecs,
-            score_functions=indexes.score_functions)
         self._invalid_record_repo = InvalidRecordRepository(indexes)
 
     async def load(
