@@ -82,6 +82,7 @@ class CachedTable[PrimaryKey]:
         self._storage_table = storage_table
         self._primary_key_name = primary_key_name
         self._invalid_record_repo = InvalidRecordRepository(indexes)
+        self.loaded = False
 
     async def load(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -95,28 +96,45 @@ class CachedTable[PrimaryKey]:
 
         Raises a ValueError if the cache was already loaded.
         """
+        if self.loaded:
+            raise ValueError(
+                'Already loaded. Use adjust() to change cached records.')
         _logger.info(
             f'Clearing and loading {self._indexes} of table '
             f'{self._storage_table.table_name}.')
         await self._storage_table.clear()
+        num_deleted, num_loaded = await self._adjust(
+            index_name, *index_args, **index_kwargs)
+        self.loaded = True
+        if num_deleted:
+            _logger.warning(
+                f'Deleted {num_deleted} records during loaded, after clearing '
+                'the table (this is likely a benign defect in the Indexes '
+                'implementation).')
+        _logger.info(f'Loaded {num_loaded} records.')
+
+    async def _adjust(self, index_name, *index_args, **index_kwargs):
         try:
             adjustment = self._indexes.adjust(
                 index_name, *index_args, **index_kwargs)
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support adjusting by {index_name}.') from e
-        num_loaded = await self._load_subset(adjustment.new_spec)
-        _logger.info(f'Loaded {num_loaded} records.')
+        num_deleted, num_loaded = 0, 0
+        if adjustment.expire_spec:
+            num_deleted = await self._storage_table.delete_records(
+                adjustment.expire_spec)
+        if adjustment.new_spec:
+            async for record in self._db_table.get_records(
+                    adjustment.new_spec):
+                # PERF can we save time by guaranteeing here that records don't
+                # exist yet?++++++++++++++++++++
+                await self._storage_table.put_record(record)
+                self._indexes.observe(record)
+                num_loaded += 1
+        return num_deleted, num_loaded
 
-    async def _load_subset(self, db_records_spec):
-        num_loaded = 0
-        async for record in self._db_table.get_records(db_records_spec):
-            await self._storage_table.put_record(record)
-            self._indexes.observe(record)
-            num_loaded += 1
-        return num_loaded
-
-    async def adjust_cached_subset(
+    async def adjust(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
     ) -> None:
         """
@@ -125,21 +143,8 @@ class CachedTable[PrimaryKey]:
         Passes through the arguments to the cached subset's adjust(), and then
         deletes old and loads new records according to the result.
         """
-        try:
-            adjustment = self._indexes.adjust(
-                index_name, *index_args, **index_kwargs)
-        except index.UnsupportedIndexOperation as e:
-            raise ValueError(
-                f'Indexes don\'t support adjusting by {index_name}.') from e
-        if adjustment.expire_spec:
-            num_deleted = await self._storage_table.delete_records(
-                adjustment.expire_spec)
-        else:
-            num_deleted = 0
-        if adjustment.new_spec:
-            num_loaded = await self._load_subset(adjustment.new_spec)
-        else:
-            num_loaded = 0
+        num_deleted, num_loaded = await self._adjust(
+            index_name, *index_args, **index_kwargs)
         if num_deleted or num_loaded:
             _logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')

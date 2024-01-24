@@ -251,7 +251,6 @@ class TestCachedTable:
             await table.get_record(1),
             has_entries(pk=1, k='v1', source='storage'))
 
-
     async def test_get_record_raises_on_nonexistent(self, table, db_table):
         db_table.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
         await table.load('primary_key')
@@ -345,6 +344,11 @@ class TestCachedTable:
                         [tc.Interval(float('-inf'), float('inf'))]))),
             contains_inanyorder(*[has_entries(pk=i, x=i + 10)
                                   for i in range(2, 4)]))
+
+    async def test_load_raises_if_already_loaded(self, table):
+        await table.load('primary_key')
+        with pytest.raises(ValueError):
+            await table.load('primary_key')
 
     async def test_get_records_returns_db_state_if_not_cached(
             self, table, db_table):
@@ -500,7 +504,7 @@ class TestCachedTable:
             await table.get_record(2)
         assert_that(await table.get_record(1), has_entries(pk=1, k='a1'))
 
-    async def test_adjust_cached_subset_prunes_old_data(self, table, db_table):
+    async def test_adjust_prunes_old_data(self, table, db_table):
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', 0, 1)
         assert_that(
@@ -508,7 +512,7 @@ class TestCachedTable:
                 table.get_records('primary_key', *range(2))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
-        await table.adjust_cached_subset('primary_key', *range(2, 4))
+        await table.adjust('primary_key', *range(2, 4))
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', *range(2, 4))),
@@ -520,8 +524,7 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(4)]))
 
-    async def test_adjust_cached_subset_prunes_no_old_data(
-            self, make_tables, db_table):
+    async def test_adjust_prunes_no_old_data(self, make_tables, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, *args, **kwargs):
                 adjustment = super().adjust(*args)
@@ -536,14 +539,14 @@ class TestCachedTable:
                 table.get_records('primary_key', *range(2))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
-        await table.adjust_cached_subset('primary_key', delete_nothing=True)
+        await table.adjust('primary_key', delete_nothing=True)
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
-    async def test_adjust_cached_subset_loads_new_data(self, table, db_table):
+    async def test_adjust_loads_new_data(self, table, db_table):
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         assert_that(
@@ -551,15 +554,14 @@ class TestCachedTable:
                 table.get_records('primary_key', *range(2))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
-        await table.adjust_cached_subset('primary_key')
+        await table.adjust('primary_key')
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
-    async def test_adjust_cached_subset_loads_no_new_data(
-            self, make_tables, db_table):
+    async def test_adjust_loads_no_new_data(self, make_tables, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, index_name, *args, **kwargs):
                 adjustment = super().adjust(index_name, *args)
@@ -574,14 +576,14 @@ class TestCachedTable:
                 table.get_records('primary_key', *range(2))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
-        await table.adjust_cached_subset('primary_key', load_nothing=True)
+        await table.adjust('primary_key', load_nothing=True)
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(2)]))
 
-    async def test_adjust_cached_subset_doesnt_introduce_duplicates(
+    async def test_adjust_doesnt_introduce_duplicates(
             self, make_tables, db_table):
         class Indexes(SpyIndexes):
             def adjust(self, index_name, *primary_keys):
@@ -590,18 +592,17 @@ class TestCachedTable:
         table, _ = make_tables(indexes=Indexes())
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
-        await table.adjust_cached_subset('primary_key', *range(4))
+        await table.adjust('primary_key', *range(4))
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
-    async def test_adjust_cached_subset_observes_new_records(
-            self, table, db_table, indexes):
+    async def test_adjust_observes_new_records(self, table, db_table, indexes):
         db_table.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
-        await table.adjust_cached_subset('primary_key', *range(4))
+        await table.adjust('primary_key', *range(4))
         expected_observations = await collect_async_iter(
             db_table.get_records(
                 tc.DbRecordsSpec('query_some_pks', ((2, 3),))))
@@ -611,7 +612,25 @@ class TestCachedTable:
                 *[anything() for _ in range(4)],
                 *[um.call(r) for r in expected_observations]))
 
-    async def test_adjust_cached_subset_raises_if_index_doesnt_support(
+    async def test_adjust_by_other_index(self, make_tables, db_table):
+        table, _ = make_tables(MultiIndexes())
+        db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', *range(4))
+        await table.adjust('x_range', min=12, max=16)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=12, max=16)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 10, source='storage')
+                  for i in range(2, 6)]))
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=10, max=16)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 10, source='db')
+                  for i in range(6)]))
+
+    async def test_adjust_raises_if_index_doesnt_support_adjusting(
             self, make_tables, db_table):
         class Indexes(MultiIndexes):
             def adjust(self, index_name, *index_args, **index_kwargs):
@@ -622,7 +641,7 @@ class TestCachedTable:
         db_table.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', *range(2))
         with pytest.raises(ValueError):
-            await table.adjust_cached_subset('x_range', min=12, max=14)
+            await table.adjust('x_range', min=12, max=14)
 
     async def test_get_records_by_other_index(
             self, make_tables, db_table):
