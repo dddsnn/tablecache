@@ -15,6 +15,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+try:
+    import redis.asyncio
+except ImportError as e:
+    raise Exception(
+        'Please install tablecache[redis] to use tablecache.redis.') from e
+
 from tablecache.redis.codec import (
     Array,
     BoolCodec,
