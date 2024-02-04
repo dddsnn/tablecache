@@ -43,12 +43,28 @@ class CachedTable[PrimaryKey]:
     """
     A cached table.
 
-    Maintains records from a relatively slow storage (db_table) in a relatively
-    fast RedisTable. Not thread-safe.
+    Caches a (sub-)set of records that can only be accessed relatively
+    slowly (DB) in a relatively fast storage. Not thread-safe.
 
-    The cache has to be loaded with load() before anything meaningful can
-    happen. Many methods will raise a ValueError if this wasn't done. Calling
-    load() more than once also raises a ValueError.
+    Serves single records by their primary key, or sets of records that can be
+    specified as arguments to an Indexes instance. Transparently serves them
+    from fast storage if available, or from the DB otherwise. The cache has to
+    be loaded with load() to add the desired subset to storage.
+
+    The DB state is not reflected automatically. If a record in the DB changes
+    (or is deleted, or was newly added), invalidate_record() needs to be called
+    for the cache to reflect that. This doesn't neceessarily trigger an
+    immediate refresh, but it gurantees that the updated record is loaded from
+    the DB before it is served the next time.
+
+    Which subset of the records in DB is cached can be changed by calling
+    adjust(). This operation asks a specified index what to delete and what to
+    load new, so it is implementation-specific to the chosen index.
+
+    In general, many of the cache's methods take an index name along with index
+    args and kwargs. These all query the chache's Indexes instance, which acts
+    as the abstraction between DB and storage. The Indexes make it possible to
+    specify the same subset of records in both.
     """
 
     def __init__(
@@ -56,26 +72,13 @@ class CachedTable[PrimaryKey]:
             storage_table: storage.StorageTable, *, primary_key_name: str
     ) -> None:
         """
-        :param cached_subset_class: The type of subset to use. This class is
-            used in various methods that deal with subsets, like load() and
-            get_record_subset(). These methods take args and kwargs to
-            instantiate this class. This implies that the type of subset chosen
-            here determines how the cache can be queried, and in particular
-            that using the convenient All subset means you can only get
-            individual records by primary key, or all records. The subset
-            instantiated by load() is also used to keep track of which values
-            within the subset are actually currently cached.
+        :param indexes: An Indexes instance that is used to translate query
+            arguments into ways of loading actual records, as well as keeping
+            track of which records are in storage.
+        :param db_table: The DB access.
+        :param storage_table: The storage table.
         :param primary_key_name: The name of the attribute to be used as
             primary key. Must also be present in attribute_codecs.
-        :param attribute_codecs: Dictionary of codecs for record attributes.
-            Must map attribute names (string) to tablecache.Codec instances
-            that are able to en-/decode the corresponding values. Only
-            attributes present here are stored.
-        :param redis_conn: An async Redis connection. Used in the construction
-            of a RedisTable. The connection will not be closed and needs to be
-            cleaned up from the outside.
-        :param redis_table_name: The name of the table, used as a prefix for
-            keys in Redis. Must be unique within the Redis instance.
         """
         self._indexes = indexes
         self._db_table = db_table
@@ -88,13 +91,16 @@ class CachedTable[PrimaryKey]:
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
     ) -> None:
         """
-        Load all relevant data from the DB into storage.
+        Clear storage and load all relevant data from the DB into storage.
 
-        Instantiates a cached subset from the configured class with the given
-        args and kwargs and loads all records matching it. Clears the storage
-        first.
+        This is very similar to adjust(), except that the storage is cleared
+        first, and a ValueError is raised if the cache was already loaded.
 
-        Raises a ValueError if the cache was already loaded.
+        Like adjust(), calls the cache's indexes' adjust() to let them know
+        which records are being loaded, and observe() for each record as it is
+        loaded.
+
+        Raises a ValueError if the specified index doesn't support adjusting.
         """
         if self.loaded:
             raise ValueError(
@@ -138,10 +144,19 @@ class CachedTable[PrimaryKey]:
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
     ) -> None:
         """
-        Adjust the cached subset.
+        Adjust the set of records in storage.
 
-        Passes through the arguments to the cached subset's adjust(), and then
-        deletes old and loads new records according to the result.
+        Expires records from storage and loads new ones from the DB in order to
+        attain the state specified via the given index' implementation-specific
+        parameters.
+
+        Calls the cache's indexes' adjust() to let them know how the set of
+        records is supposed to change, which yields the adjustment that
+        specifies which have to be deleted and which newly fetched. For each
+        record that ends up being added to storage, calls the indexes'
+        observe() to inform them that this record exists.
+
+        Raises a ValueError if the specified index doesn't support adjusting.
         """
         num_deleted, num_loaded = await self._adjust(
             index_name, *index_args, **index_kwargs)
@@ -151,17 +166,14 @@ class CachedTable[PrimaryKey]:
 
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
         """
-        Get a record from storage by primary key.
+        Get a record by primary key.
 
-        In case the key has been marked as invalid, ensures the data is fresh
-        first.
+        If the key has been marked as invalid, ensures the data is fresh first.
 
-        In case the primary key doesn't exist in cache, also tries the DB in
-        case the key is from outside the cached subset. This implies that
-        querying keys that may not exist is potentially costly. There is
-        however a special case if the cached subset is All (the trivial subset
-        matching everything), where the DB is not checked (since everything is
-        cached).
+        If the key belongs to a record that isn't cached, queries the DB and
+        serves it from there. This includes the case where no record with the
+        given key exists, and the Indexes aren't aware of this (i.e.
+        indexes.covers('primary_key', primary_key) returns False).
 
         Raises a KeyError if the key doesn't exist.
         """
@@ -180,13 +192,22 @@ class CachedTable[PrimaryKey]:
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
     ) -> tp.Records:
         """
-        Asynchronously iterate over records from a subset.
+        Asynchronously iterate over a set of records.
 
-        Iterates over cached records from the given subset, but only if it is
-        fully contained in the configured cache subset (i.e. no records are
-        missing). Otherwise, queries the DB for the entire subset and yields
-        those records. This implies that querying a subset that isn't
-        completely in cache (even if just by a little bit) is expensive.
+        Asynchronously iterates over the set of records specified via the
+        implementation-specific arguments to the given index. Records are taken
+        from fast storage if the index covers the requested set of records, and
+        all of them are valid.
+
+        A record can become invalid if it is marked as such by a call to
+        invalidate_record(), or if any record (no matter which one) is marked
+        as invalid without providing a new score for the index that is used to
+        query here. The index may also not support a coverage check at all, in
+        which case a ValueError is raised.
+
+        Otherwise, records are taken from the (relatively slower) DB. This
+        implies that querying a set of records that isn't covered (even if just
+        by a little bit) is expensive.
         """
         try:
             get_from_storage = self._indexes.covers(
@@ -253,24 +274,30 @@ class CachedTable[PrimaryKey]:
 
         The record with the given primary key is marked as not existing in
         storage with the same data as in DB. This could be either because the
-        record was updated in the DB, or newly added altogether. Data belonging
-        to an invalidated key is guaranteed to be fetched from the DB again
-        before being served to a client. Keys that are no longer found in the
-        DB are deleted. Keys that aren't in cache at all are loaded.
+        record was deleted from or updated in the DB, or newly added
+        altogether. Data belonging to an invalidated key is guaranteed to be
+        fetched from the DB again before being served to a client. Keys that
+        are no longer found in the DB are deleted. Keys that aren't in cache at
+        all are loaded.
 
-        Internally, the score of the record is required to mark it invalid for
-        subset queries. The score may be given as the score_hint parameter. The
-        implementation will trust that this parameter is correct, and supplying
-        a wrong one will lead to to record not being properly invalidated. When
-        not supplying one at all, the current record is first fetched from
-        storage in order to calculate the score at a small extra cost.
+        Internally, the score of the record for each of the relevant indexes is
+        required to mark it invalid for queries for a set of records against
+        that index. Index scores may be given via the new_scores parameter,
+        which is a dictionary mapping index names to the record's new scores.
+        N.B.: These must be the record's new scores, i.e. if the record was
+        updated in a way that changed it's score for any index, the new updated
+        score must be provided.
+
+        The implementation will trust that these are correct, and supplying
+        wrong ones will lead to to record not being properly invalidated.
+        Scores needn't be specified, however when they're not for any given
+        index, that entire index is marked dirty, and any query against that
+        index will trigger a full refresh. One exception to this is the
+        primary_key index, for which no score needs to be specified since that
+        score can always be calculated and primary keys can never change.
 
         Implementation note: updated and deleted records aren't observed for
-        the cached subset again. As long as record scores aren't allowed to
-        change even when the record does (as per the Subset contract), this
-        isn't an issue. Records that were newly added are observed so the
-        subset can add their scores.
-
+        the Indexes again, only records that were newly added.
         """
         new_scores = new_scores or {}
         try:
