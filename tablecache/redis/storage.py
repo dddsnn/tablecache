@@ -218,7 +218,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def get_records(
-            self, records_spec: index.StorageRecordsSpec) -> tp.Records:
+            self, records_spec: index.StorageRecordsSpec) -> tp.AsyncRecords:
         async for _, decoded_record in self._get_records(records_spec):
             yield decoded_record
 

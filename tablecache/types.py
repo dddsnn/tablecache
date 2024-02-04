@@ -20,5 +20,5 @@ import numbers
 import typing as t
 
 type Record = ca.Mapping[str, t.Any]
-type Records = ca.AsyncIterator[Record]
+type AsyncRecords = ca.AsyncIterator[Record]
 type ScoreFunction = ca.Callable[[t.Any], numbers.Real]

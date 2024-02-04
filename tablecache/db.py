@@ -27,7 +27,8 @@ import tablecache.types as tp
 
 class DbTable(abc.ABC):
     @abc.abstractmethod
-    async def get_records(self, records_spec: index.DbRecordsSpec) -> tp.Records:
+    async def get_records(
+            self, records_spec: index.DbRecordsSpec) -> tp.AsyncRecords:
         """
         Asynchronously iterate over a subset of records.
 
@@ -78,7 +79,7 @@ class PostgresTable(DbTable):
 
     @t.override
     async def get_records(
-            self, records_spec: index.DbRecordsSpec) -> tp.Records:
+            self, records_spec: index.DbRecordsSpec) -> tp.AsyncRecords:
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(
                     records_spec.query, *records_spec.args):

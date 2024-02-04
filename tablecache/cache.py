@@ -190,7 +190,7 @@ class CachedTable[PrimaryKey]:
 
     async def get_records(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
-    ) -> tp.Records:
+    ) -> tp.AsyncRecords:
         """
         Asynchronously iterate over a set of records.
 

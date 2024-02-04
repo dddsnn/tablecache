@@ -55,7 +55,7 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def get_records(
-            self, records_spec: index.StorageRecordsSpec) -> tp.Records:
+            self, records_spec: index.StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Get multiple records.
 

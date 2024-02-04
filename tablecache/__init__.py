@@ -21,4 +21,4 @@ from tablecache.index import (
     Adjustment, DbRecordsSpec, Indexes, Interval, PrimaryKeyIndexes,
     StorageRecordsSpec, UnsupportedIndexOperation)
 from tablecache.storage import StorageTable
-from tablecache.types import Record, Records, ScoreFunction
+from tablecache.types import Record, AsyncRecords, ScoreFunction
