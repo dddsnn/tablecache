@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -15,10 +15,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-from tablecache.cache import CachedTable, DirtyIndex
-from tablecache.db import DbAccess
-from tablecache.index import (
-    Adjustment, DbRecordsSpec, Indexes, Interval, PrimaryKeyIndexes,
-    StorageRecordsSpec, UnsupportedIndexOperation)
-from tablecache.storage import StorageTable
-from tablecache.types import Record, AsyncRecords, ScoreFunction
+try:
+    import asyncpg
+except ImportError as e:
+    raise Exception(
+        'Please install tablecache[postgres] to use tablecache.postgres.'
+    ) from e
+
+from tablecache.postgres.db import PostgresAccess

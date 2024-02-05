@@ -68,20 +68,20 @@ class CachedTable[PrimaryKey]:
     """
 
     def __init__(
-            self, indexes: index.Indexes, db_table: db.DbTable,
+            self, indexes: index.Indexes, db_access: db.DbAccess,
             storage_table: storage.StorageTable, *, primary_key_name: str
     ) -> None:
         """
         :param indexes: An Indexes instance that is used to translate query
             arguments into ways of loading actual records, as well as keeping
             track of which records are in storage.
-        :param db_table: The DB access.
+        :param db_access: The DB access.
         :param storage_table: The storage table.
         :param primary_key_name: The name of the attribute to be used as
             primary key. Must also be present in attribute_codecs.
         """
         self._indexes = indexes
-        self._db_table = db_table
+        self._db_access = db_access
         self._storage_table = storage_table
         self._primary_key_name = primary_key_name
         self._invalid_record_repo = InvalidRecordRepository(indexes)
@@ -131,7 +131,7 @@ class CachedTable[PrimaryKey]:
             num_deleted = await self._storage_table.delete_records(
                 adjustment.expire_spec)
         if adjustment.new_spec:
-            async for record in self._db_table.get_records(
+            async for record in self._db_access.get_records(
                     adjustment.new_spec):
                 # PERF can we save time by guaranteeing here that records don't
                 # exist yet?++++++++++++++++++++
@@ -186,7 +186,7 @@ class CachedTable[PrimaryKey]:
                 raise
             db_records_spec = self._indexes.db_records_spec(
                 'primary_key', primary_key)
-            return await self._db_table.get_record(db_records_spec)
+            return await self._db_access.get_record(db_records_spec)
 
     async def get_records(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -227,7 +227,7 @@ class CachedTable[PrimaryKey]:
         else:
             db_records_spec = self._indexes.db_records_spec(
                 index_name, *index_args, **index_kwargs)
-            records = self._db_table.get_records(db_records_spec)
+            records = self._db_access.get_records(db_records_spec)
         async for record in records:
             yield record
 
@@ -310,7 +310,7 @@ class CachedTable[PrimaryKey]:
         try:
             db_records_spec = self._indexes.db_records_spec(
                 'primary_key', primary_key)
-            record = await self._db_table.get_record(db_records_spec)
+            record = await self._db_access.get_record(db_records_spec)
             await self._storage_table.put_record(record)
             self._indexes.observe(record)
         except KeyError:
@@ -328,7 +328,7 @@ class CachedTable[PrimaryKey]:
                 pass
         db_records_spec = self._indexes.db_records_spec(
             'primary_key', *self._invalid_record_repo.invalid_primary_keys)
-        updated_records = self._db_table.get_records(db_records_spec)
+        updated_records = self._db_access.get_records(db_records_spec)
         async for record in updated_records:
             await self._storage_table.put_record(record)
         self._invalid_record_repo.clear()

@@ -21,10 +21,13 @@ import setuptools
 requirements_path = (pathlib.Path(__file__).parent / 'requirements').absolute()
 with (requirements_path / 'base.txt').open() as f:
     requirements = f.readlines()
+with (requirements_path / 'postgres.txt').open() as f:
+    postgres_requirements = f.readlines()
 with (requirements_path / 'redis.txt').open() as f:
     redis_requirements = f.readlines()
 with (requirements_path / 'test.txt').open() as f:
-    test_requirements = redis_requirements + f.readlines()
+    test_requirements = (
+        postgres_requirements + redis_requirements + f.readlines())
 with (requirements_path / 'dev.txt').open() as f:
     dev_requirements = test_requirements + f.readlines()
 with (pathlib.Path(__file__).parent / 'README.md').absolute().open() as f:
@@ -39,5 +42,5 @@ setuptools.setup(
     install_requires=requirements,
     extras_require={
         'test': test_requirements, 'dev': dev_requirements,
-        'redis': redis_requirements},
+        'postgres': postgres_requirements, 'redis': redis_requirements},
     license='AGPL-3.0-or-later')

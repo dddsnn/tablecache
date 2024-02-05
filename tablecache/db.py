@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -16,71 +16,36 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
-import typing as t
 
-import asyncpg.pool
-
-import tablecache.index as index
 import tablecache.types as tp
 
 
+class DbAccess[RecordsSpec](abc.ABC):
+    """
+    A DB access abstraction.
 
-class DbTable(abc.ABC):
+    Provides access to sets of records stored in the DB via a records spec that
+    is up to the concrete implementation.
+    """
     @abc.abstractmethod
-    async def get_records(
-            self, records_spec: index.DbRecordsSpec) -> tp.AsyncRecords:
+    async def get_records(self, records_spec: RecordsSpec) -> tp.AsyncRecords:
         """
         Asynchronously iterate over a subset of records.
 
-        Yields records from the given subset using its query parameters.
+        Fetches records matching the given spec and yields them.
         """
         raise NotImplementedError
 
-    async def get_record(self, records_spec: index.DbRecordsSpec) -> tp.Record:
+    async def get_record(self, records_spec: RecordsSpec) -> tp.Record:
         """
+        Fetch a single record.
+
+        This is just a convenience shortcut around get_records().
+
+        If more than one record matches the spec, one of them is returned, but
+        there is no guarantee which. Raises a KeyError if no record matches.
         """
         try:
             return await anext(self.get_records(records_spec))
         except StopAsyncIteration as e:
             raise KeyError from e
-
-
-class PostgresTable(DbTable):
-    """
-    Postgres table abstraction.
-
-    Represents a table, or any table-like result set in Postgres that can be
-    queried for a subset of records, or just some specific ones. The table is
-    specified as query strings, one to get a whole subset in the table, and one
-    to get only certain records by their primary key.
-
-    While the table may be a join of many tables or other construct, it must
-    have a column functioning as primary key, i.e. one that uniquely identifies
-    any row in the table.
-    """
-
-    def __init__(self, pool: asyncpg.pool.Pool) -> None:
-        """
-        :param pool: A connection pool that is ready to be used (i.e. already
-            set up and connected).
-        :param query_subset_string: A query string to fetch a subset of
-            records. The string must contain query arguments ($1, $2 etc.) that
-            match the type of Subset used when calling get_record_subset()
-            (i.e. the Subset's db_args tuple). The simplest case, All has no
-            parameters and will fetch everything in the given query.
-        :param query_pks_string: A query string that allows filtering to fetch
-            only specific records by primary key. This is done by setting
-            argument $1 to a sequence of primary keys, so this string
-            essentially has to include "= ANY($1)" somewhere, likely taking a
-            shape similar to "WHERE my_primary_key = ANY($1)". It can probably
-            be created from a similar base query as the query_subset_string.
-        """
-        self._pool = pool
-
-    @t.override
-    async def get_records(
-            self, records_spec: index.DbRecordsSpec) -> tp.AsyncRecords:
-        async with self._pool.acquire() as conn, conn.transaction():
-            async for record in conn.cursor(
-                    records_spec.query, *records_spec.args):
-                yield record
