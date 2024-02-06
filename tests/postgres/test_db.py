@@ -44,7 +44,7 @@ async def wait_for_postgres(postgres_dsn):
     start_time = asyncio.get_running_loop().time()
     while True:
         try:
-            conn = await asyncpg.connect(dsn=postgres_dsn)
+            conn = await asyncpg.connect(dsn=postgres_dsn, timeout=1)
             await conn.close()
             return
         except Exception as e:

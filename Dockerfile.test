@@ -1,7 +1,7 @@
 FROM python:3.12
 WORKDIR /app
 COPY requirements requirements
-RUN pip install -r requirements/base.txt -r requirements/test.txt
+RUN pip install $(for f in requirements/*.txt ; do echo "-r $f " ; done)
 COPY tablecache tablecache
 COPY tests tests
 COPY pyproject.toml setup.py .

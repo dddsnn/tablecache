@@ -44,7 +44,7 @@ async def wait_for_redis(redis_host):
     while True:
         try:
             conn = redis.Redis(host=redis_host)
-            await conn.ping()
+            await asyncio.wait_for(conn.ping(), 1)
             await conn.close(close_connection_pool=True)
             return
         except Exception as e:
