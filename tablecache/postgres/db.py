@@ -20,11 +20,10 @@ import typing as t
 import asyncpg
 
 import tablecache.db as db
-import tablecache.index as index
 import tablecache.types as tp
 
 
-class PostgresAccess(db.DbAccess[index.DbRecordsSpec]):
+class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
     """
     Postgres access.
 
@@ -56,7 +55,7 @@ class PostgresAccess(db.DbAccess[index.DbRecordsSpec]):
 
     @t.override
     async def get_records(
-            self, records_spec: index.DbRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: db.QueryArgsDbRecordsSpec) -> tp.AsyncRecords:
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(
                     records_spec.query, *records_spec.args):

@@ -119,7 +119,7 @@ class TestPostgresAccess:
         if user_ids:
             query_string += ' WHERE uc.user_id IN ({})'.format(
                 ','.join(f'${i}' for i in range(1, len(user_ids) + 1)))
-        return tc.DbRecordsSpec(query_string, tuple(user_ids))
+        return tc.QueryArgsDbRecordsSpec(query_string, tuple(user_ids))
 
     @pytest.fixture
     async def access(self, wait_for_postgres, postgres_dsn):

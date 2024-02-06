@@ -80,10 +80,10 @@ class MultiIndexes(tc.Indexes[int]):
     def db_records_spec(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
             if args:
-                return tc.DbRecordsSpec('query_some_pks', (args,))
-            return tc.DbRecordsSpec('query_all_pks', ())
+                return tc.QueryArgsDbRecordsSpec('query_some_pks', (args,))
+            return tc.QueryArgsDbRecordsSpec('query_all_pks', ())
         if index_name == 'x_range':
-            return tc.DbRecordsSpec(
+            return tc.QueryArgsDbRecordsSpec(
                 'query_x_range', (kwargs['min'], kwargs['max']))
         raise NotImplementedError
 
@@ -294,7 +294,7 @@ class TestCachedTable:
         await table.load('primary_key', 2, 4)
         expected_observations = await collect_async_iter(
             db_access.get_records(
-                tc.DbRecordsSpec('query_some_pks', ((2, 4),))))
+                tc.QueryArgsDbRecordsSpec('query_some_pks', ((2, 4),))))
         assert_that(
             indexes.observe_mock.call_args_list,
             contains_inanyorder(*[um.call(r) for r in expected_observations]))
@@ -606,7 +606,7 @@ class TestCachedTable:
         await table.adjust('primary_key', *range(4))
         expected_observations = await collect_async_iter(
             db_access.get_records(
-                tc.DbRecordsSpec('query_some_pks', ((2, 3),))))
+                tc.QueryArgsDbRecordsSpec('query_some_pks', ((2, 3),))))
         assert_that(
             indexes.observe_mock.call_args_list,
             contains_inanyorder(

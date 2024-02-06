@@ -16,9 +16,9 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 from tablecache.cache import CachedTable, DirtyIndex
-from tablecache.db import DbAccess
+from tablecache.db import DbAccess, DbRecordsSpec, QueryArgsDbRecordsSpec
 from tablecache.index import (
-    Adjustment, DbRecordsSpec, Indexes, Interval, PrimaryKeyIndexes,
-    StorageRecordsSpec, UnsupportedIndexOperation)
-from tablecache.storage import StorageTable
-from tablecache.types import Record, AsyncRecords, ScoreFunction
+    Adjustment, Indexes, PrimaryKeyIndexes,
+    UnsupportedIndexOperation)
+from tablecache.storage import Interval, StorageRecordsSpec, StorageTable
+from tablecache.types import AsyncRecords, Record, ScoreFunction

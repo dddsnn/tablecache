@@ -16,8 +16,20 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
+import dataclasses as dc
 
 import tablecache.types as tp
+
+
+@dc.dataclass(frozen=True)
+class DbRecordsSpec:
+    """A specification of records in the DB."""
+
+
+@dc.dataclass(frozen=True)
+class QueryArgsDbRecordsSpec(DbRecordsSpec):
+    query: str
+    args: tuple
 
 
 class DbAccess[RecordsSpec](abc.ABC):

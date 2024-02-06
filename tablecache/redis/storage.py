@@ -194,7 +194,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         primary_key_score = self._score_functions['primary_key'](
             **{self._primary_key_name: primary_key})
         records = self._get_records_by_primary_key_score(
-            [index.Interval(primary_key_score, primary_key_score)],
+            [storage.Interval(primary_key_score, primary_key_score)],
             lambda r: r[self._primary_key_name] == primary_key)
         async for encoded_record, decoded_record in records:
             return encoded_record, decoded_record
@@ -218,7 +218,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def get_records(
-            self, records_spec: index.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
         async for _, decoded_record in self._get_records(records_spec):
             yield decoded_record
 
@@ -237,7 +237,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
                     primary_key_scores.append(
                         struct.unpack('Idd', encoded_primary_key_score)[2])
             primary_key_score_intervals = [
-                index.Interval(s, s) for s in primary_key_scores]
+                storage.Interval(s, s) for s in primary_key_scores]
         records = self._get_records_by_primary_key_score(
             primary_key_score_intervals, records_spec.recheck_predicate,
             upper_inclusive)
@@ -257,7 +257,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_records(
-            self, records_spec: index.StorageRecordsSpec) -> int:
+            self, records_spec: storage.StorageRecordsSpec) -> int:
         num_deleted = 0
         async for encoded_record, decoded_record in (
                 self._get_records(records_spec)):

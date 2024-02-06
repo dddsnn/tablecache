@@ -383,7 +383,7 @@ class InvalidRecordRepository[PrimaryKey]:
         return primary_key in self.invalid_primary_keys
 
     def interval_contains_invalid_score(
-            self, index_name: str, interval: index.Interval) -> bool:
+            self, index_name: str, interval: storage.Interval) -> bool:
         """
         Check whether the interval contains an invalid score.
 

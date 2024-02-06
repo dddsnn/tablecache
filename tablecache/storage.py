@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -16,9 +16,60 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
+import collections.abc as ca
+import dataclasses as dc
+import itertools as it
+import numbers
+import operator as op
 
-import tablecache.index as index
 import tablecache.types as tp
+
+
+@dc.dataclass(frozen=True)
+class Interval:
+    """
+    A number interval.
+
+    Represents an interval of the shape [ge,lt[, i.e. with a closed lower and
+    open upper bound.
+    """
+    ge: numbers.Real
+    lt: numbers.Real
+
+    def __contains__(self, x):
+        return self.ge <= x < self.lt
+
+
+@dc.dataclass(frozen=True)
+class StorageRecordsSpec:
+    """
+    A specification of records in storage.
+
+    Represents a (possibly empty) set of records in a storage table. These are
+    all those which have an index score in the index with the given name which
+    is contained in any of the given intervals.
+
+    Additionally, the record must satifsy the recheck predicate, i.e. it must
+    return True when called with the record. The default recheck predicate
+    accepts any record (i.e. only the index score is important). This predicate
+    can be used to query the storage for a range of records that may contain
+    some undesirable ones, and then filtering those out.
+
+    The score intervals must not overlap.
+    """
+    @staticmethod
+    def _always_use_record(_):
+        return True
+
+    def __post_init__(self):
+        for left, right in it.pairwise(
+                sorted(self.score_intervals, key=op.attrgetter('ge'))):
+            if left.lt > right.ge:
+                raise ValueError('Intervals overlap.')
+
+    index_name: str
+    score_intervals: list[Interval]
+    recheck_predicate: ca.Callable[[tp.Record], bool] = _always_use_record
 
 
 class StorageTable[PrimaryKey](abc.ABC):
@@ -55,7 +106,7 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def get_records(
-            self, records_spec: index.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Get multiple records.
 
@@ -77,8 +128,7 @@ class StorageTable[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def delete_records(
-            self, records_spec: index.StorageRecordsSpec) -> int:
+    async def delete_records(self, records_spec: StorageRecordsSpec) -> int:
         """
         Delete multiple records.
 

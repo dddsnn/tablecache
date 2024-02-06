@@ -16,14 +16,13 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
-import collections.abc as ca
 import dataclasses as dc
-import itertools as it
 import math
 import numbers
-import operator as op
 import typing as t
 
+import tablecache.db as db
+import tablecache.storage as storage
 import tablecache.types as tp
 
 
@@ -31,60 +30,6 @@ class UnsupportedIndexOperation(Exception):
     """
     Raised to signal that a certain operation is not supported on an index.
     """
-
-
-@dc.dataclass(frozen=True)
-class Interval:
-    """
-    A number interval.
-
-    Represents an interval of the shape [ge,lt[, i.e. with a closed lower and
-    open upper bound.
-    """
-    ge: numbers.Real
-    lt: numbers.Real
-
-    def __contains__(self, x):
-        return self.ge <= x < self.lt
-
-
-@dc.dataclass(frozen=True)
-class StorageRecordsSpec:
-    """
-    A specification of records in storage.
-
-    Represents a (possibly empty) set of records in a storage table. These are
-    all those which have an index score in the index with the given name which
-    is contained in any of the given intervals.
-
-    Additionally, the record must satifsy the recheck predicate, i.e. it must
-    return True when called with the record. The default recheck predicate
-    accepts any record (i.e. only the index score is important). This predicate
-    can be used to query the storage for a range of records that may contain
-    some undesirable ones, and then filtering those out.
-
-    The score intervals must not overlap.
-    """
-    @staticmethod
-    def _always_use_record(_):
-        return True
-
-    def __post_init__(self):
-        for left, right in it.pairwise(
-                sorted(self.score_intervals, key=op.attrgetter('ge'))):
-            if left.lt > right.ge:
-                raise ValueError('Intervals overlap.')
-
-    index_name: str
-    score_intervals: list[Interval]
-    recheck_predicate: ca.Callable[[tp.Record], bool] = _always_use_record
-
-
-@dc.dataclass(frozen=True)
-class DbRecordsSpec:
-    """A specification of records in the DB."""
-    query: str
-    args: tuple
 
 
 @dc.dataclass(frozen=True)
@@ -100,8 +45,8 @@ class Adjustment:
     either to None signals that no records should be expired or loaded,
     respectively.
     """
-    expire_spec: t.Optional[StorageRecordsSpec]
-    new_spec: t.Optional[DbRecordsSpec]
+    expire_spec: t.Optional[storage.StorageRecordsSpec]
+    new_spec: t.Optional[db.DbRecordsSpec]
 
 
 class Indexes[PrimaryKey](abc.ABC):
@@ -176,7 +121,7 @@ class Indexes[PrimaryKey](abc.ABC):
     @abc.abstractmethod
     def storage_records_spec(
         self, index_name: str, *args: t.Any, **kwargs: t.Any
-    ) -> StorageRecordsSpec:
+    ) -> storage.StorageRecordsSpec:
         """
         Specify records in storage based on an index.
 
@@ -189,7 +134,7 @@ class Indexes[PrimaryKey](abc.ABC):
     @abc.abstractmethod
     def db_records_spec(
             self, index_name: str, *args: t.Any, **kwargs: t.Any
-    ) -> DbRecordsSpec:
+    ) -> db.DbRecordsSpec:
         """
         Specify records in the DB based on an index.
 
@@ -275,22 +220,23 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
 
     def storage_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
-    ) -> StorageRecordsSpec:
+    ) -> storage.StorageRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
-        intervals = [Interval(
+        intervals = [storage.Interval(
             primary_key, math.nextafter(primary_key, float('inf')))
             for primary_key in primary_keys]
-        return StorageRecordsSpec(index_name, intervals)
+        return storage.StorageRecordsSpec(index_name, intervals)
 
     def db_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
-    ) -> DbRecordsSpec:
+    ) -> db.DbRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         if not primary_keys:
-            return DbRecordsSpec(self._query_all_string, ())
-        return DbRecordsSpec(self._query_some_string, (primary_keys,))
+            return db.QueryArgsDbRecordsSpec(self._query_all_string, ())
+        return db.QueryArgsDbRecordsSpec(
+            self._query_some_string, (primary_keys,))
 
     def adjust(
             self, index_name: str, *primary_keys: numbers.Real) -> Adjustment:
@@ -302,16 +248,18 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
             self._covers_all = False
             self._primary_keys = set(primary_keys)
             return Adjustment(
-                StorageRecordsSpec(
-                    'primary_key', [Interval(float('-inf'), float('inf'))]),
+                storage.StorageRecordsSpec(
+                    'primary_key',
+                    [storage.Interval(float('-inf'), float('inf'))]),
                 self.db_records_spec('primary_key', *primary_keys))
         if not primary_keys:
             self._covers_all = True
             return Adjustment(None, self.db_records_spec('primary_key'))
         self._primary_keys = set(primary_keys)
         return Adjustment(
-            StorageRecordsSpec(
-                'primary_key', [Interval(float('-inf'), float('inf'))]),
+            storage.StorageRecordsSpec(
+                'primary_key',
+                [storage.Interval(float('-inf'), float('inf'))]),
             self.db_records_spec('primary_key', *primary_keys))
 
     def covers(self, index_name: str, *primary_keys: numbers.Real) -> bool:
