@@ -138,3 +138,15 @@ class StorageTable[PrimaryKey](abc.ABC):
         Returns the number of records deleted.
         """
         raise NotImplementedError
+
+    @abc.abstractmethod
+    async def scratch_put_record(self, record: tp.Record) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def scratch_discard_record(self, primary_key: PrimaryKey) -> None:
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def scratch_merge(self) -> None:
+        raise NotImplementedError

@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -81,6 +81,18 @@ class FailCodec(tcr.Codec):
         raise Exception
 
 
+class ManuallyUnlockedScratchSpace(storage.ScratchSpace):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.update_not_merging()
+
+    def update_not_merging(self):
+        self._manually_not_merging = super().is_not_merging()
+
+    def is_not_merging(self):
+        return self._manually_not_merging
+
+
 class TestRedisTable:
     @pytest.fixture(autouse=True)
     async def flush_db(self, conn):
@@ -105,6 +117,11 @@ class TestRedisTable:
     @pytest.fixture
     def table(self, make_table):
         return make_table()
+
+    async def scratch_space_is_clear(self, table):
+        async with table._scratch_condition:
+            await table._scratch_condition.wait_for(
+                table._scratch_space.is_clear)
 
     async def test_construction_raises_on_non_str_attribute_name(
             self, make_table):
@@ -743,6 +760,226 @@ class TestRedisTable:
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
 
+    async def test_added_scratch_space_records_are_not_returned_immediately(
+            self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(KeyError):
+            await table.get_record(2)
+
+    async def test_added_scratch_space_records_are_returned_after_merge(
+            self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_adding_to_scratch_space_handles_updates(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
+
+    async def test_scratch_discard_record_ignores_nonexistent(self, table):
+        await table.scratch_discard_record(1)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+
+    async def test_scratch_discard_record_doesnt_removed_immediately(
+            self, table):
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_record(2)
+        assert_that(
+            await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_scratch_discard_record_removes_after_merge(self, table):
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_record(2)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        with pytest.raises(KeyError):
+            await table.get_record(2)
+
+    async def test_scratch_records_can_be_deleted(self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_record(2)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        with pytest.raises(KeyError):
+            await table.get_record(2)
+
+    async def test_scratch_records_can_be_deleted_and_added_again(self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_record(2)
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_scratch_space_add_handles_indexes(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': filter_kwarg('pk'),
+                'first_char': lambda **r: ord(r['s'][0])})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.scratch_put_record({'pk': 2, 's': 'daaa'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('first_char', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1, s='dzzz')))
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        records = table.get_records(
+            tc.StorageRecordsSpec('first_char', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1, s='dzzz'), has_entries(pk=2, s='daaa')))
+
+    async def test_scratch_space_deletes_delete_from_storage(
+            self, table, conn):
+        await table.put_record({'pk': 1, 's': 's1'})
+        assert await conn.zcard('table:primary_key') == 1
+        await table.scratch_discard_record(1)
+        assert await conn.zcard('table:primary_key') == 1
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        assert await conn.zcard('table:primary_key') == 0
+
+    async def test_scratch_space_updates_delete_overwritten_value(
+            self, table, conn):
+        await table.put_record({'pk': 1, 's': 's1'})
+        assert await conn.zcard('table:primary_key') == 1
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert await conn.zcard('table:primary_key') == 2
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        assert await conn.zcard('table:primary_key') == 1
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
+
+    async def test_scratch_space_delete_handles_indexes(
+            self, make_table, conn):
+        table = make_table(
+            score_functions={
+                'primary_key': filter_kwarg('pk'),
+                'first_char': lambda **r: ord(r['s'][0])})
+        await table.put_record({'pk': 1, 's': 'czzz'})
+        assert await conn.zcard('table:first_char') == 1
+        await table.scratch_discard_record(1)
+        assert await conn.zcard('table:first_char') == 1
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        assert await conn.zcard('table:first_char') == 0
+
+    async def test_scratch_activity_blocks_regular_puts(self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                table.put_record({'pk': 3, 's': 's3'}), 0.01)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        await asyncio.wait_for(table.put_record({'pk': 3, 's': 's3'}), 0.01)
+
+    async def test_scratch_activity_blocks_regular_single_deletes(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(table.delete_record(1), 0.01)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        await asyncio.wait_for(table.delete_record(1), 0.01)
+
+    async def test_scratch_activity_blocks_regular_multiple_deletes(
+            self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                table.delete_records(
+                    tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        await asyncio.wait_for(
+            table.delete_records(
+                tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
+
+    async def test_scratch_merge_blocks_scratch_puts_until_merge_complete(
+            self, table, monkeypatch):
+        scratch_space = ManuallyUnlockedScratchSpace()
+        monkeypatch.setattr(table, '_scratch_space', scratch_space)
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        scratch_space.update_not_merging()
+        assert not scratch_space.is_not_merging()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                table.scratch_put_record({'pk': 3, 's': 's3'}), 0.01)
+        assert not scratch_space.is_not_merging()
+        await self.scratch_space_is_clear(table)
+        scratch_space.update_not_merging()
+        assert scratch_space.is_not_merging()
+        await asyncio.wait_for(
+            table.scratch_put_record({'pk': 3, 's': 's3'}), 0.01)
+
+    async def test_scratch_merge_blocks_scratch_discards_until_merge_complete(
+            self, table, monkeypatch):
+        scratch_space = ManuallyUnlockedScratchSpace()
+        monkeypatch.setattr(table, '_scratch_space', scratch_space)
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        scratch_space.update_not_merging()
+        assert not scratch_space.is_not_merging()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(table.scratch_discard_record(2), 0.01)
+        assert not scratch_space.is_not_merging()
+        await self.scratch_space_is_clear(table)
+        scratch_space.update_not_merging()
+        assert scratch_space.is_not_merging()
+        await asyncio.wait_for(table.scratch_discard_record(2), 0.01)
+
+    async def test_multiple_scratch_operations(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.put_record({'pk': 3, 's': 's3'})
+        await table.scratch_put_record({'pk': 3, 's': 's3.2'})
+        await table.scratch_put_record({'pk': 4, 's': 's4'})
+        await table.scratch_put_record({'pk': 5, 's': 's5'})
+        await table.scratch_discard_record(1)
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=2), has_entries(pk=3, s='s3.2'),
+                has_entries(pk=4), has_entries(pk=5)))
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 3, 's': 's3'})
+        await table.scratch_discard_record(2)
+        await table.scratch_discard_record(4)
+        await table.scratch_put_record({'pk': 6, 's': 's6'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1), has_entries(pk=2),
+                has_entries(pk=3, s='s3'), has_entries(pk=4),
+                has_entries(pk=5)))
+        table.scratch_merge()
+        await self.scratch_space_is_clear(table)
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1), has_entries(pk=3, s='s3'),
+                has_entries(pk=5), has_entries(pk=6)))
+
 
 class TestAttributeIdMap:
     def test_on_empty(self):
@@ -792,10 +1029,11 @@ class TestAttributeIdMap:
 class TestRowCodec:
     @pytest.fixture
     def make_codec(self):
-        def factory(attribute_codecs=None):
-            attribute_codecs = attribute_codecs or {
-                'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
-            return storage.RowCodec(attribute_codecs)
+        def factory(**kwargs):
+            kwargs.setdefault(
+                'attribute_codecs',
+                {'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
+            return storage.RowCodec(**kwargs)
 
         return factory
 
@@ -804,21 +1042,24 @@ class TestRowCodec:
         return make_codec()
 
     def test_encode_decode(self, codec):
-        encoded = bytes(codec.encode({'i': 1, 's': 's1'}))
-        assert_that(codec.decode(encoded), has_entries(i=1, s='s1'))
+        encoded = bytes(codec.encode({'i': 1, 's': 's1'}, 3))
+        decoded, generation = codec.decode(encoded)
+        assert_that(decoded, has_entries(i=1, s='s1'))
+        assert generation == 3
 
     def test_encode_ignores_extra_attributes(self, codec):
-        encoded = bytes(codec.encode({'i': 1, 's': 's1', 'x': 'x1'}))
-        assert_that(codec.decode(encoded), is_not(has_entry('x', 'x1')))
+        encoded = bytes(codec.encode({'i': 1, 's': 's1', 'x': 'x1'}, 0))
+        assert_that(codec.decode(encoded)[0], is_not(has_entry('x', 'x1')))
 
     def test_encode_raises_on_missing_attributes(self, codec):
         with pytest.raises(ValueError):
-            codec.encode({'i': 1})
+            codec.encode({'i': 1}, 0)
 
     def test_encode_raises_on_attribute_encoding_error(self, make_codec):
-        codec = make_codec({'i': tcr.IntAsStringCodec(), 's': FailCodec()})
+        codec = make_codec(
+            attribute_codecs={'i': tcr.IntAsStringCodec(), 's': FailCodec()})
         with pytest.raises(tcr.RedisCodingError):
-            codec.encode({'i': 1, 's': 's1'})
+            codec.encode({'i': 1, 's': 's1'}, 0)
 
     def test_encode_raises_if_attribute_doesnt_encode_to_bytes(
             self, make_codec):
@@ -829,11 +1070,12 @@ class TestRowCodec:
             def decode(self, _):
                 raise Exception
 
-        codec = make_codec({
-            'i': tcr.IntAsStringCodec(),
-            's': BrokenStringReturningCodec(), })
+        codec = make_codec(
+            attribute_codecs={
+                'i': tcr.IntAsStringCodec(),
+                's': BrokenStringReturningCodec()})
         with pytest.raises(tcr.RedisCodingError):
-            codec.encode({'i': 1, 's': 's1'})
+            codec.encode({'i': 1, 's': 's1'}, 0)
 
     def test_encode_raises_if_encoded_attribute_is_too_long(self, make_codec):
         class LargeValueCodec(tcr.Codec):
@@ -843,73 +1085,101 @@ class TestRowCodec:
             def decode(self, _):
                 raise Exception
 
-        codec = make_codec({'l': LargeValueCodec()})
+        codec = make_codec(attribute_codecs={'l': LargeValueCodec()})
         with pytest.raises(tcr.RedisCodingError):
-            codec.encode({'l': codec.max_attribute_length + 1})
+            codec.encode({'l': codec.max_attribute_length + 1}, 0)
+
+    def test_encode_raises_if_generation_is_too_large(self, make_codec):
+        codec = make_codec(num_bytes_generation=1)
+        with pytest.raises(ValueError):
+            codec.encode({'i': 1, 's': 's1'}, codec.max_generation + 1)
 
     def test_decode_raises_on_non_bytes_arg(self, codec):
         with pytest.raises(ValueError):
             codec.decode('not bytes')
 
+    def test_decode_raises_on_missing_generation(self, codec):
+        with pytest.raises(tcr.RedisCodingError):
+            codec.decode(b'\x00' * (codec.num_bytes_generation - 1))
+
     def test_decode_raises_on_missing_attributes(self, make_codec):
-        encoded = bytes(
-            make_codec({'i': tcr.IntAsStringCodec()}).encode({'i': 1}))
+        codec = make_codec(attribute_codecs={'i': tcr.IntAsStringCodec()})
+        encoded = bytes(codec.encode({'i': 1}, 0))
         codec = make_codec(
-            {'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
+            attribute_codecs={
+                'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(encoded)
 
     def test_decode_raises_on_duplicate_attribute_ids(self, codec):
-        encoded = bytes(codec.encode({'i': 1, 's': 's1'}))
+        encoded = bytes(codec.encode({'i': 1, 's': 's1'}, 0))
         s_id_index = encoded.index(b's1') - 3
         assert int.from_bytes(encoded[s_id_index + 1:s_id_index + 3]) == 2
         s_id = encoded[s_id_index:s_id_index + 1]
         false_encoded = bytes(
             encoded + s_id + (6).to_bytes(length=2) + b'foobar')
-        assert_that(codec.decode(false_encoded[:-9]), has_entries(i=1, s='s1'))
+        assert_that(
+            codec.decode(false_encoded[:-9])[0], has_entries(i=1, s='s1'))
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_on_attribute_decoding_error(self, make_codec):
-        encoded = bytes(
-            make_codec({'s': tcr.StringCodec()}).encode({'s': 's1'}))
-        codec = make_codec({'s': FailCodec()})
+        encoded = bytes(make_codec(
+            attribute_codecs={'s': tcr.StringCodec()}).encode({'s': 's1'}, 0))
+        codec = make_codec(attribute_codecs={'s': FailCodec()})
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(encoded)
 
     def test_decode_raises_on_unknown_attribute_ids(self, make_codec):
-        codec = make_codec({'s': tcr.StringCodec()})
-        encoded = bytes(codec.encode({'s': 's1'}))
-        assert len(encoded) == 5 and encoded.endswith(b's1')
-        false_encoded = encoded + bytes([encoded[0] + 1]) + encoded[1:]
-        assert_that(codec.decode(false_encoded[:5]), has_entries(s='s1'))
+        codec = make_codec(attribute_codecs={'s': tcr.StringCodec()})
+        encoded = bytes(codec.encode({'s': 's1'}, 0))
+        num_bytes_attribute_id = 1
+        assert len(encoded) == (
+            num_bytes_attribute_id + codec.num_bytes_attribute_length +
+            codec.num_bytes_generation + len('s1'))
+        assert encoded.endswith(b's1')
+        false_encoded = (
+            encoded +
+            encoded[:codec.num_bytes_generation] +
+            bytes([encoded[codec.num_bytes_generation] + 1]) +
+            encoded[codec.num_bytes_generation + 1:])
+        good_part = false_encoded[:len(encoded)]
+        assert_that(codec.decode(good_part)[0], has_entries(s='s1'))
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_if_attribute_value_ends_unexpectedly(
             self, make_codec):
-        codec = make_codec({'s': tcr.StringCodec()})
-        encoded = bytes(codec.encode({'s': 'foobar'}))
-        assert len(encoded) == 9 and encoded.endswith(b'foobar')
-        assert int.from_bytes(encoded[1:3]) == 6
+        codec = make_codec(attribute_codecs={'s': tcr.StringCodec()})
+        encoded = bytes(codec.encode({'s': 'foobar'}, 0))
         false_encoded = encoded[:-1]
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_if_attribute_header_ends_after_id(self, make_codec):
-        codec = make_codec({'s1': tcr.StringCodec(), 's2': tcr.StringCodec()})
-        encoded = bytes(codec.encode({'s1': 's1', 's2': 's2'}))
-        assert len(encoded) == 10 and encoded[3:4] == encoded[8:9] == b's'
-        false_encoded = encoded[:6]
+        codec = make_codec(attribute_codecs={
+                           's1': tcr.StringCodec(), 's2': tcr.StringCodec()})
+        encoded = bytes(codec.encode({'s1': 's1', 's2': 's2'}, 0))
+        num_bytes_attribute_id = 1
+        after_s2_id = (
+            num_bytes_attribute_id + codec.num_bytes_generation +
+            codec.num_bytes_attribute_length + len('s1') +
+            codec.num_bytes_attribute_length)
+        false_encoded = encoded[:after_s2_id]
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
     def test_decode_raises_if_attribute_header_ends_in_the_middle_of_length(
             self, make_codec):
-        codec = make_codec({'s1': tcr.StringCodec(), 's2': tcr.StringCodec()})
-        encoded = bytes(codec.encode({'s1': 's1', 's2': 's2'}))
-        assert len(encoded) == 10 and encoded[3:4] == encoded[8:9] == b's'
-        false_encoded = encoded[:7]
+        codec = make_codec(attribute_codecs={
+                           's1': tcr.StringCodec(), 's2': tcr.StringCodec()})
+        encoded = bytes(codec.encode({'s1': 's1', 's2': 's2'}, 0))
+        num_bytes_attribute_id = 1
+        after_s2_id = (
+            num_bytes_attribute_id + codec.num_bytes_generation +
+            codec.num_bytes_attribute_length + len('s1') +
+            codec.num_bytes_attribute_length)
+        false_encoded = encoded[:after_s2_id + 1]
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
 
@@ -932,3 +1202,154 @@ class TestBytesReader:
         assert reader.read(4) == b'obar'
         with pytest.raises(storage.BytesReader.NotEnoughBytes):
             reader.read(1)
+
+
+class TestScratchSpace:
+    @pytest.fixture
+    def scratch_space(self):
+        return storage.ScratchSpace()
+
+    def test_is_clear_on_construction(self, scratch_space):
+        assert scratch_space.is_clear()
+
+    def test_is_not_merging_on_construction(self, scratch_space):
+        assert scratch_space.is_not_merging()
+
+    def test_next_generation_is_greater(self, scratch_space):
+        assert scratch_space.next_generation > scratch_space.current_generation
+
+    def test_mark_existing_for_del_means_not_clear(self, scratch_space):
+        scratch_space.mark_existing_record_for_deletion(b'', {})
+        assert not scratch_space.is_clear()
+        assert scratch_space.is_not_merging()
+
+    def test_mark_pk_for_del_means_not_clear(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        assert not scratch_space.is_clear()
+        assert scratch_space.is_not_merging()
+
+    def test_mark_add_means_not_clear(self, scratch_space):
+        scratch_space.mark_record_for_adding(1, {})
+        assert not scratch_space.is_clear()
+        assert scratch_space.is_not_merging()
+
+    def test_merge_means_is_merging(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        assert not scratch_space.is_not_merging()
+
+    def test_merge_means_advances_generation(self, scratch_space):
+        generation = scratch_space.current_generation
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        assert scratch_space.current_generation > generation
+
+    def test_merge_done_means_not_merging_anymore(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        scratch_space.merge_done()
+        assert scratch_space.is_not_merging()
+
+    def test_unaffected_records_are_current_before_merge(self, scratch_space):
+        scratch_space.mark_record_for_adding(1, b'x')
+        assert scratch_space.record_is_current(
+            2, b'', scratch_space.current_generation)
+
+    def test_unaffected_records_are_current_during_merge(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        assert scratch_space.record_is_current(
+            2, b'', scratch_space.current_generation)
+
+    def test_future_records_are_not_current_before_merge(self, scratch_space):
+        assert not scratch_space.record_is_current(
+            2, b'', scratch_space.next_generation)
+
+    def test_future_records_are_not_current_during_merge(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        assert not scratch_space.record_is_current(
+            2, b'', scratch_space.next_generation)
+
+    def test_existing_marked_for_del_are_current_before_merge(
+            self, scratch_space):
+        scratch_space.mark_existing_record_for_deletion(b'x', {})
+        assert scratch_space.record_is_current(
+            1, b'x', scratch_space.current_generation)
+
+    def test_existing_marked_for_del_are_not_current_during_merge(
+            self, scratch_space):
+        scratch_space.mark_existing_record_for_deletion(b'x', {})
+        scratch_space.merge()
+        assert not scratch_space.record_is_current(
+            1, b'x', scratch_space.current_generation)
+
+    def test_existing_marked_for_del_are_current_after_merge(
+            self, scratch_space):
+        scratch_space.mark_existing_record_for_deletion(b'x', {})
+        scratch_space.merge()
+        scratch_space.merge_done()
+        assert scratch_space.record_is_current(
+            1, b'x', scratch_space.current_generation)
+
+    def test_pk_marked_for_del_are_current_before_merge(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        assert scratch_space.record_is_current(
+            1, b'x', scratch_space.current_generation)
+
+    def test_pk_marked_for_del_are_not_current_during_merge(
+            self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        assert not scratch_space.record_is_current(
+            1, b'x', scratch_space.current_generation)
+
+    def test_pk_marked_for_del_are_current_after_merge(self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        scratch_space.merge_done()
+        assert scratch_space.record_is_current(
+            1, b'x', scratch_space.current_generation)
+
+    def test_existing_marked_for_del_are_returned_before_merge_done(
+            self, scratch_space):
+        scratch_space.mark_existing_record_for_deletion(b'x', {'a': 1})
+        assert_that(scratch_space.records_for_deletion, has_item({'a': 1}))
+        assert_that(scratch_space.encoded_records_for_deletion, has_item(b'x'))
+        scratch_space.merge()
+        assert_that(scratch_space.records_for_deletion, has_item({'a': 1}))
+        assert_that(scratch_space.encoded_records_for_deletion, has_item(b'x'))
+
+    def test_existing_marked_for_del_are_not_returned_after_merge_done(
+            self, scratch_space):
+        scratch_space.mark_existing_record_for_deletion(b'x', {'a': 1})
+        scratch_space.merge()
+        scratch_space.merge_done()
+        assert_that(list(scratch_space.records_for_deletion), empty())
+        assert_that(scratch_space.encoded_records_for_deletion, empty())
+
+    def test_pk_marked_for_del_is_returned_before_merge_done(
+            self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        assert_that(scratch_space.primary_keys_for_deletion, has_item(1))
+        scratch_space.merge()
+        assert_that(scratch_space.primary_keys_for_deletion, has_item(1))
+
+    def test_pk_marked_for_del_is_not_returned_after_merge_done(
+            self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.merge()
+        scratch_space.merge_done()
+        assert_that(scratch_space.primary_keys_for_deletion, empty())
+
+    def test_pk_marked_for_del_and_then_added_is_not_returned(
+            self, scratch_space):
+        scratch_space.mark_primary_key_for_deletion(1)
+        scratch_space.mark_record_for_adding(1, {})
+        assert_that(scratch_space.primary_keys_for_deletion, empty())
+
+    def test_can_merge_if_clear(self, scratch_space):
+        generation = scratch_space.current_generation
+        scratch_space.merge()
+        assert scratch_space.current_generation > generation
+        scratch_space.merge_done()

@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -15,13 +15,13 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import asyncio
 import collections.abc as ca
 import struct
 import typing as t
 
 import redis.asyncio as redis
 
-import tablecache.index as index
 import tablecache.redis.codec as codec
 import tablecache.storage as storage
 import tablecache.types as tp
@@ -100,6 +100,8 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         self._primary_key_name = primary_key_name
         self._row_codec = RowCodec(attribute_codecs)
         self._score_functions = score_functions
+        self._scratch_space = ScratchSpace()
+        self._scratch_condition = asyncio.Condition()
 
     @property
     @t.override
@@ -125,21 +127,34 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         Raises a RedisCodingError if any attribute encode to something other
         than bytes, or any error occurs during encoding.
         """
+        async with self._scratch_condition:
+            await self._scratch_condition.wait_for(
+                self._scratch_space.is_clear)
+            return await self._put_record_locked(record)
+
+    async def _put_record_locked(self, record):
+        primary_key = self._record_primary_key(record)
         try:
-            primary_key = record[self._primary_key_name]
-        except KeyError as e:
-            raise ValueError(
-                f'Record {record} is missing a primary key.') from e
-        try:
-            await self.delete_record(primary_key)
+            await self._delete_record_locked(primary_key)
         except KeyError:
             pass
-        encoded_record = self._row_codec.encode(record)
+        encoded_record = self._row_codec.encode(
+            record, self._scratch_space.current_generation)
+        await self._put_encoded_record(record, encoded_record)
+
+    async def _put_encoded_record(self, record, encoded_record):
         primary_key_score = self._score_functions['primary_key'](**record)
         await self._conn.zadd(
             f'{self.table_name}:primary_key',
             mapping=PairAsItems(memoryview(encoded_record), primary_key_score))
         await self._modify_index_entries(record, primary_key_score, 1)
+
+    def _record_primary_key(self, record):
+        try:
+            return record[self._primary_key_name]
+        except KeyError as e:
+            raise ValueError(
+                f'Record {record} is missing a primary key.') from e
 
     async def _modify_index_entries(self, record, primary_key_score, inc):
         assert inc == -1 or inc == 1
@@ -203,7 +218,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     async def _get_records_by_primary_key_score(
             self, primary_key_score_intervals, recheck_predicate,
-            upper_inclusive=True):
+            upper_inclusive=True, filter_scratch_records=True):
         for interval in primary_key_score_intervals:
             # Prefixing the end of the range with '(' is the Redis way of
             # saying we want the interval to be open on that end.
@@ -211,10 +226,23 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             encoded_records = await self._conn.zrange(
                 f'{self.table_name}:primary_key', interval.ge, upper,
                 byscore=True)
-            for encoded_record in encoded_records:
-                decoded_record = self._row_codec.decode(encoded_record)
-                if recheck_predicate(decoded_record):
-                    yield encoded_record, decoded_record
+            async for encoded_record, decoded_record in self._filtered_records(
+                    encoded_records, recheck_predicate,
+                    filter_scratch_records):
+                yield encoded_record, decoded_record
+
+    async def _filtered_records(
+            self, encoded_records, recheck_predicate, filter_scratch_records):
+        for encoded_record in encoded_records:
+            decoded_record, generation = self._row_codec.decode(encoded_record)
+            primary_key = self._record_primary_key(decoded_record)
+            should_include_record = recheck_predicate(decoded_record)
+            if filter_scratch_records:
+                should_include_record &= (
+                    self._scratch_space.record_is_current(
+                        primary_key, encoded_record, generation))
+            if should_include_record:
+                yield encoded_record, decoded_record
 
     @t.override
     async def get_records(
@@ -246,6 +274,12 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
+        async with self._scratch_condition:
+            await self._scratch_condition.wait_for(
+                self._scratch_space.is_clear)
+            return await self._delete_record_locked(primary_key)
+
+    async def _delete_record_locked(self, primary_key):
         encoded_record, decoded_record = await self._get_record(primary_key)
         await self._delete_record(encoded_record, decoded_record)
 
@@ -258,12 +292,84 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     @t.override
     async def delete_records(
             self, records_spec: storage.StorageRecordsSpec) -> int:
+        async with self._scratch_condition:
+            await self._scratch_condition.wait_for(
+                self._scratch_space.is_clear)
+            return await self._delete_records_locked(records_spec)
+
+    async def _delete_records_locked(self, records_spec):
         num_deleted = 0
         async for encoded_record, decoded_record in (
                 self._get_records(records_spec)):
             await self._delete_record(encoded_record, decoded_record)
             num_deleted += 1
         return num_deleted
+
+    @t.override
+    async def scratch_put_record(self, record: tp.Record) -> None:
+        async with self._scratch_condition:
+            await self._scratch_condition.wait_for(
+                self._scratch_space.is_not_merging)
+            return await self._scratch_put_record_locked(record)
+
+    async def _scratch_put_record_locked(self, record):
+        primary_key = self._record_primary_key(record)
+        try:
+            existing_encoded_record, existing_decoded_record = (
+                await self._get_record(primary_key))
+            self._scratch_space.mark_existing_record_for_deletion(
+                existing_encoded_record, existing_decoded_record)
+        except KeyError:
+            pass
+        encoded_record = self._row_codec.encode(
+            record, self._scratch_space.next_generation)
+        self._scratch_space.mark_record_for_adding(primary_key, encoded_record)
+        await self._put_encoded_record(record, encoded_record)
+
+    @t.override
+    async def scratch_discard_record(self, primary_key: PrimaryKey) -> None:
+        async with self._scratch_condition:
+            await self._scratch_condition.wait_for(
+                self._scratch_space.is_not_merging)
+            return await self._scratch_discard_record_locked(primary_key)
+
+    async def _scratch_discard_record_locked(self, primary_key):
+        self._scratch_space.mark_primary_key_for_deletion(primary_key)
+
+    @t.override
+    def scratch_merge(self) -> None:
+        self._scratch_space.merge()
+        asyncio.create_task(self._scratch_merge())
+
+    async def _scratch_merge(self):
+        await self._clean_up_scratch_records()
+        self._scratch_space.merge_done()
+        async with self._scratch_condition:
+            self._scratch_condition.notify_all()
+
+    async def _clean_up_scratch_records(self):
+        encoded_records_to_delete = (
+            self._scratch_space.encoded_records_for_deletion)
+        primary_keys_to_delete = self._scratch_space.primary_keys_for_deletion
+
+        def should_delete(primary_key, encoded_record):
+            return (
+                primary_key in primary_keys_to_delete or
+                encoded_record in encoded_records_to_delete)
+        primary_keys_for_potential_deletion = (
+            primary_keys_to_delete | {
+                self._record_primary_key(record)
+                for record in self._scratch_space.records_for_deletion})
+        for primary_key in primary_keys_for_potential_deletion:
+            primary_key_score = self._score_functions['primary_key'](
+                **{self._primary_key_name: primary_key})
+            records = self._get_records_by_primary_key_score(
+                [storage.Interval(primary_key_score, primary_key_score)],
+                lambda r: r[self._primary_key_name] == primary_key,
+                filter_scratch_records=False)
+            async for encoded_record, decoded_record in records:
+                if should_delete(primary_key, encoded_record):
+                    await self._delete_record(encoded_record, decoded_record)
 
 
 class PairAsItems:
@@ -313,15 +419,18 @@ class AttributeIdMap:
 
 class RowCodec:
     """
-    Codec for an complete set of attributes.
+    Codec for a complete set of attributes.
 
     Encodes and decodes records into bytes. Uses an AttributeIdMap to generate
-    small attribute IDs for each of a given set of named attributes.
+    small attribute IDs for each of a given set of named attributes. Each
+    record is encoded along with a generation counter, which is an unsigned
+    integer that can be used to determine when a record becomes valid.
     """
 
     def __init__(
             self, attribute_codecs: AttributeCodecs,
-            num_bytes_attribute_length: int = 2) -> None:
+            num_bytes_attribute_length: int = 2,
+            num_bytes_generation: int = 4) -> None:
         """
         :param attribute_codecs: A dictionary mapping attribute names to
             codecs. Only record attributes contained here will be encoded.
@@ -329,24 +438,34 @@ class RowCodec:
             length of each attribute is encoded. This value sets the limit for
             the maximum allowable encoded attribute size (to 1 less than the
             maximum unsigned integer representable with this number of bytes).
+        :param num_bytes_generation: The number of bytes used to encode a
+            record's generation. This limits the maximum number of generations
         """
         self._attribute_codecs = AttributeIdMap(attribute_codecs)
         self.num_bytes_attribute_length = num_bytes_attribute_length
         self.max_attribute_length = 2**(num_bytes_attribute_length * 8) - 1
+        self.num_bytes_generation = num_bytes_generation
+        self.max_generation = 2**(num_bytes_generation * 8) - 1
 
-    def encode(self, record: tp.Record) -> bytearray:
+    def encode(self, record: tp.Record, generation: int) -> bytes:
         """
         Encode a record.
 
-        Encodes the given record to a bytearray. Only attributes for which a
-        codec was provided on construction are encoded.
+        Encodes the given record into bytes. Only attributes for which a codec
+        was provided on construction are encoded.
 
         A RedisCodingError is raised if the record is missing any attribute for
         which a codec was specified, an error occurs while encoding any
         individual attribute, or any encoded attribute is too long (determined
         by the number of bytes configured to store attribute length).
+
+        Raises a ValueError if the generation is greater than max_generation
+        (as determined by num_bytes_generation).
         """
         encoded_record = bytearray()
+        if generation > self.max_generation:
+            raise ValueError('Generation is too big.')
+        encoded_record += generation.to_bytes(length=self.num_bytes_generation)
         for attribute_name, attribute_id, codec_ in self._attribute_codecs:
             encoded_attribute = self._encode_attribute(
                 record, attribute_name, codec_)
@@ -354,7 +473,7 @@ class RowCodec:
             encoded_record += len(encoded_attribute).to_bytes(
                 length=self.num_bytes_attribute_length)
             encoded_record += encoded_attribute
-        return encoded_record
+        return bytes(encoded_record)
 
     def _encode_attribute(self, record, attribute_name, codec):
         try:
@@ -376,11 +495,12 @@ class RowCodec:
                 f'Encoding of {attribute_name} is too long.')
         return encoded_attribute
 
-    def decode(self, encoded_record: bytes) -> tp.Record:
+    def decode(self, encoded_record: bytes) -> tuple[tp.Record, int]:
         """
         Decode an encoded record.
 
-        Decodes a byte string containing a previously encoded record.
+        Decodes a byte string containing a previously encoded record. Returns
+        the record along with its generation.
 
         Raises a ValueError if encoded_record is not a bytes object, or any
         attribute for which a codec exists is missing from it.
@@ -392,6 +512,10 @@ class RowCodec:
             raise ValueError('Encoded record must be bytes.')
         decoded_record = {}
         reader = BytesReader(encoded_record)
+        try:
+            generation = int.from_bytes(reader.read(self.num_bytes_generation))
+        except BytesReader.NotEnoughBytes:
+            raise RedisCodingError('Incomplete record generation.')
         while reader.bytes_remaining:
             attribute_name, decoded_attribute = self._decode_next_attribute(
                 reader)
@@ -404,7 +528,7 @@ class RowCodec:
         if (missing := needed_attributes - present_attributes):
             raise RedisCodingError(
                 f'Attributes {missing} missing in {encoded_record}.')
-        return decoded_record
+        return decoded_record, generation
 
     def _decode_next_attribute(self, reader):
         try:
@@ -453,3 +577,77 @@ class BytesReader:
             return self._bs[self._pos:new_pos]
         finally:
             self._pos = new_pos
+
+
+class ScratchSpace:
+    def __init__(self):
+        self._current_generation = 0
+        self.merge_done()
+
+    @property
+    def current_generation(self):
+        return self._current_generation
+
+    @property
+    def next_generation(self):
+        return self._current_generation + 1
+
+    @property
+    def records_for_deletion(self):
+        yield from self._existing_for_deletion.values()
+
+    @property
+    def encoded_records_for_deletion(self):
+        return frozenset(self._existing_for_deletion)
+
+    @property
+    def primary_keys_for_deletion(self):
+        return frozenset(self._primary_keys_for_deletion)
+
+    def _transition_to(self, state):
+        assert state in ['clear', 'active', 'merging']
+        if state == 'clear':
+            assert getattr(self, '_state', 'merging') == 'merging'
+        elif state == 'active':
+            assert self._state in ['clear', 'active']
+        else:
+            assert self._state in ['clear', 'active']
+        self._state = state
+
+    def is_clear(self):
+        return self._state == 'clear'
+
+    def is_not_merging(self):
+        return self._state != 'merging'
+
+    def mark_existing_record_for_deletion(
+            self, encoded_record, decoded_record):
+        self._transition_to('active')
+        self._existing_for_deletion[encoded_record] = decoded_record
+
+    def mark_primary_key_for_deletion(self, primary_key):
+        self._transition_to('active')
+        self._primary_keys_for_deletion.add(primary_key)
+
+    def mark_record_for_adding(self, primary_key, encoded_record):
+        self._transition_to('active')
+        self._primary_keys_for_deletion.discard(primary_key)
+        self._existing_for_deletion.pop(encoded_record, None)
+
+    def record_is_current(self, primary_key, encoded_record, generation):
+        if generation > self._current_generation:
+            return False
+        if self._state == 'merging':
+            return (
+                encoded_record not in self._existing_for_deletion and
+                primary_key not in self._primary_keys_for_deletion)
+        return True
+
+    def merge(self):
+        self._transition_to('merging')
+        self._current_generation += 1
+
+    def merge_done(self):
+        self._transition_to('clear')
+        self._existing_for_deletion = {}
+        self._primary_keys_for_deletion = set()

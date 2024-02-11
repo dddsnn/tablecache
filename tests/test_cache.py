@@ -218,6 +218,15 @@ class MockStorageTable(tc.StorageTable):
             await self.delete_record(record[self._primary_key_name])
         return len(delete)
 
+    async def scratch_put_record(self, record):
+        raise NotImplementedError
+
+    async def scratch_discard_record(self, primary_key):
+        raise NotImplementedError
+
+    def scratch_merge(self):
+        raise NotImplementedError
+
 
 class TestCachedTable:
     @pytest.fixture
