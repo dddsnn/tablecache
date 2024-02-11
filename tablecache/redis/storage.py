@@ -30,11 +30,25 @@ import collections.abc as ca
 import struct
 import typing as t
 
+import aiorwlock
 import redis.asyncio as redis
 
 import tablecache.redis.codec as codec
 import tablecache.storage as storage
 import tablecache.types as tp
+
+
+class CompatibleWriterLock(aiorwlock._WriterLock):
+    def locked(self) -> bool:
+        return super().locked
+
+
+# Unfortunately, the locks used in the aiorwlock library aren't completely
+# usable as drop-in replacements for asyncio.Lock. Luckily, it's just the
+# difference between locked being a property vs. a method. So if we hack a
+# compatible version into the library, we can use the writer_lock of a RWLock
+# as the lock of our asyncio.Condition in the RedisTable.
+aiorwlock._WriterLock = CompatibleWriterLock
 
 type AttributeCodecs = ca.Mapping[str, codec.Codec]
 
@@ -126,8 +140,9 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         self._primary_key_name = primary_key_name
         self._row_codec = RowCodec(attribute_codecs)
         self._score_functions = score_functions
+        self._rwlock = aiorwlock.RWLock()
         self._scratch_space = ScratchSpace()
-        self._scratch_condition = asyncio.Condition()
+        self._scratch_condition = asyncio.Condition(self._rwlock.writer_lock)
 
     @property
     @t.override
@@ -228,10 +243,11 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         for which there exists a codec, or an error occurs when decoding the
         set of attributes.
         """
-        _, decoded_record = await self._get_record(primary_key)
-        return decoded_record
+        async with self._rwlock.reader_lock:
+            _, decoded_record = await self._get_record_locked(primary_key)
+            return decoded_record
 
-    async def _get_record(self, primary_key):
+    async def _get_record_locked(self, primary_key):
         primary_key_score = self._score_functions['primary_key'](
             **{self._primary_key_name: primary_key})
         records = self._get_records_by_primary_key_score(
@@ -273,10 +289,12 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     @t.override
     async def get_records(
             self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
-        async for _, decoded_record in self._get_records(records_spec):
-            yield decoded_record
+        async with self._rwlock.reader_lock:
+            async for _, decoded_record in self._get_records_locked(
+                    records_spec):
+                yield decoded_record
 
-    async def _get_records(self, records_spec):
+    async def _get_records_locked(self, records_spec):
         if records_spec.index_name == 'primary_key':
             upper_inclusive = False
             primary_key_score_intervals = records_spec.score_intervals
@@ -306,7 +324,8 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             return await self._delete_record_locked(primary_key)
 
     async def _delete_record_locked(self, primary_key):
-        encoded_record, decoded_record = await self._get_record(primary_key)
+        encoded_record, decoded_record = await self._get_record_locked(
+            primary_key)
         await self._delete_record(encoded_record, decoded_record)
 
     async def _delete_record(self, encoded_record, decoded_record):
@@ -326,7 +345,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     async def _delete_records_locked(self, records_spec):
         num_deleted = 0
         async for encoded_record, decoded_record in (
-                self._get_records(records_spec)):
+                self._get_records_locked(records_spec)):
             await self._delete_record(encoded_record, decoded_record)
             num_deleted += 1
         return num_deleted
@@ -347,7 +366,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         primary_key = self._record_primary_key(record)
         try:
             existing_encoded_record, existing_decoded_record = (
-                await self._get_record(primary_key))
+                await self._get_record_locked(primary_key))
             self._scratch_space.mark_existing_record_for_deletion(
                 existing_encoded_record, existing_decoded_record)
         except KeyError:
