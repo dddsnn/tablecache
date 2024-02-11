@@ -73,6 +73,22 @@ class StorageRecordsSpec:
 
 
 class StorageTable[PrimaryKey](abc.ABC):
+    """
+    Fast storage table.
+
+    Abstract interface for fast record storage. Offers methods to put records,
+    get and delete records by primary key, as well as to get and delete
+    multiple records that match score ranges. Each record is associated with
+    one or more scores by which it can be queried. Implementations are expected
+    to use a sorted data structure that enables fast access via those scores.
+
+    Also offers a scratch space, where records can marked to be added or
+    deleted without affecting reads on the table until they are explicitly
+    merged. This is meant to provide a consitent view of the data while
+    (potentially slow) updates of the data are going on in the background. The
+    implementation of the merge operation is expected to be relatively fast so
+    that updates provide little disruption.
+    """
     @property
     @abc.abstractmethod
     def table_name(self) -> str:
@@ -141,12 +157,40 @@ class StorageTable[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def scratch_put_record(self, record: tp.Record) -> None:
+        """
+        Add a record to scratch space.
+
+        Records in scratch space have no effect on get operations until they
+        are merged via scratch_merge().
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     async def scratch_discard_record(self, primary_key: PrimaryKey) -> None:
+        """
+        Mark a record to be deleted in scratch space.
+
+        Records marked for deletion have no effect on get operations until they
+        are merged via scratch_merge().
+
+        This can be undone by adding the record again via scratch_put_record().
+
+        In contrast to delete_record(), does not raise an exception if no
+        record with the given primary key exists.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     def scratch_merge(self) -> None:
+        """
+        Merge scratch space.
+
+        Merge records added to scratch space via scratch_put_record() or marked
+        for deletion via scratch_discard_record() so that these changes are
+        reflected in get_record() and get_records().
+
+        This method is not async, as the switchover is meant to be fast.
+        However, implementations may start background tasks to handle some
+        cleanup during which further scratch operations are blocked.
+        """
         raise NotImplementedError

@@ -15,6 +15,16 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+"""
+This module contains the RedisTable, a StorageTable implementation that stores
+its data in a Redis instance.
+
+While this seemed like a good idea a while ago, with recent changes in the
+library's design, this implementation is likely to be slower that it should be.
+Supporting multiple indexes requires one round trip per record (or even more)
+when getting or deleting multiple records, which obviously doesn't scale well.
+"""
+
 import asyncio
 import collections.abc as ca
 import struct
@@ -72,6 +82,22 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         track of the number of primary key scores it maps to. This is stored as
         a 32-bit unsigned integer, so there is a hard limit of 2**32-1 primary
         key scores that each index score may map to.
+
+        While scratch space is used (i.e. in between the first call to
+        scratch_{put,discard}_record() and the corresponding scratch_merge()),
+        regular write operations (put_record() and delete_record{,s}()) are
+        locked. Merging scratch space starts a background task that cleans up
+        data in Redis. During this operation, further scratch activity is
+        locked.
+
+        The implementation of the scratch space requires a generation count to
+        be stored with each record, which are used to exclude records in
+        scratch space that aren't merged yet. The generation is incremented
+        with each merge. Since it is stored as a 32-bit unsigned integer, there
+        is an upper limit of the number of merges that can be done (of
+        2**32-1). Deletions in scratch space store some data natively (i.e. in
+        Python structures rather than in Redis), so scratch operations with
+        lots of deletions may consume considerable amounts of memory.
 
         :param conn: An async Redis connection. The connection will not be
             closed and needs to be cleaned up from the outside.
@@ -307,6 +333,11 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def scratch_put_record(self, record: tp.Record) -> None:
+        """
+        Add a record to scratch space.
+
+        Regular write operations are locked until scratch space is merged.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_space.is_not_merging)
@@ -328,6 +359,14 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def scratch_discard_record(self, primary_key: PrimaryKey) -> None:
+        """
+        Mark a record to be deleted in scratch space.
+
+        Regular write operations are locked until scratch space is merged.
+
+        Marking records for deletion requires a bit of internal state, which
+        may get large with large numbers of records.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_space.is_not_merging)
@@ -580,6 +619,37 @@ class BytesReader:
 
 
 class ScratchSpace:
+    """
+    Scratch space metadata.
+
+    Keeps track of data needed to distinguish between records that are current
+    and should be returned to the client, and ones that belong to scratch space
+    and should only be returned after a merge.
+
+    Scratch space can be in one of 3 states:
+
+    - Clear: No records have been added to scratch space (marked for adding or
+      deletion). All records can be considered current.
+    - Active: Records have been added to scratch space. A generation counter on
+      all records determines whether a record is current (ones with a
+      generation count higher than the current one are not).
+    - Merging: The transition from active to merging increments the generation
+      count and thus makes records previously added to scratch current. Data
+      about records marked for deletion in scratch space makes it possible to
+      consider those not current anymore.
+
+    Scratch space transitions from clear to active any call to any of
+    mark_existing_record_for_deletion(), mark_primary_key_for_deletion(), or
+    mark_record_for_adding(). record_is_current() reflects the state from
+    before adding any records to scratch space. The transition from active to
+    merging is done via merge(). At this point, record_is_current() reflects
+    all additions and deletions in scratch space. merge_done() transitions back
+    to the clear state.
+
+    It is up to the caller to ensure that these methods are called in the right
+    order. If they are not, an AssertionError is raised.
+    """
+
     def __init__(self):
         self._current_generation = 0
         self.merge_done()
@@ -594,14 +664,26 @@ class ScratchSpace:
 
     @property
     def records_for_deletion(self):
+        """Records that are currently marked to be deleted."""
         yield from self._existing_for_deletion.values()
 
     @property
     def encoded_records_for_deletion(self):
+        """
+        Encoded records that are currently marked to be deleted.
+
+        These are the actual byte strings as they exist in storage.
+        """
         return frozenset(self._existing_for_deletion)
 
     @property
     def primary_keys_for_deletion(self):
+        """
+        Primary keys that are currently marked to be deleted.
+
+        After the merge, no records with any of these primary keys should exist
+        anymore.
+        """
         return frozenset(self._primary_keys_for_deletion)
 
     def _transition_to(self, state):
@@ -622,19 +704,54 @@ class ScratchSpace:
 
     def mark_existing_record_for_deletion(
             self, encoded_record, decoded_record):
+        """
+        Mark an existing record to be deleted.
+
+        This marks the actual byte string in storage to be deleted. Other
+        records with the same primary key may remain. This can be used when a
+        record in scratch space overwrites an existing one.
+
+        This can be undone by mark_record_for_adding(), but only if the exact
+        same byte string is provided there (not just the primary key).
+        """
         self._transition_to('active')
         self._existing_for_deletion[encoded_record] = decoded_record
 
     def mark_primary_key_for_deletion(self, primary_key):
+        """
+        Mark a primary key to be deleted.
+
+        This marks any record with the given primary key for deletion. After a
+        call to merge(), no such record will be considered current.
+
+        This can be undone by mark_record_for_adding().
+        """
         self._transition_to('active')
         self._primary_keys_for_deletion.add(primary_key)
 
     def mark_record_for_adding(self, primary_key, encoded_record):
+        """
+        Mark a record for adding.
+
+        This needs to be called if an existing record that was previously
+        overwritten in scratch space is added back with its original data.
+        """
         self._transition_to('active')
         self._primary_keys_for_deletion.discard(primary_key)
         self._existing_for_deletion.pop(encoded_record, None)
 
     def record_is_current(self, primary_key, encoded_record, generation):
+        """
+        Determine whether a record found in storage is current.
+
+        Before the call to merge(), records added to scratch space are not
+        considered current via their generation count (so that they are not
+        returned to the client yet), and ones deleted from scratch space still
+        are (so that they can still be returned to the client).
+
+        After the call to merge(), this essentially switches, so that added
+        records appear, and deleted ones vanish.
+        """
         if generation > self._current_generation:
             return False
         if self._state == 'merging':
@@ -644,10 +761,26 @@ class ScratchSpace:
         return True
 
     def merge(self):
+        """
+        Merge scratch space.
+
+        This triggers the transition from active to merging. At any point
+        before this call, record_is_current() reflects the state as if changes
+        in scratch space didn't exist. At any point after, it reflects the
+        state that they do.
+        """
         self._transition_to('merging')
         self._current_generation += 1
 
     def merge_done(self):
+        """
+        Signal that the merge is done.
+
+        This triggers the state transition from merging back to clear. The
+        caller assures that storage has been modified to reflect the state of
+        scratch space, i.e. there doesn't exist any record for which
+        record_is_current() would return False.
+        """
         self._transition_to('clear')
         self._existing_for_deletion = {}
         self._primary_keys_for_deletion = set()
