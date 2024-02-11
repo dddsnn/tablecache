@@ -107,7 +107,7 @@ class CachedTable[PrimaryKey]:
                 'Already loaded. Use adjust() to change cached records.')
         _logger.info(
             f'Clearing and loading {self._indexes} of table '
-            f'{self._storage_table.table_name}.')
+            f'{self._storage_table}.')
         await self._storage_table.clear()
         num_deleted, num_loaded = await self._adjust(
             index_name, *index_args, **index_kwargs)

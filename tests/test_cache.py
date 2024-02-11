@@ -169,10 +169,6 @@ class MockStorageTable(tc.StorageTable):
         self.records = {}
         self._indexes = {}
 
-    @property
-    def table_name(self):
-        return 'mock table'
-
     async def clear(self):
         self.records = {}
         self._indexes = {}

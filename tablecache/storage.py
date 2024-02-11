@@ -89,11 +89,6 @@ class StorageTable[PrimaryKey](abc.ABC):
     implementation of the merge operation is expected to be relatively fast so
     that updates provide little disruption.
     """
-    @property
-    @abc.abstractmethod
-    def table_name(self) -> str:
-        raise NotImplementedError
-
     @abc.abstractmethod
     async def clear(self) -> None:
         """Delete all data belonging to this table."""
