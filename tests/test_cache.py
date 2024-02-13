@@ -217,7 +217,7 @@ class MockStorageTable(tc.StorageTable):
     async def scratch_put_record(self, record):
         raise NotImplementedError
 
-    async def scratch_discard_record(self, primary_key):
+    async def scratch_discard_records(self, records_spec):
         raise NotImplementedError
 
     def scratch_merge(self):

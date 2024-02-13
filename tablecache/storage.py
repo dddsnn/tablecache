@@ -99,6 +99,8 @@ class StorageTable[PrimaryKey](abc.ABC):
         """
         Store a record.
 
+        If a record with the same primary key already exists, it is replaced.
+
         May raise an exception if the record is invalid in some way.
         """
         raise NotImplementedError
@@ -161,17 +163,17 @@ class StorageTable[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def scratch_discard_record(self, primary_key: PrimaryKey) -> None:
+    async def scratch_discard_records(
+            self, records_spec: StorageRecordsSpec) -> int:
         """
-        Mark a record to be deleted in scratch space.
+        Mark a set of records to be deleted in scratch space.
 
         Records marked for deletion have no effect on get operations until they
         are merged via scratch_merge().
 
         This can be undone by adding the record again via scratch_put_record().
 
-        In contrast to delete_record(), does not raise an exception if no
-        record with the given primary key exists.
+        Returns the number of records marked for deletion.
         """
         raise NotImplementedError
 
@@ -181,7 +183,7 @@ class StorageTable[PrimaryKey](abc.ABC):
         Merge scratch space.
 
         Merge records added to scratch space via scratch_put_record() or marked
-        for deletion via scratch_discard_record() so that these changes are
+        for deletion via scratch_discard_records() so that these changes are
         reflected in get_record() and get_records().
 
         This method is not async, as the switchover is meant to be fast.

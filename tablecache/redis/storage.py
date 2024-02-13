@@ -292,7 +292,8 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
                     records_spec):
                 yield decoded_record
 
-    async def _get_records_locked(self, records_spec):
+    async def _get_records_locked(
+            self, records_spec, filter_scratch_records=True):
         if records_spec.index_name == 'primary_key':
             upper_inclusive = False
             primary_key_score_intervals = records_spec.score_intervals
@@ -310,7 +311,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
                 storage.Interval(s, s) for s in primary_key_scores]
         records = self._get_records_by_primary_key_score(
             primary_key_score_intervals, records_spec.recheck_predicate,
-            upper_inclusive)
+            upper_inclusive, filter_scratch_records)
         async for encoded_record, decoded_record in records:
             yield encoded_record, decoded_record
 
@@ -376,9 +377,10 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         await self._put_encoded_record(record, encoded_record)
 
     @t.override
-    async def scratch_discard_record(self, primary_key: PrimaryKey) -> None:
+    async def scratch_discard_records(
+            self, records_spec: storage.StorageRecordsSpec) -> int:
         """
-        Mark a record to be deleted in scratch space.
+        Mark a set of records to be deleted in scratch space.
 
         Regular write operations are locked until scratch space is merged.
 
@@ -388,10 +390,17 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_space.is_not_merging)
-            return await self._scratch_discard_record_locked(primary_key)
+            return await self._scratch_discard_records_locked(records_spec)
 
-    async def _scratch_discard_record_locked(self, primary_key):
-        self._scratch_space.mark_primary_key_for_deletion(primary_key)
+    async def _scratch_discard_records_locked(self, records_spec):
+        records = self._get_records_locked(
+            records_spec, filter_scratch_records=False)
+        num_marked = 0
+        async for _, decoded_record in records:
+            self._scratch_space.mark_primary_key_for_deletion(
+                self._record_primary_key(decoded_record))
+            num_marked += 1
+        return num_marked
 
     @t.override
     def scratch_merge(self) -> None:

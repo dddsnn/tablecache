@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import functools as ft
 import unittest.mock as um
 
 from hamcrest import *
@@ -94,12 +95,21 @@ class ManuallyUnlockedScratchSpace(storage.ScratchSpace):
 
 
 class TestRedisTable:
+    @pytest.fixture
+    def tables(self):
+        return []
+
     @pytest.fixture(autouse=True)
     async def flush_db(self, conn):
         await conn.flushdb()
 
+    @pytest.fixture(autouse=True)
+    async def let_background_merges_finish(self, scratch_space_is_not_merging):
+        yield
+        await scratch_space_is_not_merging()
+
     @pytest.fixture
-    def make_table(self, conn):
+    def make_table(self, conn, tables):
         def factory(
                 table_name='table', primary_key_name='pk',
                 attribute_codecs=None, score_functions=None):
@@ -107,10 +117,12 @@ class TestRedisTable:
                 'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
             score_functions = score_functions or {
                 'primary_key': filter_kwarg(primary_key_name)}
-            return tcr.RedisTable(
+            table = tcr.RedisTable(
                 conn, table_name=table_name, primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs,
                 score_functions=score_functions)
+            tables.append(table)
+            return table
 
         return factory
 
@@ -118,10 +130,23 @@ class TestRedisTable:
     def table(self, make_table):
         return make_table()
 
-    async def scratch_space_is_clear(self, table):
-        async with table._scratch_condition:
-            await table._scratch_condition.wait_for(
-                table._scratch_space.is_clear)
+    @pytest.fixture
+    def scratch_space_is_in_condition(self, tables):
+        async def checker(condition_predicate_name):
+            for table in tables:
+                predicate = getattr(
+                    table._scratch_space, condition_predicate_name)
+                async with table._scratch_condition:
+                    await table._scratch_condition.wait_for(predicate)
+        return checker
+
+    @pytest.fixture
+    def scratch_space_is_not_merging(self, scratch_space_is_in_condition):
+        return ft.partial(scratch_space_is_in_condition, 'is_not_merging')
+
+    @pytest.fixture
+    def scratch_space_is_clear(self, scratch_space_is_in_condition):
+        return ft.partial(scratch_space_is_in_condition, 'is_clear')
 
     async def test_construction_raises_on_non_str_attribute_name(
             self, make_table):
@@ -770,7 +795,6 @@ class TestRedisTable:
             self, table):
         await table.scratch_put_record({'pk': 2, 's': 's2'})
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
 
     async def test_adding_to_scratch_space_handles_updates(self, table):
@@ -778,44 +802,138 @@ class TestRedisTable:
         await table.scratch_put_record({'pk': 1, 's': 's2'})
         assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
 
-    async def test_scratch_discard_record_ignores_nonexistent(self, table):
-        await table.scratch_discard_record(1)
-        table.scratch_merge()
-        await self.scratch_space_is_clear(table)
-
-    async def test_scratch_discard_record_doesnt_removed_immediately(
+    async def test_scratch_discard_records_doesnt_removed_immediately(
             self, table):
         await table.put_record({'pk': 2, 's': 's2'})
-        await table.scratch_discard_record(2)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
         assert_that(
             await table.get_record(2), has_entries(pk=2, s='s2'))
 
-    async def test_scratch_discard_record_removes_after_merge(self, table):
+    async def test_scratch_discard_records_removes_after_merge(self, table):
         await table.put_record({'pk': 2, 's': 's2'})
-        await table.scratch_discard_record(2)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         with pytest.raises(KeyError):
             await table.get_record(2)
 
     async def test_scratch_records_can_be_deleted(self, table):
         await table.scratch_put_record({'pk': 2, 's': 's2'})
-        await table.scratch_discard_record(2)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         with pytest.raises(KeyError):
             await table.get_record(2)
 
     async def test_scratch_records_can_be_deleted_and_added_again(self, table):
         await table.scratch_put_record({'pk': 2, 's': 's2'})
-        await table.scratch_discard_record(2)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
         await table.scratch_put_record({'pk': 2, 's': 's2'})
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_scratch_discard_records_with_multiple_intervals(
+            self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        await table.put_record({'pk': 60, 's': 's'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)]))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=-50), has_entries(pk=10), has_entries(pk=60)))
+
+    async def test_scratch_discard_records_uses_custom_score_function(
+            self, make_table):
+        def pk_minus_10(**kwargs):
+            return kwargs['pk'] - 10
+
+        table = make_table(
+            attribute_codecs={'pk': tcr.IntAsStringCodec()},
+            score_functions={'primary_key': pk_minus_10})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 10})
+        await table.put_record({'pk': 59})
+        await table.put_record({'pk': 60})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(0, 50)]))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=60)))
+
+    async def test_scratch_discard_records_uses_recheck_predicate(self, table):
+        def x_in_s(record):
+            return 'x' in record['s']
+        await table.put_record({'pk': 0, 's': 'aaa'})
+        await table.put_record({'pk': 1, 's': 'bxb'})
+        await table.put_record({'pk': 2, 's': 'cxc'})
+        await table.put_record({'pk': 3, 's': 'ddd'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf], x_in_s))
+        table.scratch_merge()
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=3)))
+
+    async def test_scratch_discard_records_with_non_primary_key_index(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': filter_kwarg('pk'),
+                'first_char': lambda **r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'haaa'})
+        await table.put_record({'pk': 3, 's': 'iaaa'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('d'), ord('i'))]))
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
+        table.scratch_merge()
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=3)))
+
+    async def test_scratch_discard_records_works_with_equal_primary_key_scores(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': lambda **r: r['pk'] % 2,
+                'first_char': lambda **r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'cyyy'})
+        await table.put_record({'pk': 2, 's': 'czzz'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('d'))]))
+        table.scratch_merge()
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [_inf_to_inf]))
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_scratch_discard_returns_number_of_records(self, table):
+        for i in range(4):
+            await table.put_record({'pk': i, 's': 's'})
+        num_records = await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 3)]))
+        assert num_records == 2
 
     async def test_scratch_space_add_handles_indexes(self, make_table):
         table = make_table(
@@ -830,7 +948,6 @@ class TestRedisTable:
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=1, s='dzzz')))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         records = table.get_records(
             tc.StorageRecordsSpec('first_char', [_inf_to_inf]))
         assert_that(
@@ -839,39 +956,41 @@ class TestRedisTable:
                 has_entries(pk=1, s='dzzz'), has_entries(pk=2, s='daaa')))
 
     async def test_scratch_space_deletes_delete_from_storage(
-            self, table, conn):
+            self, table, conn, scratch_space_is_clear):
         await table.put_record({'pk': 1, 's': 's1'})
         assert await conn.zcard('table:primary_key') == 1
-        await table.scratch_discard_record(1)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(1, 1.1)]))
         assert await conn.zcard('table:primary_key') == 1
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
+        await scratch_space_is_clear()
         assert await conn.zcard('table:primary_key') == 0
 
     async def test_scratch_space_updates_delete_overwritten_value(
-            self, table, conn):
+            self, table, conn, scratch_space_is_clear):
         await table.put_record({'pk': 1, 's': 's1'})
         assert await conn.zcard('table:primary_key') == 1
         await table.scratch_put_record({'pk': 1, 's': 's2'})
         assert await conn.zcard('table:primary_key') == 2
         assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
+        await scratch_space_is_clear()
         assert await conn.zcard('table:primary_key') == 1
         assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
 
     async def test_scratch_space_delete_handles_indexes(
-            self, make_table, conn):
+            self, make_table, conn, scratch_space_is_clear):
         table = make_table(
             score_functions={
                 'primary_key': filter_kwarg('pk'),
                 'first_char': lambda **r: ord(r['s'][0])})
         await table.put_record({'pk': 1, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
-        await table.scratch_discard_record(1)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(1, 1.1)]))
         assert await conn.zcard('table:first_char') == 1
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
+        await scratch_space_is_clear()
         assert await conn.zcard('table:first_char') == 0
 
     async def test_scratch_activity_blocks_regular_puts(self, table):
@@ -880,7 +999,6 @@ class TestRedisTable:
             await asyncio.wait_for(
                 table.put_record({'pk': 3, 's': 's3'}), 0.01)
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         await asyncio.wait_for(table.put_record({'pk': 3, 's': 's3'}), 0.01)
 
     async def test_scratch_activity_blocks_regular_single_deletes(self, table):
@@ -889,7 +1007,6 @@ class TestRedisTable:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(table.delete_record(1), 0.01)
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         await asyncio.wait_for(table.delete_record(1), 0.01)
 
     async def test_scratch_activity_blocks_regular_multiple_deletes(
@@ -901,7 +1018,6 @@ class TestRedisTable:
                 table.delete_records(
                     tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         await asyncio.wait_for(
             table.delete_records(
                 tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
@@ -918,7 +1034,6 @@ class TestRedisTable:
             await asyncio.wait_for(
                 table.scratch_put_record({'pk': 3, 's': 's3'}), 0.01)
         assert not scratch_space.is_not_merging()
-        await self.scratch_space_is_clear(table)
         scratch_space.update_not_merging()
         assert scratch_space.is_not_merging()
         await asyncio.wait_for(
@@ -933,12 +1048,13 @@ class TestRedisTable:
         scratch_space.update_not_merging()
         assert not scratch_space.is_not_merging()
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(table.scratch_discard_record(2), 0.01)
+            await asyncio.wait_for(table.scratch_discard_records(
+                tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
         assert not scratch_space.is_not_merging()
-        await self.scratch_space_is_clear(table)
         scratch_space.update_not_merging()
         assert scratch_space.is_not_merging()
-        await asyncio.wait_for(table.scratch_discard_record(2), 0.01)
+        await asyncio.wait_for(table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
 
     async def test_multiple_scratch_operations(self, table):
         await table.put_record({'pk': 1, 's': 's1'})
@@ -947,9 +1063,9 @@ class TestRedisTable:
         await table.scratch_put_record({'pk': 3, 's': 's3.2'})
         await table.scratch_put_record({'pk': 4, 's': 's4'})
         await table.scratch_put_record({'pk': 5, 's': 's5'})
-        await table.scratch_discard_record(1)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(1, 1.1)]))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         records = table.get_records(
             tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
@@ -959,8 +1075,8 @@ class TestRedisTable:
                 has_entries(pk=4), has_entries(pk=5)))
         await table.put_record({'pk': 1, 's': 's1'})
         await table.put_record({'pk': 3, 's': 's3'})
-        await table.scratch_discard_record(2)
-        await table.scratch_discard_record(4)
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(2, 2.1), tc.Interval(4, 4.1)]))
         await table.scratch_put_record({'pk': 6, 's': 's6'})
         records = table.get_records(
             tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
@@ -971,7 +1087,6 @@ class TestRedisTable:
                 has_entries(pk=3, s='s3'), has_entries(pk=4),
                 has_entries(pk=5)))
         table.scratch_merge()
-        await self.scratch_space_is_clear(table)
         records = table.get_records(
             tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
         assert_that(
