@@ -881,6 +881,15 @@ class TestCachedTable:
         await adjust_task
         await load_wait_task
 
+    async def test_adjust_refreshes_first(self, table, db_access):
+        db_access.records = [{'pk': i, 's': f'a{i}'} for i in range(2)]
+        await table.load('primary_key', 0)
+        db_access.records = [{'pk': i, 's': f'b{i}'} for i in range(4)]
+        await table.invalidate_record(0)
+        await table.adjust('primary_key', 1)
+        assert_that(
+            await table.get_record(0), has_entries(s='b0', source='db'))
+
     async def test_get_records_by_other_index(
             self, make_tables, db_access):
         table, _ = make_tables(MultiIndexes())

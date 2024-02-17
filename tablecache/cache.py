@@ -142,6 +142,7 @@ class CachedTable[PrimaryKey]:
     async def _adjust_in_scratch(
             self, index_name, *index_args, **index_kwargs):
         async with self._scratch_space_lock:
+            await self._refresh_invalid_locked()
             return await self._adjust(
                 True, index_name, *index_args, **index_kwargs)
 
@@ -203,7 +204,8 @@ class CachedTable[PrimaryKey]:
         significant amount of extra memory with large adjustments.
 
         Only one adjustment or refresh (via refresh_invalid()) can be happening
-        at once. Other ones are locked until previous ones complete.
+        at once. Other ones are locked until previous ones complete. Before the
+        adjustment, any invalid records are refreshed.
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
@@ -391,13 +393,13 @@ class CachedTable[PrimaryKey]:
         if not self._invalid_record_repo:
             return
         async with self._scratch_space_lock:
-            # Checking again avoids a second refresh in case one just happened
-            # while we were waiting on the lock.
-            if not self._invalid_record_repo:
-                return
             await self._refresh_invalid_locked()
 
     async def _refresh_invalid_locked(self):
+        # Checking again avoids a second refresh in case one just happened
+        # while we were waiting on the lock.
+        if not self._invalid_record_repo:
+            return
         _logger.info(
             f'Refreshing {len(self._invalid_record_repo)} invalid keys.')
         for key in self._invalid_record_repo.invalid_primary_keys:
