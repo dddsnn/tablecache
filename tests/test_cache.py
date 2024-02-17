@@ -1029,6 +1029,35 @@ class TestCachedTable:
         assert_that(
             await table.get_record(0), has_entries(s='y', source='storage'))
 
+    async def test_refresh_invalid_doesnt_block_gets_for_valid_keys(
+            self, make_tables, db_access):
+        table, storage_table = make_tables()
+        db_access.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key')
+        db_access.records = [{'pk': i} for i in range(3)]
+        await table.invalidate_record(3)
+        storage_table._enable_merge_wait()
+        exceptions = []
+        task_queue = queue.Queue()
+
+        async def assert_pre_merge():
+            refresh_task = task_queue.get()
+            storage_table._merge_wait_start()
+            try:
+                assert_that(await table.get_record(2), has_entries(pk=2))
+            except Exception as e:
+                exceptions.append(e)
+            assert not refresh_task.done()
+            storage_table._merge_continue()
+        t = threading.Thread(target=asyncio.run, args=(assert_pre_merge(),))
+        t.start()
+        refresh_task = asyncio.create_task(table.refresh_invalid())
+        task_queue.put(refresh_task)
+        await refresh_task
+        t.join()
+        for e in exceptions:
+            raise e
+
 
 class TestInvalidRecordRepository:
     @pytest.fixture

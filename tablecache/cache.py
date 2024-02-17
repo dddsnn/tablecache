@@ -88,6 +88,8 @@ class CachedTable[PrimaryKey]:
         self._primary_key_name = primary_key_name
         self._invalid_record_repo = InvalidRecordRepository(indexes)
         self._loaded_event = asyncio.Event()
+        self._scratch_space_lock = asyncio.Lock()
+        self._invalid_records_lock = asyncio.Lock()
 
     async def loaded(self):
         """
@@ -120,8 +122,8 @@ class CachedTable[PrimaryKey]:
             f'Clearing and loading {self._indexes} of table '
             f'{self._storage_table}.')
         await self._storage_table.clear()
-        num_deleted, num_loaded = await self._adjust(
-            False, index_name, *index_args, **index_kwargs)
+        num_deleted, num_loaded = await self._adjust_plain(
+            index_name, *index_args, **index_kwargs)
         self._loaded_event.set()
         if num_deleted:
             _logger.warning(
@@ -129,6 +131,17 @@ class CachedTable[PrimaryKey]:
                 'clearing the table (this is likely a benign defect in the '
                 'Indexes implementation).')
         _logger.info(f'Loaded {num_loaded} records.')
+
+    async def _adjust_plain(
+            self, index_name, *index_args, **index_kwargs):
+        return await self._adjust(
+            False, index_name, *index_args, **index_kwargs)
+
+    async def _adjust_in_scratch(
+            self, index_name, *index_args, **index_kwargs):
+        async with self._scratch_space_lock:
+            return await self._adjust(
+                True, index_name, *index_args, **index_kwargs)
 
     async def _adjust(
             self, use_scratch, index_name, *index_args, **index_kwargs):
@@ -183,8 +196,8 @@ class CachedTable[PrimaryKey]:
         Raises a ValueError if the specified index doesn't support adjusting.
         """
         await self.loaded()
-        num_deleted, num_loaded = await self._adjust(
-            True, index_name, *index_args, **index_kwargs)
+        num_deleted, num_loaded = await self._adjust_in_scratch(
+            index_name, *index_args, **index_kwargs)
         if num_deleted or num_loaded:
             _logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
@@ -203,16 +216,17 @@ class CachedTable[PrimaryKey]:
         Raises a KeyError if the key doesn't exist.
         """
         await self.loaded()
-        if self._invalid_record_repo.primary_key_is_invalid(primary_key):
-            await self.refresh_invalid()
-        try:
-            return await self._storage_table.get_record(primary_key)
-        except KeyError:
-            if self._indexes.covers('primary_key', primary_key):
-                raise
-            db_records_spec = self._indexes.db_records_spec(
-                'primary_key', primary_key)
-            return await self._db_access.get_record(db_records_spec)
+        async with self._invalid_records_lock:
+            if self._invalid_record_repo.primary_key_is_invalid(primary_key):
+                await self.refresh_invalid()
+            try:
+                return await self._storage_table.get_record(primary_key)
+            except KeyError:
+                if self._indexes.covers('primary_key', primary_key):
+                    raise
+                db_records_spec = self._indexes.db_records_spec(
+                    'primary_key', primary_key)
+                return await self._db_access.get_record(db_records_spec)
 
     async def get_records(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -243,20 +257,21 @@ class CachedTable[PrimaryKey]:
             raise ValueError(
                 f'Indexes don\'t support coverage check on {index_name}.'
             ) from e
-        if get_from_storage:
-            if len(self._invalid_record_repo) == 0:
-                records = self._storage_table.get_records(
-                    self._indexes.storage_records_spec(
-                        index_name, *index_args, **index_kwargs))
+        async with self._invalid_records_lock:
+            if get_from_storage:
+                if not self._invalid_record_repo:
+                    records = self._storage_table.get_records(
+                        self._indexes.storage_records_spec(
+                            index_name, *index_args, **index_kwargs))
+                else:
+                    records = await self._check_and_get_records_from_storage(
+                        index_name, *index_args, **index_kwargs)
             else:
-                records = await self._check_and_get_records_from_storage(
+                db_records_spec = self._indexes.db_records_spec(
                     index_name, *index_args, **index_kwargs)
-        else:
-            db_records_spec = self._indexes.db_records_spec(
-                index_name, *index_args, **index_kwargs)
-            records = self._db_access.get_records(db_records_spec)
-        async for record in records:
-            yield record
+                records = self._db_access.get_records(db_records_spec)
+            async for record in records:
+                yield record
 
     async def _check_and_get_records_from_storage(
             self, index_name, *index_args, **index_kwargs):
@@ -329,8 +344,9 @@ class CachedTable[PrimaryKey]:
         await self.loaded()
         new_scores = new_scores or {}
         try:
-            await self._storage_table.get_record(primary_key)
-            self._invalid_record_repo.flag_invalid(primary_key, new_scores)
+            async with self._invalid_records_lock, self._scratch_space_lock:
+                await self._storage_table.get_record(primary_key)
+                self._invalid_record_repo.flag_invalid(primary_key, new_scores)
         except KeyError:
             await self._invalidate_add_new(primary_key)
 
@@ -347,6 +363,12 @@ class CachedTable[PrimaryKey]:
                 'which doesn\'t exist.')
 
     async def refresh_invalid(self) -> None:
+        if not self._invalid_record_repo:
+            return
+        async with self._scratch_space_lock:
+            await self._refresh_invalid_locked()
+
+    async def _refresh_invalid_locked(self):
         _logger.info(
             f'Refreshing {len(self._invalid_record_repo)} invalid keys.')
         for key in self._invalid_record_repo.invalid_primary_keys:
