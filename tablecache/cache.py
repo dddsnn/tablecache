@@ -366,6 +366,10 @@ class CachedTable[PrimaryKey]:
         if not self._invalid_record_repo:
             return
         async with self._scratch_space_lock:
+            # Checking again avoids a second refresh in case one just happened
+            # while we were waiting on the lock.
+            if not self._invalid_record_repo:
+                return
             await self._refresh_invalid_locked()
 
     async def _refresh_invalid_locked(self):
