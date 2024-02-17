@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import asyncio
 import logging
 import numbers
 import typing as t
@@ -49,7 +50,8 @@ class CachedTable[PrimaryKey]:
     Serves single records by their primary key, or sets of records that can be
     specified as arguments to an Indexes instance. Transparently serves them
     from fast storage if available, or from the DB otherwise. The cache has to
-    be loaded with load() to add the desired subset to storage.
+    be loaded with load() to add the desired records to storage. Read access is
+    blocked until this completes.
 
     The DB state is not reflected automatically. If a record in the DB changes
     (or is deleted, or was newly added), invalidate_record() needs to be called
@@ -85,7 +87,16 @@ class CachedTable[PrimaryKey]:
         self._storage_table = storage_table
         self._primary_key_name = primary_key_name
         self._invalid_record_repo = InvalidRecordRepository(indexes)
-        self.loaded = False
+        self._loaded_event = asyncio.Event()
+
+    async def loaded(self):
+        """
+        Wait until the table is loaded.
+
+        Blocks until the initial load completes. Once this returns, read access
+        becomes enabled. This can be used e.g. in a readiness check.
+        """
+        await self._loaded_event.wait()
 
     async def load(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -102,7 +113,7 @@ class CachedTable[PrimaryKey]:
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
-        if self.loaded:
+        if self._loaded_event.is_set():
             raise ValueError(
                 'Already loaded. Use adjust() to change cached records.')
         _logger.info(
@@ -111,7 +122,7 @@ class CachedTable[PrimaryKey]:
         await self._storage_table.clear()
         num_deleted, num_loaded = await self._adjust(
             False, index_name, *index_args, **index_kwargs)
-        self.loaded = True
+        self._loaded_event.set()
         if num_deleted:
             _logger.warning(
                 f'Deleted {num_deleted} records during loading, after '
@@ -171,6 +182,7 @@ class CachedTable[PrimaryKey]:
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
+        await self.loaded()
         num_deleted, num_loaded = await self._adjust(
             True, index_name, *index_args, **index_kwargs)
         if num_deleted or num_loaded:
@@ -190,6 +202,7 @@ class CachedTable[PrimaryKey]:
 
         Raises a KeyError if the key doesn't exist.
         """
+        await self.loaded()
         if self._invalid_record_repo.primary_key_is_invalid(primary_key):
             await self._refresh_invalid()
         try:
@@ -222,6 +235,7 @@ class CachedTable[PrimaryKey]:
         implies that querying a set of records that isn't covered (even if just
         by a little bit) is expensive.
         """
+        await self.loaded()
         try:
             get_from_storage = self._indexes.covers(
                 index_name, *index_args, **index_kwargs)
@@ -312,6 +326,7 @@ class CachedTable[PrimaryKey]:
         Implementation note: updated and deleted records aren't observed for
         the Indexes again, only records that were newly added.
         """
+        await self.loaded()
         new_scores = new_scores or {}
         try:
             await self._storage_table.get_record(primary_key)

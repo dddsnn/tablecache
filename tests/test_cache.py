@@ -362,11 +362,14 @@ class TestCachedTable:
         table, storage_table = make_tables()
         db_access.records = [{'pk': 1, 'k': 'v1'}]
         storage_table.records = {2: {'pk': 2, 'k': 'v2'}}
-        assert_that(await table.get_record(2), has_entries(k='v2'))
+        assert_that(await storage_table.get_record(2), has_entries(k='v2'))
         await table.load('primary_key')
         assert_that(await table.get_record(1), has_entries(k='v1'))
+        assert_that(await storage_table.get_record(1), has_entries(k='v1'))
         with pytest.raises(KeyError):
             await table.get_record(2)
+        with pytest.raises(KeyError):
+            await storage_table.get_record(2)
 
     async def test_load_adjusts_indexes(self, table, db_access, indexes):
         mock = um.Mock()
@@ -564,6 +567,29 @@ class TestCachedTable:
             contains_inanyorder(
                 has_entries(pk=0), has_entries(pk=2)))
 
+    async def test_get_record_blocks_while_not_loaded(self, table, db_access):
+        db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
+        get_task = asyncio.create_task(table.get_record(1))
+        load_wait_task = asyncio.create_task(table.loaded())
+        await asyncio.sleep(0.001)
+        assert not get_task.done()
+        assert not load_wait_task.done()
+        await table.load('primary_key')
+        await get_task
+        await load_wait_task
+
+    async def test_get_records_blocks_while_not_loaded(self, table, db_access):
+        db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
+        get_task = asyncio.create_task(
+            collect_async_iter(table.get_records('primary_key')))
+        load_wait_task = asyncio.create_task(table.loaded())
+        await asyncio.sleep(0.001)
+        assert not get_task.done()
+        assert not load_wait_task.done()
+        await table.load('primary_key')
+        await get_task
+        await load_wait_task
+
     async def test_invalidate_record_observes_newly_added(
             self, table, db_access, indexes):
         db_access.records = [{'pk': 1, 'k': 'a1'}]
@@ -582,6 +608,18 @@ class TestCachedTable:
         with pytest.raises(KeyError):
             await table.get_record(2)
         assert_that(await table.get_record(1), has_entries(pk=1, k='a1'))
+
+    async def test_invalidate_record_blocks_while_not_loaded(
+            self, table, db_access):
+        db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
+        invalidate_task = asyncio.create_task(table.invalidate_record(1))
+        load_wait_task = asyncio.create_task(table.loaded())
+        await asyncio.sleep(0.001)
+        assert not invalidate_task.done()
+        assert not load_wait_task.done()
+        await table.load('primary_key')
+        await invalidate_task
+        await load_wait_task
 
     async def test_adjust_discards_old_data(self, table, db_access):
         db_access.records = [{'pk': i} for i in range(4)]
@@ -830,6 +868,18 @@ class TestCachedTable:
                 table.get_records('primary_key', *range(4))),
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
+
+    async def test_adjust_blocks_while_not_loaded(self, table, db_access):
+        db_access.records = [{'pk': i} for i in range(4)]
+        adjust_task = asyncio.create_task(
+            table.adjust('primary_key', *range(2, 4)))
+        load_wait_task = asyncio.create_task(table.loaded())
+        await asyncio.sleep(0.001)
+        assert not adjust_task.done()
+        assert not load_wait_task.done()
+        await table.load('primary_key', *range(2))
+        await adjust_task
+        await load_wait_task
 
     async def test_get_records_by_other_index(
             self, make_tables, db_access):
