@@ -363,6 +363,15 @@ class CachedTable[PrimaryKey]:
         """
         await self.loaded()
         new_scores = new_scores or {}
+        async with self._scratch_space_lock:
+            # We need both locks since neither reads nor scratch operations may
+            # happen concurrently. We need the _invalid_records_lock first, or
+            # they may be a deadlock. But the _scratch_space_lock may take a
+            # long time to acquire, and during that time we're blocking all
+            # reads via the _invalid_records_lock. So make sure the
+            # _scratch_space_lock is available right now to give us the best
+            # chance of not blocking a read.
+            pass
         async with self._invalid_records_lock, self._scratch_space_lock:
             try:
                 # We're only fetching here to make sure the primary key exists
