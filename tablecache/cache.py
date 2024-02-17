@@ -329,12 +329,15 @@ class CachedTable[PrimaryKey]:
         Mark a single record in storage as invalid.
 
         The record with the given primary key is marked as not existing in
-        storage with the same data as in DB. This could be either because the
-        record was deleted from or updated in the DB, or newly added
-        altogether. Data belonging to an invalidated key is guaranteed to be
-        fetched from the DB again before being served to a client. Keys that
-        are no longer found in the DB are deleted. Keys that aren't in cache at
-        all are loaded.
+        storage with the same data as in DB. This could either be because the
+        record was deleted from the DB, or because it was updated in the DB.
+        Data belonging to an invalidated key is guaranteed to be fetched from
+        the DB again before being served to a client. Keys that are no longer
+        found in the DB are deleted.
+
+        If the given primary key doesn't exist in storage, a KeyError is
+        raised. This method can't be used to load new records, use adjust() for
+        that.
 
         Internally, the score of the record for each of the relevant indexes is
         required to mark it invalid for queries for a set of records against
@@ -345,7 +348,7 @@ class CachedTable[PrimaryKey]:
         score must be provided.
 
         The implementation will trust that these are correct, and supplying
-        wrong ones will lead to to record not being properly invalidated.
+        wrong ones will lead to the record not being properly invalidated.
         Scores needn't be specified, however when they're not for any given
         index, that entire index is marked dirty, and any query against that
         index will trigger a full refresh. One exception to this is the
@@ -356,28 +359,21 @@ class CachedTable[PrimaryKey]:
         it may occasionally take a while.
 
         Implementation note: updated and deleted records aren't observed for
-        the Indexes again, only records that were newly added.
+        the indexes again.
         """
         await self.loaded()
         new_scores = new_scores or {}
-        try:
-            async with self._invalid_records_lock, self._scratch_space_lock:
+        async with self._invalid_records_lock, self._scratch_space_lock:
+            try:
+                # We're only fetching here to make sure the primary key exists
+                # in storage. This is important since marking nonexistent ones
+                # as invalid will lead to them being loaded on the next
+                # refresh, even if they don't belong. This may get the indexes
+                # confused.
                 await self._storage_table.get_record(primary_key)
-                self._invalid_record_repo.flag_invalid(primary_key, new_scores)
-        except KeyError:
-            await self._invalidate_add_new(primary_key)
-
-    async def _invalidate_add_new(self, primary_key):
-        try:
-            db_records_spec = self._indexes.db_records_spec(
-                'primary_key', primary_key)
-            record = await self._db_access.get_record(db_records_spec)
-            await self._storage_table.put_record(record)
-            self._indexes.observe(record)
-        except KeyError:
-            _logger.debug(
-                f'Ignoring attempt to invalidate primary key {primary_key} '
-                'which doesn\'t exist.')
+            except KeyError:
+                raise
+            self._invalid_record_repo.flag_invalid(primary_key, new_scores)
 
     async def refresh_invalid(self) -> None:
         """

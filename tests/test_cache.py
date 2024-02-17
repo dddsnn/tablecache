@@ -483,25 +483,6 @@ class TestCachedTable:
                 table.get_records('primary_key', 1)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
-    async def test_get_record_loads_new_invalid_keys(self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.load('primary_key')
-        db_access.records = [{'pk': 1, 'k': 'a1'}, {'pk': 2, 'k': 'a2'}]
-        await table.invalidate_record(2)
-        assert_that(await table.get_record(2), has_entries(pk=2, k='a2'))
-
-    async def test_get_records_loads_new_invalid_keys(
-            self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.load('primary_key')
-        db_access.records = [{'pk': 1, 'k': 'a1'}, {'pk': 2, 'k': 'a2'}]
-        await table.invalidate_record(2)
-        assert_that(
-            await collect_async_iter(
-                table.get_records('primary_key', 1, 2)),
-            contains_inanyorder(
-                has_entries(pk=1, k='a1'), has_entries(pk=2, k='a2')))
-
     async def test_get_record_only_refreshes_once(self, table, db_access):
         db_access.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
@@ -590,24 +571,12 @@ class TestCachedTable:
         await get_task
         await load_wait_task
 
-    async def test_invalidate_record_observes_newly_added(
+    async def test_invalidate_record_raises_on_nonexistent(
             self, table, db_access, indexes):
         db_access.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key')
-        new_record = {'pk': 2, 'k': 'a2'}
-        db_access.records = [{'pk': 1, 'k': 'a1'}, new_record]
-        await table.invalidate_record(2)
-        indexes.observe_mock.assert_called_with(
-            new_record | {'source': 'db'})
-
-    async def test_invalidate_record_ignores_nonexistent_keys(
-            self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.load('primary_key')
-        await table.invalidate_record(2)
         with pytest.raises(KeyError):
-            await table.get_record(2)
-        assert_that(await table.get_record(1), has_entries(pk=1, k='a1'))
+            await table.invalidate_record(2)
 
     async def test_invalidate_record_blocks_while_not_loaded(
             self, table, db_access):
