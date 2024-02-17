@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -110,35 +110,48 @@ class CachedTable[PrimaryKey]:
             f'{self._storage_table}.')
         await self._storage_table.clear()
         num_deleted, num_loaded = await self._adjust(
-            index_name, *index_args, **index_kwargs)
+            False, index_name, *index_args, **index_kwargs)
         self.loaded = True
         if num_deleted:
             _logger.warning(
-                f'Deleted {num_deleted} records during loaded, after clearing '
-                'the table (this is likely a benign defect in the Indexes '
-                'implementation).')
+                f'Deleted {num_deleted} records during loading, after '
+                'clearing the table (this is likely a benign defect in the '
+                'Indexes implementation).')
         _logger.info(f'Loaded {num_loaded} records.')
 
-    async def _adjust(self, index_name, *index_args, **index_kwargs):
+    async def _adjust(
+            self, use_scratch, index_name, *index_args, **index_kwargs):
         try:
-            adjustment = self._indexes.adjust(
+            adjustment = self._indexes.prepare_adjustment(
                 index_name, *index_args, **index_kwargs)
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support adjusting by {index_name}.') from e
-        num_deleted, num_loaded = 0, 0
+        if use_scratch:
+            put = self._storage_table.scratch_put_record
+            delete = self._storage_table.scratch_discard_records
+        else:
+            put = self._storage_table.put_record
+            delete = self._storage_table.delete_records
+        num_deleted, records = await self._apply_adjustment(
+            adjustment, put, delete)
+        if use_scratch:
+            self._storage_table.scratch_merge()
+        self._indexes.commit_adjustment(adjustment)
+        for record in records:
+            self._indexes.observe(record)
+        return num_deleted, len(records)
+
+    async def _apply_adjustment(self, adjustment, put, delete):
+        num_deleted, new_records = 0, []
         if adjustment.expire_spec:
-            num_deleted = await self._storage_table.delete_records(
-                adjustment.expire_spec)
+            num_deleted = await delete(adjustment.expire_spec)
         if adjustment.new_spec:
             async for record in self._db_access.get_records(
                     adjustment.new_spec):
-                # PERF can we save time by guaranteeing here that records don't
-                # exist yet?++++++++++++++++++++
-                await self._storage_table.put_record(record)
-                self._indexes.observe(record)
-                num_loaded += 1
-        return num_deleted, num_loaded
+                await put(record)
+                new_records.append(record)
+        return num_deleted, new_records
 
     async def adjust(
             self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
@@ -159,7 +172,7 @@ class CachedTable[PrimaryKey]:
         Raises a ValueError if the specified index doesn't support adjusting.
         """
         num_deleted, num_loaded = await self._adjust(
-            index_name, *index_args, **index_kwargs)
+            True, index_name, *index_args, **index_kwargs)
         if num_deleted or num_loaded:
             _logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')

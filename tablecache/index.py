@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -144,7 +144,7 @@ class Indexes[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def adjust(
+    def prepare_adjustment(
             self, index_name: str, *args: t.Any, **kwargs: t.Any
     ) -> Adjustment:
         """
@@ -164,6 +164,10 @@ class Indexes[PrimaryKey](abc.ABC):
         Raises an UnsupportedIndexOperation if adjusting by the given index is
         not supported.
         """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def commit_adjustment(self, adjustment: Adjustment) -> None:
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -197,6 +201,9 @@ class Indexes[PrimaryKey](abc.ABC):
 
 
 class PrimaryKeyIndexes(Indexes[numbers.Real]):
+    @dc.dataclass(frozen=True)
+    class Adjustment(Adjustment):
+        primary_keys: set[numbers.Real]
 
     def __init__(
             self, primary_key_name: str, query_all_string: str,
@@ -207,6 +214,7 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
         self._covers_all = False
         self._primary_keys = set()
 
+    @t.override
     @property
     def score_functions(self) -> t.Mapping[str, tp.ScoreFunction]:
         return {'primary_key': self._extract_primary_key}
@@ -214,10 +222,12 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
     def _extract_primary_key(self, **kwargs):
         return kwargs[self._primary_key_name]
 
+    @t.override
     def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
         return self.score_functions['primary_key'](
             **{self._primary_key_name: primary_key})
 
+    @t.override
     def storage_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
     ) -> storage.StorageRecordsSpec:
@@ -228,6 +238,7 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
             for primary_key in primary_keys]
         return storage.StorageRecordsSpec(index_name, intervals)
 
+    @t.override
     def db_records_spec(
             self, index_name: str, *primary_keys: numbers.Real
     ) -> db.DbRecordsSpec:
@@ -238,30 +249,47 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
         return db.QueryArgsDbRecordsSpec(
             self._query_some_string, (primary_keys,))
 
-    def adjust(
+    @t.override
+    def prepare_adjustment(
             self, index_name: str, *primary_keys: numbers.Real) -> Adjustment:
         if index_name != 'primary_key':
-            raise ValueError('Only the primary_key index is supported.')
+            raise UnsupportedIndexOperation(
+                'Only the primary_key index is supported.')
         if self._covers_all:
             if not primary_keys:
-                return Adjustment(None, None)
-            self._covers_all = False
-            self._primary_keys = set(primary_keys)
-            return Adjustment(
-                storage.StorageRecordsSpec(
+                expire_spec, new_spec = None, None
+            else:
+                expire_spec = storage.StorageRecordsSpec(
                     'primary_key',
-                    [storage.Interval(float('-inf'), float('inf'))]),
-                self.db_records_spec('primary_key', *primary_keys))
-        if not primary_keys:
-            self._covers_all = True
-            return Adjustment(None, self.db_records_spec('primary_key'))
-        self._primary_keys = set(primary_keys)
-        return Adjustment(
-            storage.StorageRecordsSpec(
-                'primary_key',
-                [storage.Interval(float('-inf'), float('inf'))]),
-            self.db_records_spec('primary_key', *primary_keys))
+                    [storage.Interval(float('-inf'), float('inf'))])
+                new_spec = self.db_records_spec('primary_key', *primary_keys)
+        else:
+            if not primary_keys:
+                expire_spec = None
+                new_spec = self.db_records_spec('primary_key')
+            else:
+                expire_spec = storage.StorageRecordsSpec(
+                    'primary_key',
+                    [storage.Interval(float('-inf'), float('inf'))])
+                new_spec = self.db_records_spec('primary_key', *primary_keys)
+        return self.Adjustment(expire_spec, new_spec, set(primary_keys))
 
+    @t.override
+    def commit_adjustment(
+            self, adjustment: 'PrimaryKeyIndexes.Adjustment') -> None:
+        if self._covers_all:
+            if not adjustment.primary_keys:
+                return
+            else:
+                self._covers_all = False
+                self._primary_keys = adjustment.primary_keys
+        else:
+            if not adjustment.primary_keys:
+                self._covers_all = True
+            else:
+                self._primary_keys = adjustment.primary_keys
+
+    @t.override
     def covers(self, index_name: str, *primary_keys: numbers.Real) -> bool:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
@@ -271,5 +299,6 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
             return False
         return all(pk in self._primary_keys for pk in primary_keys)
 
+    @t.override
     def observe(self, record: tp.Record) -> None:
         self._primary_keys.add(self._extract_primary_key(**record))

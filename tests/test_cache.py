@@ -15,8 +15,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import asyncio
+import dataclasses as dc
 import numbers
+import queue
 import unittest.mock as um
+import threading
 
 from hamcrest import *
 import pytest
@@ -34,12 +38,20 @@ async def collect_async_iter(i):
 class SpyIndexes(tc.PrimaryKeyIndexes):
     def __init__(self):
         super().__init__('pk', 'query_all_pks', 'query_some_pks')
-        self.adjust_mock = um.Mock()
+        self.prepare_adjustment_mock = um.Mock(return_values=[])
+        self.commit_adjustment_mock = um.Mock()
         self.observe_mock = um.Mock()
 
-    def adjust(self, *args, **kwargs):
-        result = super().adjust(*args, **kwargs)
-        self.adjust_mock(*args, **kwargs)
+    def prepare_adjustment(self, *args, **kwargs):
+        result = super().prepare_adjustment(*args, **kwargs)
+        self.prepare_adjustment_mock(*args, **kwargs)
+        self.prepare_adjustment_mock.return_values.append(result)
+        self.prepare_adjustment_mock.return_value = result
+        return result
+
+    def commit_adjustment(self, *args, **kwargs):
+        result = super().commit_adjustment(*args, **kwargs)
+        self.commit_adjustment_mock(*args, **kwargs)
         return result
 
     def observe(self, *args, **kwargs):
@@ -49,9 +61,14 @@ class SpyIndexes(tc.PrimaryKeyIndexes):
 
 
 class MultiIndexes(tc.Indexes[int]):
+    @dc.dataclass(frozen=True)
+    class Adjustment(tc.Adjustment):
+        primary_keys: set[numbers.Real]
+        range: tuple[numbers.Real, numbers.Real]
+
     def __init__(self):
         self._contains_all = False
-        self._pks = set()
+        self._primary_keys = set()
         self._range = None
 
     @property
@@ -87,36 +104,38 @@ class MultiIndexes(tc.Indexes[int]):
                 'query_x_range', (kwargs['min'], kwargs['max']))
         raise NotImplementedError
 
-    def adjust(self, index_name, *args, **kwargs):
+    def prepare_adjustment(self, index_name, *args, **kwargs):
+        expire_spec = tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(float('-inf'), float('inf'))])
         if index_name == 'primary_key':
-            self._range = None
-            if args:
-                self._contains_all = False
-                self._primary_keys = set(args)
-            else:
-                self._contains_all = True
-                self._primary_keys = set()
-            return tc.Adjustment(
-                tc.StorageRecordsSpec(
-                    'primary_key', [tc.Interval(float('-inf'), float('inf'))]),
-                self.db_records_spec('primary_key', *args))
-        if index_name == 'x_range':
+            new_spec = self.db_records_spec('primary_key', *args)
+            primary_keys = set(args)
+            range_ = None
+        elif index_name == 'x_range':
+            new_spec = self.db_records_spec('x_range', **kwargs)
+            primary_keys = None
+            range_ = (kwargs['min'], kwargs['max'])
+        else:
+            raise NotImplementedError
+        return self.Adjustment(expire_spec, new_spec, primary_keys, range_)
+
+    def commit_adjustment(self, adjustment):
+        if adjustment.primary_keys is not None:
+            assert adjustment.range is None
+            self._contains_all = adjustment.primary_keys == set()
+            self._primary_keys = adjustment.primary_keys
+        else:
+            assert adjustment.range is not None
             self._contains_all = False
             self._primary_keys = set()
-            self._range = (kwargs['min'], kwargs['max'])
-            return tc.Adjustment(
-                tc.StorageRecordsSpec(
-                    'primary_key', [tc.Interval(float('-inf'), float('inf'))]),
-                self.db_records_spec('x_range', **kwargs))
-        raise NotImplementedError
+        self._range = adjustment.range
 
     def covers(self, index_name, *args, **kwargs):
+        if self._contains_all:
+            return True
         if index_name == 'primary_key':
-            return (self._contains_all or
-                    (args and all(pk in self._pks for pk in args)))
+            return args and all(pk in self._primary_keys for pk in args)
         if index_name == 'x_range':
-            if self._contains_all:
-                return True
             if self._range is None:
                 return False
             loaded_ge, loaded_lt = self._range
@@ -125,7 +144,7 @@ class MultiIndexes(tc.Indexes[int]):
         raise NotImplementedError
 
     def observe(self, record):
-        self._pks.add(record['pk'])
+        self._primary_keys.add(record['pk'])
 
 
 class MockDbAccess(tc.DbAccess):
@@ -168,6 +187,21 @@ class MockStorageTable(tc.StorageTable):
         self._primary_key_name = primary_key_name
         self.records = {}
         self._indexes = {}
+        self._scratch_records = {}
+        self._scratch_pks_delete = set()
+        self._num_scratch_ops = 0
+        self._wait_merge = False
+        self._merge_started_event = threading.Event()
+        self._merge_continue_event = threading.Event()
+
+    def _enable_merge_wait(self):
+        self._wait_merge = True
+
+    def _merge_wait_start(self):
+        self._merge_started_event.wait()
+
+    def _merge_continue(self):
+        self._merge_continue_event.set()
 
     async def clear(self):
         self.records = {}
@@ -215,13 +249,33 @@ class MockStorageTable(tc.StorageTable):
         return len(delete)
 
     async def scratch_put_record(self, record):
-        raise NotImplementedError
+        self._num_scratch_ops += 1
+        primary_key = record[self._primary_key_name]
+        self._scratch_records[primary_key] = self._make_record(record)
+        self._scratch_pks_delete.discard(primary_key)
 
     async def scratch_discard_records(self, records_spec):
-        raise NotImplementedError
+        self._num_scratch_ops += 1
+        num_discarded = 0
+        async for record in self.get_records(records_spec):
+            primary_key = record[self._primary_key_name]
+            self._scratch_records.pop(primary_key, None)
+            self._scratch_pks_delete.add(primary_key)
+            num_discarded += 1
+        return num_discarded
 
     def scratch_merge(self):
-        raise NotImplementedError
+        if self._wait_merge:
+            self._merge_started_event.set()
+        if self._wait_merge:
+            self._merge_continue_event.wait()
+        for primary_key in self._scratch_pks_delete:
+            self.records.pop(primary_key, None)
+        self.records.update(self._scratch_records)
+        self._scratch_pks_delete.clear()
+        self._scratch_records.clear()
+        self._merge_started_event.clear()
+        self._merge_continue_event.clear()
 
 
 class TestCachedTable:
@@ -315,17 +369,37 @@ class TestCachedTable:
             await table.get_record(2)
 
     async def test_load_adjusts_indexes(self, table, db_access, indexes):
+        mock = um.Mock()
+        mock.prepare = indexes.prepare_adjustment_mock
+        mock.commit = indexes.commit_adjustment_mock
         db_access.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 2, 4)
-        indexes.adjust_mock.assert_called_once_with('primary_key', 2, 4)
+        assert mock.mock_calls == [
+            um.call.prepare('primary_key', 2, 4),
+            um.call.commit(indexes.prepare_adjustment_mock.return_value)]
+
+    async def test_load_calls_observes_after_commit_adjustment(
+            self, table, db_access, indexes):
+        mock = um.Mock()
+        mock.prepare = indexes.prepare_adjustment_mock
+        mock.commit = indexes.commit_adjustment_mock
+        mock.observe = indexes.observe_mock
+        db_access.records = [{'pk': i} for i in range(6)]
+        await table.load('primary_key', 2, 4)
+        assert mock.mock_calls == [
+            um.call.prepare('primary_key', 2, 4),
+            um.call.commit(indexes.prepare_adjustment_mock.return_value),
+            um.call.observe(um.ANY), um.call.observe(um.ANY)]
 
     async def test_load_raises_if_index_doesnt_support_adjusting(
             self, make_tables, db_access):
         class Indexes(MultiIndexes):
-            def adjust(self, index_name, *index_args, **index_kwargs):
+            def prepare_adjustment(
+                    self, index_name, *index_args, **index_kwargs):
                 if index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
-                return super().adjust(index_name, *index_args, **index_kwargs)
+                return super().prepare_adjustment(
+                    index_name, *index_args, **index_kwargs)
         table, _ = make_tables(Indexes())
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         with pytest.raises(ValueError):
@@ -509,7 +583,7 @@ class TestCachedTable:
             await table.get_record(2)
         assert_that(await table.get_record(1), has_entries(pk=1, k='a1'))
 
-    async def test_adjust_prunes_old_data(self, table, db_access):
+    async def test_adjust_discards_old_data(self, table, db_access):
         db_access.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', 0, 1)
         assert_that(
@@ -529,10 +603,10 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(4)]))
 
-    async def test_adjust_prunes_no_old_data(self, make_tables, db_access):
+    async def test_adjust_discards_no_old_data(self, make_tables, db_access):
         class Indexes(SpyIndexes):
-            def adjust(self, *args, **kwargs):
-                adjustment = super().adjust(*args)
+            def prepare_adjustment(self, *args, **kwargs):
+                adjustment = super().prepare_adjustment(*args)
                 if 'delete_nothing' in kwargs:
                     assert adjustment.expire_spec is None
                 return adjustment
@@ -568,10 +642,10 @@ class TestCachedTable:
 
     async def test_adjust_loads_no_new_data(self, make_tables, db_access):
         class Indexes(SpyIndexes):
-            def adjust(self, index_name, *args, **kwargs):
-                adjustment = super().adjust(index_name, *args)
+            def prepare_adjustment(self, index_name, *args, **kwargs):
+                adjustment = super().prepare_adjustment(index_name, *args)
                 if 'load_nothing' in kwargs:
-                    return tc.Adjustment(None, adjustment.expire_spec)
+                    adjustment = dc.replace(adjustment, new_spec=None)
                 return adjustment
         table, _ = make_tables(indexes=Indexes())
         db_access.records = [{'pk': i} for i in range(4)]
@@ -618,6 +692,24 @@ class TestCachedTable:
                 *[anything() for _ in range(4)],
                 *[um.call(r) for r in expected_observations]))
 
+    async def test_adjust_observes_new_records_after_commit_adjustment(
+            self, table, db_access, indexes):
+        mock = um.Mock()
+        mock.prepare = indexes.prepare_adjustment_mock
+        mock.commit = indexes.commit_adjustment_mock
+        mock.observe = indexes.observe_mock
+        db_access.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key', *range(2))
+        await table.adjust('primary_key', *range(4))
+        assert mock.mock_calls == [
+            um.call.prepare('primary_key', *range(2)),
+            um.call.commit(indexes.prepare_adjustment_mock.return_values[0]),
+            um.call.observe(um.ANY), um.call.observe(um.ANY),
+            um.call.prepare('primary_key', *range(4)),
+            um.call.commit(indexes.prepare_adjustment_mock.return_values[1]),
+            um.call.observe(um.ANY), um.call.observe(um.ANY),
+            um.call.observe(um.ANY), um.call.observe(um.ANY)]
+
     async def test_adjust_by_other_index(self, make_tables, db_access):
         table, _ = make_tables(MultiIndexes())
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
@@ -639,15 +731,105 @@ class TestCachedTable:
     async def test_adjust_raises_if_index_doesnt_support_adjusting(
             self, make_tables, db_access):
         class Indexes(MultiIndexes):
-            def adjust(self, index_name, *index_args, **index_kwargs):
+            def prepare_adjustment(
+                    self, index_name, *index_args, **index_kwargs):
                 if index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
-                return super().adjust(index_name, *index_args, **index_kwargs)
+                return super().prepare_adjustment(
+                    index_name, *index_args, **index_kwargs)
         table, _ = make_tables(Indexes())
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', *range(2))
         with pytest.raises(ValueError):
             await table.adjust('x_range', min=12, max=14)
+
+    async def test_load_doesnt_use_scratch_space(
+            self, make_tables, db_access):
+        table, storage_table = make_tables()
+        db_access.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key', *range(2))
+        assert storage_table._num_scratch_ops == 0
+
+    async def test_adjust_uses_scratch_space_for_discarding(
+            self, make_tables, db_access):
+        # Ok, I know this looks a bit janky, but we need to assert things about
+        # the cache just before StorageTable.scratch_merge() returns and just
+        # after. And since that's not async, we have to wait on an event in our
+        # mock which blocks the entire main thread. So we have to start a
+        # second thread that makes the asserts while the main thread is frozen,
+        # and then unfreezes it.
+        table, storage_table = make_tables()
+        db_access.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key', *range(2))
+        storage_table._enable_merge_wait()
+        exceptions = []
+        task_queue = queue.Queue()
+
+        async def assert_pre_merge():
+            adjust_task = task_queue.get()
+            storage_table._merge_wait_start()
+            try:
+                assert_that(
+                    await collect_async_iter(
+                        table.get_records('primary_key', *range(2))),
+                    contains_inanyorder(
+                        *[has_entries(pk=i, source='storage')
+                          for i in range(2)]))
+            except Exception as e:
+                exceptions.append(e)
+            assert not adjust_task.done()
+            storage_table._merge_continue()
+        t = threading.Thread(target=asyncio.run, args=(assert_pre_merge(),))
+        t.start()
+        adjust_task = asyncio.create_task(
+            table.adjust('primary_key', *range(2, 4)))
+        task_queue.put(adjust_task)
+        await adjust_task
+        t.join()
+        for e in exceptions:
+            raise e
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', *range(2))),
+            contains_inanyorder(
+                *[has_entries(pk=i, source='db') for i in range(2)]))
+
+    async def test_adjust_uses_scratch_space_for_adding(
+            self, make_tables, db_access):
+        table, storage_table = make_tables()
+        db_access.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key', *range(2))
+        storage_table._enable_merge_wait()
+        exceptions = []
+        task_queue = queue.Queue()
+
+        async def assert_pre_merge():
+            adjust_task = task_queue.get()
+            storage_table._merge_wait_start()
+            try:
+                assert_that(
+                    await collect_async_iter(
+                        table.get_records('primary_key', *range(4))),
+                    contains_inanyorder(
+                        *[has_entries(pk=i, source='db')for i in range(4)]))
+            except Exception as e:
+                exceptions.append(e)
+            assert not adjust_task.done()
+            storage_table._merge_continue()
+        t = threading.Thread(target=asyncio.run, args=(assert_pre_merge(),))
+        t.start()
+        adjust_task = asyncio.create_task(
+            table.adjust('primary_key', *range(4)))
+        task_queue.put(adjust_task)
+        await adjust_task
+        t.join()
+        for e in exceptions:
+            raise e
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', *range(4))),
+            contains_inanyorder(
+                *[has_entries(pk=i, source='storage') for i in range(4)]))
 
     async def test_get_records_by_other_index(
             self, make_tables, db_access):
