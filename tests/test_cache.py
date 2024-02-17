@@ -965,6 +965,70 @@ class TestCachedTable:
                 *[has_entries(pk=i, x=i + 100, source='storage')
                   for i in range(6)]))
 
+    async def test_refresh_invalid_uses_scratch_space_for_discarding(
+            self, make_tables, db_access):
+        table, storage_table = make_tables()
+        db_access.records = [{'pk': i} for i in range(4)]
+        await table.load('primary_key')
+        db_access.records = [{'pk': i} for i in range(3)]
+        await table.invalidate_record(3)
+        storage_table._enable_merge_wait()
+        exceptions = []
+        task_queue = queue.Queue()
+
+        async def assert_pre_merge():
+            refresh_task = task_queue.get()
+            storage_table._merge_wait_start()
+            try:
+                assert_that(
+                    await storage_table.get_record(3), has_entries(pk=3))
+            except Exception as e:
+                exceptions.append(e)
+            assert not refresh_task.done()
+            storage_table._merge_continue()
+        t = threading.Thread(target=asyncio.run, args=(assert_pre_merge(),))
+        t.start()
+        refresh_task = asyncio.create_task(table.refresh_invalid())
+        task_queue.put(refresh_task)
+        await refresh_task
+        t.join()
+        for e in exceptions:
+            raise e
+        with pytest.raises(KeyError):
+            await table.get_record(3)
+
+    async def test_refresh_invalid_uses_scratch_space_for_updating(
+            self, make_tables, db_access):
+        table, storage_table = make_tables()
+        db_access.records = [{'pk': 0, 's': 'x'}]
+        await table.load('primary_key')
+        db_access.records = [{'pk': 0, 's': 'y'}]
+        await table.invalidate_record(0)
+        storage_table._enable_merge_wait()
+        exceptions = []
+        task_queue = queue.Queue()
+
+        async def assert_pre_merge():
+            refresh_task = task_queue.get()
+            storage_table._merge_wait_start()
+            try:
+                assert_that(
+                    await storage_table.get_record(0), has_entries(s='x'))
+            except Exception as e:
+                exceptions.append(e)
+            assert not refresh_task.done()
+            storage_table._merge_continue()
+        t = threading.Thread(target=asyncio.run, args=(assert_pre_merge(),))
+        t.start()
+        refresh_task = asyncio.create_task(table.refresh_invalid())
+        task_queue.put(refresh_task)
+        await refresh_task
+        t.join()
+        for e in exceptions:
+            raise e
+        assert_that(
+            await table.get_record(0), has_entries(s='y', source='storage'))
+
 
 class TestInvalidRecordRepository:
     @pytest.fixture

@@ -204,7 +204,7 @@ class CachedTable[PrimaryKey]:
         """
         await self.loaded()
         if self._invalid_record_repo.primary_key_is_invalid(primary_key):
-            await self._refresh_invalid()
+            await self.refresh_invalid()
         try:
             return await self._storage_table.get_record(primary_key)
         except KeyError:
@@ -287,7 +287,7 @@ class CachedTable[PrimaryKey]:
 
     async def _refresh_and_get_records_from_storage(
             self, index_name, *index_args, **index_kwargs):
-        await self._refresh_invalid()
+        await self.refresh_invalid()
         return self._storage_table.get_records(
             self._indexes.storage_records_spec(
                 index_name, *index_args, **index_kwargs))
@@ -346,19 +346,18 @@ class CachedTable[PrimaryKey]:
                 f'Ignoring attempt to invalidate primary key {primary_key} '
                 'which doesn\'t exist.')
 
-    async def _refresh_invalid(self) -> None:
+    async def refresh_invalid(self) -> None:
         _logger.info(
             f'Refreshing {len(self._invalid_record_repo)} invalid keys.')
         for key in self._invalid_record_repo.invalid_primary_keys:
-            try:
-                await self._storage_table.delete_record(key)
-            except KeyError:
-                pass
+            await self._storage_table.scratch_discard_records(
+                self._indexes.storage_records_spec('primary_key', key))
         db_records_spec = self._indexes.db_records_spec(
             'primary_key', *self._invalid_record_repo.invalid_primary_keys)
         updated_records = self._db_access.get_records(db_records_spec)
         async for record in updated_records:
-            await self._storage_table.put_record(record)
+            await self._storage_table.scratch_put_record(record)
+        self._storage_table.scratch_merge()
         self._invalid_record_repo.clear()
 
 
