@@ -107,11 +107,13 @@ class CachedTable[PrimaryKey]:
         Clear storage and load all relevant data from the DB into storage.
 
         This is very similar to adjust(), except that the storage is cleared
-        first, and a ValueError is raised if the cache was already loaded.
+        first, a ValueError is raised if the cache was already loaded, and the
+        whole operation doesn't take place in scratch space.
 
-        Like adjust(), calls the cache's indexes' adjust() to let them know
-        which records are being loaded, and observe() for each record as it is
-        loaded.
+        Like adjust(), calls the cache's indexes' prepare_adjustment() to
+        determine which records need to be loaded, and then commit_adjustment()
+        when they have. Additionally, for each loaded record the indexes'
+        observe() is called after the commit.
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
@@ -185,13 +187,23 @@ class CachedTable[PrimaryKey]:
 
         Expires records from storage and loads new ones from the DB in order to
         attain the state specified via the given index' implementation-specific
-        parameters.
+        parameters. Uses the storage's scratch space to provide a consistent
+        view of the storage without blocking read operations. At all points
+        before this method returns, read operations reflect the state before
+        the adjustment, and at all points after they reflect the state after.
 
-        Calls the cache's indexes' adjust() to let them know how the set of
-        records is supposed to change, which yields the adjustment that
-        specifies which have to be deleted and which newly fetched. For each
-        record that ends up being added to storage, calls the indexes'
-        observe() to inform them that this record exists.
+        Calls the cache's indexes' prepare_adjustment() for specs on the
+        records that should be deleted and new ones to load. These are then
+        staged in the storage's scratch space. Finally, the scratch space is
+        merged, the indexes' commit_adjustment() is called, and for each added
+        record, the indexes' observe() is called.
+
+        Note that, since observe() is called at the very end, a full list of
+        all added records needs to be stored temporarily. This may consume a
+        significant amount of extra memory with large adjustments.
+
+        Only one adjustment or refresh (via refresh_invalid()) can be happening
+        at once. Other ones are locked until previous ones complete.
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
@@ -338,6 +350,9 @@ class CachedTable[PrimaryKey]:
         primary_key index, for which no score needs to be specified since that
         score can always be calculated and primary keys can never change.
 
+        This method needs to wait for any ongoing adjustments or refreshes, so
+        it may occasionally take a while.
+
         Implementation note: updated and deleted records aren't observed for
         the Indexes again, only records that were newly added.
         """
@@ -363,6 +378,16 @@ class CachedTable[PrimaryKey]:
                 'which doesn\'t exist.')
 
     async def refresh_invalid(self) -> None:
+        """
+        Refresh all records that have been marked as invalid.
+
+        Ensures that all records that have been marked as invalid since the
+        last refresh are loaded again from the DB.
+
+        This operation needs to wait for any ongoing adjustments to finish. No
+        refresh is triggered if all records are valid already, or if there is
+        another refresh still ongoing.
+        """
         if not self._invalid_record_repo:
             return
         async with self._scratch_space_lock:
