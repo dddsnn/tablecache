@@ -89,33 +89,28 @@ class Indexes[PrimaryKey](abc.ABC):
     these methods raise an UnsupportedIndexOperation.
     """
     @property
-    def index_names(self) -> t.Iterable[str]:
-        """Return names of all indexes."""
-        return self.score_functions.keys()
-
-    @property
     @abc.abstractmethod
-    def score_functions(self) -> t.Mapping[str, tp.ScoreFunction]:
+    def index_names(self) -> frozenset[str]:
         """
-        A mapping of index names to their respective score functions.
+        Return names of all indexes.
 
-        Always contains an entry primary_key.
+        These are the names of all the indexes in this instance. Always
+        contains at least primary_key.
+        """
+        raise NotImplementedError
 
-        Generally, score functions are expected to be called with all
-        attributes of a record as kwargs, but at least for the primary_key
-        index, just the primary (as a kwarg) will do.
+    @abc.abstractmethod
+    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+        """
+        Calculate a record's score for an index.
+
+        Raises a ValueError if the given index doesn't exist
         """
         raise NotImplementedError
 
     @abc.abstractmethod
     def primary_key_score(self, primary_key: PrimaryKey) -> numbers.Real:
-        """
-        Calculate the primary key score.
-
-        This functionn takes a primary key itself as an argument, as opposed to
-        the primary_key entry in score_functions, which takes record attributes
-        as kwargs.
-        """
+        """Calculate the primary key score."""
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -216,16 +211,18 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
 
     @t.override
     @property
-    def score_functions(self) -> t.Mapping[str, tp.ScoreFunction]:
-        return {'primary_key': self._extract_primary_key}
+    def index_names(self) -> frozenset[str]:
+        return frozenset(['primary_key'])
 
-    def _extract_primary_key(self, **kwargs):
-        return kwargs[self._primary_key_name]
+    @t.override
+    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index is supported.')
+        return record[self._primary_key_name]
 
     @t.override
     def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
-        return self.score_functions['primary_key'](
-            **{self._primary_key_name: primary_key})
+        return primary_key
 
     @t.override
     def storage_records_spec(
@@ -301,4 +298,4 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
 
     @t.override
     def observe(self, record: tp.Record) -> None:
-        self._primary_keys.add(self._extract_primary_key(**record))
+        self._primary_keys.add(self.score('primary_key', record))

@@ -16,7 +16,6 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
-import collections.abc as ca
 import dataclasses as dc
 import itertools as it
 import numbers
@@ -69,7 +68,7 @@ class StorageRecordsSpec:
 
     index_name: str
     score_intervals: list[Interval]
-    recheck_predicate: ca.Callable[[tp.Record], bool] = _always_use_record
+    recheck_predicate: tp.RecheckPredicate = _always_use_record
 
 
 class StorageTable[PrimaryKey](abc.ABC):

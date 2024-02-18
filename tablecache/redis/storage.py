@@ -34,6 +34,7 @@ import aiorwlock
 import redis.asyncio as redis
 
 import tablecache.redis.codec as codec
+import tablecache.index as index
 import tablecache.storage as storage
 import tablecache.types as tp
 
@@ -63,7 +64,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     def __init__(
             self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
             attribute_codecs: AttributeCodecs,
-            score_functions: t.Mapping[str, tp.ScoreFunction]) -> None:
+            indexes: index.Indexes[PrimaryKey]) -> None:
         """
         A table stored in Redis.
 
@@ -73,10 +74,9 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         codec is specified are stored.
 
         Each record is also associated with one or more index scores, one for
-        each of the given score functions. At the very least, there has to be
-        one for the primary key (called primary_key), which returns a score for
-        the primary key. Other than the primary key itself, the score needs not
-        be unique. Score functions for other indexes may be defined, which
+        each of the given index names. At the very least, there has to be one
+        for the primary key (called primary_key), which returns a score for the
+        primary key. Score functions for other indexes may be defined, which
         allow queries for multiple records via intervals of scores.
 
         Each index is stored as a Redis sorted set with the key
@@ -97,7 +97,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         a 32-bit unsigned integer, so there is a hard limit of 2**32-1 primary
         key scores that each index score may map to.
 
-        While scratch space is used (i.e. in between the first call to
+        While scratch space is in use (i.e. in between the first call to
         scratch_{put,discard}_record() and the corresponding scratch_merge()),
         regular write operations (put_record() and delete_record{,s}()) are
         locked. Merging scratch space starts a background task that cleans up
@@ -123,23 +123,24 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             Must map attribute names (strings) to Codec instances that are able
             to en-/decode the corresponding values. Only attributes present
             here are stored.
-        :param score_functions: A dictionary mapping index names (strings) to
-            score functions. A score function takes records attributes as
-            kwargs and returns a number that can be represented as a 64-bit
-            float. Must contain at least one function for the primary_key.
+        :param indexes: An Indexes whose indexes and their scores should be
+            respresented in storage. The data needed from it are the
+            index_names, and the score and primary_key_score functions.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
             raise ValueError('Attribute names must be strings.')
         if primary_key_name not in attribute_codecs:
             raise ValueError('Codec for primary key is missing.')
-        if 'primary_key' not in score_functions:
-            raise ValueError('Missing primary_key score function.')
+        if 'primary_key' not in indexes.index_names:
+            raise ValueError('Missing primary_key index.')
         self._conn = conn
         self._table_name = table_name
         self._primary_key_name = primary_key_name
         self._row_codec = RowCodec(attribute_codecs)
-        self._score_functions = score_functions
+        self._index_names = indexes.index_names
+        self._score_function = indexes.score
+        self._primary_key_score_function = indexes.primary_key_score
         self._rwlock = aiorwlock.RWLock()
         self._scratch_space = ScratchSpace()
         self._scratch_condition = asyncio.Condition(self._rwlock.writer_lock)
@@ -149,7 +150,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def clear(self) -> None:
-        for index_name in self._score_functions:
+        for index_name in self._index_names:
             await self._conn.delete(f'{self._table_name}:{index_name}')
 
     @t.override
@@ -182,7 +183,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         await self._put_encoded_record(record, encoded_record)
 
     async def _put_encoded_record(self, record, encoded_record):
-        primary_key_score = self._score_functions['primary_key'](**record)
+        primary_key_score = self._score_function('primary_key', record)
         await self._conn.zadd(
             f'{self._table_name}:primary_key',
             mapping=PairAsItems(memoryview(encoded_record), primary_key_score))
@@ -197,10 +198,10 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     async def _modify_index_entries(self, record, primary_key_score, inc):
         assert inc == -1 or inc == 1
-        for index_name, score_function in self._score_functions.items():
+        for index_name in self._index_names:
             if index_name == 'primary_key':
                 continue
-            index_score = score_function(**record)
+            index_score = self._score_function(index_name, record)
             encoded_primary_key_scores = await self._conn.zrange(
                 f'{self._table_name}:{index_name}', index_score, index_score,
                 byscore=True)
@@ -246,8 +247,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             return decoded_record
 
     async def _get_record_locked(self, primary_key):
-        primary_key_score = self._score_functions['primary_key'](
-            **{self._primary_key_name: primary_key})
+        primary_key_score = self._primary_key_score_function(primary_key)
         records = self._get_records_by_primary_key_score(
             [storage.Interval(primary_key_score, primary_key_score)],
             lambda r: r[self._primary_key_name] == primary_key)
@@ -328,8 +328,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         await self._delete_record(encoded_record, decoded_record)
 
     async def _delete_record(self, encoded_record, decoded_record):
-        primary_key_score = self._score_functions['primary_key'](
-            **decoded_record)
+        primary_key_score = self._score_function('primary_key', decoded_record)
         await self._modify_index_entries(decoded_record, primary_key_score, -1)
         await self._conn.zrem(
             f'{self._table_name}:primary_key', encoded_record)
@@ -427,8 +426,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
                 self._record_primary_key(record)
                 for record in self._scratch_space.records_for_deletion})
         for primary_key in primary_keys_for_potential_deletion:
-            primary_key_score = self._score_functions['primary_key'](
-                **{self._primary_key_name: primary_key})
+            primary_key_score = self._primary_key_score_function(primary_key)
             records = self._get_records_by_primary_key_score(
                 [storage.Interval(primary_key_score, primary_key_score)],
                 lambda r: r[self._primary_key_name] == primary_key,

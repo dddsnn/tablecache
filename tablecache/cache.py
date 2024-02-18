@@ -427,7 +427,7 @@ class InvalidRecordRepository[PrimaryKey]:
     scores for all indexes.
     """
 
-    def __init__(self, indexes: index.Indexes) -> None:
+    def __init__(self, indexes: index.Indexes[PrimaryKey]) -> None:
         self._primary_key_score = indexes.primary_key_score
         self.invalid_primary_keys = set()
         self._invalid_scores = {n: set() for n in indexes.index_names}
@@ -455,8 +455,7 @@ class InvalidRecordRepository[PrimaryKey]:
         """
         self.invalid_primary_keys.add(primary_key)
         if 'primary_key' not in scores:
-            scores['primary_key'] = self._primary_key_score(
-                primary_key)
+            scores['primary_key'] = self._primary_key_score(primary_key)
         for index_name, invalid_scores in self._invalid_scores.items():
             try:
                 invalid_scores.add(scores[index_name])

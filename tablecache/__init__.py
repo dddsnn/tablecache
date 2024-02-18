@@ -18,7 +18,14 @@
 from tablecache.cache import CachedTable, DirtyIndex
 from tablecache.db import DbAccess, DbRecordsSpec, QueryArgsDbRecordsSpec
 from tablecache.index import (
-    Adjustment, Indexes, PrimaryKeyIndexes,
+    Adjustment,
+    Indexes,
+    PrimaryKeyIndexes,
     UnsupportedIndexOperation)
 from tablecache.storage import Interval, StorageRecordsSpec, StorageTable
-from tablecache.types import AsyncRecords, Record, ScoreFunction
+from tablecache.types import (
+    AsyncRecords,
+    PrimaryKeyScoreFunction,
+    RecheckPredicate,
+    Record,
+    ScoreFunction)

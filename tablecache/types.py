@@ -21,4 +21,7 @@ import typing as t
 
 type Record = ca.Mapping[str, t.Any]
 type AsyncRecords = ca.AsyncIterator[Record]
-type ScoreFunction = ca.Callable[[t.Any], numbers.Real]
+type ScoreFunction = ca.Callable[[str, Record], numbers.Real]
+type PrimaryKeyScoreFunction[PrimaryKey] = (
+    ca.Callable[[PrimaryKey], numbers.Real])
+type RecheckPredicate = ca.Callable[[Record], bool]

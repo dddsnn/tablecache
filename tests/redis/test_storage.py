@@ -17,6 +17,7 @@
 
 import asyncio
 import functools as ft
+import operator as op
 import unittest.mock as um
 
 from hamcrest import *
@@ -68,12 +69,6 @@ async def collect_async_iter(i):
     return ls
 
 
-def filter_kwarg(kwarg_name):
-    def filter(**kwargs):
-        return kwargs[kwarg_name]
-    return filter
-
-
 class FailCodec(tcr.Codec):
     def encode(self, _):
         raise Exception
@@ -92,6 +87,25 @@ class ManuallyUnlockedScratchSpace(storage.ScratchSpace):
 
     def is_not_merging(self):
         return self._manually_not_merging
+
+
+class IndexesFromScoreFunctionsDict:
+    def __init__(self, primary_key_name, score_functions):
+        self._primary_key_name = primary_key_name
+        self._score_functions = score_functions
+
+    @property
+    def index_names(self):
+        return frozenset(self._score_functions)
+
+    def score(self, index_name, record):
+        try:
+            return self._score_functions[index_name](record)
+        except KeyError:
+            raise ValueError
+
+    def primary_key_score(self, primary_key):
+        return self.score('primary_key', {self._primary_key_name: primary_key})
 
 
 class TestRedisTable:
@@ -116,11 +130,12 @@ class TestRedisTable:
             attribute_codecs = attribute_codecs or {
                 'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
             score_functions = score_functions or {
-                'primary_key': filter_kwarg(primary_key_name)}
+                'primary_key': op.itemgetter(primary_key_name)}
             table = tcr.RedisTable(
                 conn, table_name=table_name, primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs,
-                score_functions=score_functions)
+                indexes=IndexesFromScoreFunctionsDict(
+                    primary_key_name, score_functions))
             tables.append(table)
             return table
 
@@ -226,8 +241,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
         await table.put_record({'pk': 0, 's': 'dzzz'})
@@ -237,8 +252,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 1, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 2
@@ -254,7 +269,7 @@ class TestRedisTable:
     async def test_put_record_doesnt_overwrite_others_with_same_pk_score(
             self, make_table, conn):
         table = make_table(
-            score_functions={'primary_key': lambda **kwargs: kwargs['pk'] % 2})
+            score_functions={'primary_key': lambda r: r['pk'] % 2})
         await table.put_record({'pk': 1, 's': 's1'})
         await table.put_record({'pk': 3, 's': 's3'})
         assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
@@ -269,8 +284,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': lambda **r: r['pk'] % 2,
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 2, 's': 'czzz'})
         await table.put_record({'pk': 4, 's': 'czzz'})
@@ -290,8 +305,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': lambda **r: r['pk'] % 2,
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 2, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
@@ -320,7 +335,7 @@ class TestRedisTable:
 
     async def test_get_record_raises_on_duplicate_attribute_ids(
             self, make_table, conn):
-        table = make_table(score_functions={'primary_key': lambda **_: 0})
+        table = make_table(score_functions={'primary_key': lambda _: 0})
         await table.put_record({'pk': 1, 's': 's1'})
         row = (await conn.zrange('table:primary_key', 0, -1))[0]
         s_id_index = row.index(b's1') - 3
@@ -346,7 +361,7 @@ class TestRedisTable:
     async def test_get_record_handles_records_with_equal_scores(
             self, make_table):
         table = make_table(
-            score_functions={'primary_key': lambda **r: r['pk'] % 2})
+            score_functions={'primary_key': lambda r: r['pk'] % 2})
         await table.put_record({'pk': 0, 's': 's'})
         await table.put_record({'pk': 2, 's': 's'})
         assert_that(await table.get_record(0), has_entries(pk=0))
@@ -372,8 +387,8 @@ class TestRedisTable:
     async def test_clear(self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 1, 's': 's1'})
         await table.get_record(1)
         assert await conn.zcard('table:primary_key') > 0
@@ -476,8 +491,8 @@ class TestRedisTable:
 
     async def test_get_records_uses_custom_score_function(
             self, make_table):
-        def pk_minus_10(**kwargs):
-            return kwargs['pk'] - 10
+        def pk_minus_10(record):
+            return record['pk'] - 10
 
         table = make_table(
             attribute_codecs={'pk': tcr.IntAsStringCodec()},
@@ -509,8 +524,8 @@ class TestRedisTable:
             self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.put_record({'pk': 2, 's': 'haaa'})
@@ -526,8 +541,8 @@ class TestRedisTable:
             self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': lambda **r: r['pk'] % 2,
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'cyyy'})
         await table.put_record({'pk': 2, 's': 'czzz'})
         records = table.get_records(
@@ -562,7 +577,7 @@ class TestRedisTable:
     async def test_delete_record_doesnt_delete_other_records_with_same_score(
             self, make_table):
         table = make_table(
-            score_functions={'primary_key': lambda **r: r['pk'] % 2})
+            score_functions={'primary_key': lambda r: r['pk'] % 2})
         await table.put_record({'pk': 0, 's': 's0'})
         await table.put_record({'pk': 2, 's': 's2'})
         await table.delete_record(0)
@@ -576,8 +591,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
         await table.delete_record(0)
@@ -587,8 +602,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.put_record({'pk': 2, 's': 'czzz'})
@@ -608,8 +623,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': lambda **r: r['pk'] % 2,
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 2, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
@@ -690,8 +705,8 @@ class TestRedisTable:
             self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.put_record({'pk': 2, 's': 'cyyy'})
@@ -709,8 +724,8 @@ class TestRedisTable:
             self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.put_record({'pk': 2, 's': 'cyyy'})
@@ -731,8 +746,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 2, 's': 'cyyy'})
         assert await conn.zcard('table:first_char') == 2
@@ -744,8 +759,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 2, 's': 'cyyy'})
         await table.put_record({'pk': 3, 's': 'cxxx'})
@@ -759,8 +774,8 @@ class TestRedisTable:
             self, make_table, conn):
         table = make_table(
             score_functions={
-                'primary_key': lambda **r: r['pk'] % 2,
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 2, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
@@ -857,8 +872,8 @@ class TestRedisTable:
 
     async def test_scratch_discard_records_uses_custom_score_function(
             self, make_table):
-        def pk_minus_10(**kwargs):
-            return kwargs['pk'] - 10
+        def pk_minus_10(record):
+            return record['pk'] - 10
 
         table = make_table(
             attribute_codecs={'pk': tcr.IntAsStringCodec()},
@@ -896,8 +911,8 @@ class TestRedisTable:
             self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'czzz'})
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.put_record({'pk': 2, 's': 'haaa'})
@@ -916,8 +931,8 @@ class TestRedisTable:
             self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': lambda **r: r['pk'] % 2,
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 0, 's': 'cyyy'})
         await table.put_record({'pk': 2, 's': 'czzz'})
         await table.scratch_discard_records(
@@ -938,8 +953,8 @@ class TestRedisTable:
     async def test_scratch_space_add_handles_indexes(self, make_table):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.scratch_put_record({'pk': 2, 's': 'daaa'})
         records = table.get_records(
@@ -982,8 +997,8 @@ class TestRedisTable:
             self, make_table, conn, scratch_space_is_clear):
         table = make_table(
             score_functions={
-                'primary_key': filter_kwarg('pk'),
-                'first_char': lambda **r: ord(r['s'][0])})
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
         await table.put_record({'pk': 1, 's': 'czzz'})
         assert await conn.zcard('table:first_char') == 1
         await table.scratch_discard_records(tc.StorageRecordsSpec(

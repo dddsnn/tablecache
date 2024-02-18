@@ -72,13 +72,18 @@ class MultiIndexes(tc.Indexes[int]):
         self._range = None
 
     @property
-    def score_functions(self):
-        return {
-            'primary_key': lambda **r: r['pk'] + 1,
-            'x_range': lambda **r: r['x'] + 100}
+    def index_names(self):
+        return frozenset(['primary_key', 'x_range'])
+
+    def score(self, index_name, record):
+        if index_name == 'primary_key':
+            return self.primary_key_score(record['pk'])
+        elif index_name == 'x_range':
+            return record['x'] + 100
+        raise ValueError
 
     def primary_key_score(self, primary_key):
-        return self.score_functions['primary_key'](pk=primary_key)
+        return primary_key + 1
 
     def storage_records_spec(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
@@ -182,9 +187,10 @@ class MockDbAccess(tc.DbAccess):
 
 
 class MockStorageTable(tc.StorageTable):
-    def __init__(self, *, primary_key_name, score_functions):
-        self._score_functions = score_functions
+    def __init__(self, *, primary_key_name, indexes):
         self._primary_key_name = primary_key_name
+        self._index_names = indexes.index_names
+        self._score_function = indexes.score
         self.records = {}
         self._indexes = {}
         self._scratch_records = {}
@@ -210,8 +216,8 @@ class MockStorageTable(tc.StorageTable):
     async def put_record(self, record):
         primary_key = record[self._primary_key_name]
         self.records[primary_key] = record
-        for index_name, score_function in self._score_functions.items():
-            score = score_function(**record)
+        for index_name in self._index_names:
+            score = self._score_function(index_name, record)
             self._indexes.setdefault(index_name, {}).setdefault(
                 score, set()).add(primary_key)
 
@@ -223,8 +229,8 @@ class MockStorageTable(tc.StorageTable):
             if not records_spec.recheck_predicate(record):
                 continue
             for interval in records_spec.score_intervals:
-                score_function = self._score_functions[records_spec.index_name]
-                if score_function(**record) in interval:
+                score = self._score_function(records_spec.index_name, record)
+                if score in interval:
                     yield self._make_record(record)
                     break
 
@@ -291,7 +297,7 @@ class TestCachedTable:
     def make_tables(self, indexes, db_access):
         def factory(indexes=indexes):
             storage_table = MockStorageTable(
-                primary_key_name='pk', score_functions=indexes.score_functions)
+                primary_key_name='pk', indexes=indexes)
             cached_table = tc.CachedTable(
                 indexes, db_access, storage_table, primary_key_name='pk')
             return cached_table, storage_table
@@ -531,9 +537,11 @@ class TestCachedTable:
             def __init__(self):
                 super().__init__('pk', 'query_all_pks', 'query_some_pks')
 
-            @property
-            def score_functions(self):
-                return {'primary_key': lambda **_: 0}
+            def score(self, index_name, record):
+                return 0
+
+            def primary_key_score(self, primary_key):
+                return 0
 
             def storage_records_spec(self, index_name, *primary_keys):
                 return tc.StorageRecordsSpec(
@@ -893,7 +901,7 @@ class TestCachedTable:
         await table.load('primary_key')
         db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
         for primary_key in range(6):
-            new_score = indexes.score_functions['x_range'](x=primary_key + 100)
+            new_score = indexes.score('x_range', {'x': primary_key + 100})
             await table.invalidate_record(primary_key, {'x_range': new_score})
         assert_that(
             await collect_async_iter(
@@ -907,7 +915,7 @@ class TestCachedTable:
         await table.load('primary_key')
         db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
         for primary_key in range(6):
-            new_score = indexes.score_functions['x_range'](x=primary_key + 100)
+            new_score = indexes.score('x_range', {'x': primary_key + 100})
             await table.invalidate_record(primary_key, {'x_range': new_score})
         assert_that(
             await collect_async_iter(
