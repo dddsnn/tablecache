@@ -73,7 +73,8 @@ class Indexes[PrimaryKey](abc.ABC):
     queried as ranges of these scores quickly. An additional recheck predicate
     can be defined by the index to filter out some potential bycatch. At the
     very least, an index named primary_key must exist, which maps a record's
-    primary key to a score.
+    primary key to a score. The purpose of the Indexes is to tie its different
+    indexes together and potentially share information between them.
 
     The access methods {storage,db}_records_spec() and covers() take an index
     name along with arbitrary args and kwargs, which the specific
@@ -104,7 +105,7 @@ class Indexes[PrimaryKey](abc.ABC):
         """
         Calculate a record's score for an index.
 
-        Raises a ValueError if the given index doesn't exist
+        Raises a ValueError if the given index doesn't exist.
         """
         raise NotImplementedError
 
@@ -123,6 +124,9 @@ class Indexes[PrimaryKey](abc.ABC):
         Returns a StorageRecordsSpec that specifies the set of records in
         storage that matches the index parameters. args and kwargs are
         interpreted in a way specific to the index.
+
+        When index_name is primary_key, this method can always be called with
+        just primary keys and no other arguments to specify those record.
         """
         raise NotImplementedError
 
@@ -143,7 +147,7 @@ class Indexes[PrimaryKey](abc.ABC):
             self, index_name: str, *args: t.Any, **kwargs: t.Any
     ) -> Adjustment:
         """
-        Adjust which records are covered by the indexes.
+        Prepare an adjustment of which records are covered by the indexes.
 
         Takes implementation-specific args and kwargs for one of the indexes
         that specify the set of records that should be in storage after the
@@ -151,10 +155,11 @@ class Indexes[PrimaryKey](abc.ABC):
         of records to delete from storage and a DbRecordsSpec of ones to load
         from the DB in order to attain that state.
 
-        After the call, the indexes assume that the records that were specified
-        to be deleted from storage are no longer covered, and likewise that
-        those specified to be loaded are. Future calls to covers() will reflect
-        that.
+        This method only specifies what would need to change in order to adjust
+        the indexes, but does not modify the internal state of the Indexes
+
+        May return a subclass of Adjustment that contains additional
+        information needed in commit_adjustment().
 
         Raises an UnsupportedIndexOperation if adjusting by the given index is
         not supported.
@@ -163,6 +168,15 @@ class Indexes[PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     def commit_adjustment(self, adjustment: Adjustment) -> None:
+        """
+        Commits a prepared adjustment.
+
+        Takes an Adjustment previously returned from prepare_adjustment() and
+        modifies internal state to reflect it. After the call, the indexes
+        assume that the records that were specified to be deleted from storage
+        are no longer covered, and likewise that those specified to be loaded
+        are. Future calls to covers() will reflect that.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -173,16 +187,27 @@ class Indexes[PrimaryKey](abc.ABC):
 
         Takes implementation-specific args and kwargs that specify a set of
         records, and returns whether all of them are in storage. This
-        determination is based on previous calls to adjust() and observe().
+        determination is based on previous calls to commit_adjustment() and
+        observe().
 
-        Note that a record may also be considered covered if doesn't exist.
-        E.g., say records with primary keys between 0 and 10 were loaded into
-        storage, but none even exists with primary key 5. Then that record is
-        still covered by storage, and the cache doesn't need to go to the DB to
-        check if that record exists.
+        May also return False if the records may be covered, but there isn't
+        enough information to be certain. This could happen when the Indexes
+        are adjusted by a different index than this covers check is done. E.g.,
+        if an adjustment containing a specific set of primary keys is committed
+        and then a covers check is done for a range of primary keys, there may
+        not be enough information to determine whether the set that was loaded
+        contained all primary keys in the range.
+
+        A record may also be considered covered if doesn't exist. E.g., say
+        records with primary keys between 0 and 10 were loaded into storage,
+        but none even exists with primary key 5. Then that record is still
+        covered by storage, and the cache doesn't need to go to the DB to check
+        if that record exists.
 
         Raises an UnsupportedIndexOperation if the given index doesn't support
-        checking coverage. However, the primary_key index always does.
+        checking coverage. However, the primary_key index always does. Also,
+        like in *_records_spec(), when index_name is primary_key, this method
+        can always be called with just primary keys and no other arguments.
         """
         raise NotImplementedError
 
