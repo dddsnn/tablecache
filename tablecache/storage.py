@@ -35,6 +35,13 @@ class Interval:
     ge: numbers.Real
     lt: numbers.Real
 
+    @staticmethod
+    def everything():
+        """
+        The interval from negative to positive infinity, covering everything.
+        """
+        return Interval(float('-inf'), float('inf'))
+
     def __contains__(self, x):
         return self.ge <= x < self.lt
 

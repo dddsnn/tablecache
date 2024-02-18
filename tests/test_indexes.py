@@ -51,7 +51,7 @@ class TestPrimaryKeyIndexes:
                 'primary_key', 'doesnt', 'matter', all_primary_keys=True),
             has_properties(
                 index_name='primary_key',
-                score_intervals=[tc.Interval(float('-inf'), float('inf'))]))
+                score_intervals=[tc.Interval.everything()]))
 
     def test_storage_records_spec_recheck_predicate(self, indexes):
         spec = indexes.storage_records_spec('primary_key', 1, 2)
@@ -83,7 +83,7 @@ class TestPrimaryKeyIndexes:
         adj = indexes.prepare_adjustment('primary_key', all_primary_keys=True)
         indexes.commit_adjustment(adj)
         adj = indexes.prepare_adjustment('primary_key', *pks)
-        expected_expire_intervals = [tc.Interval(float('-inf'), float('inf'))]
+        expected_expire_intervals = [tc.Interval.everything()]
         assert_that(
             adj, has_properties(
                 expire_spec=has_properties(

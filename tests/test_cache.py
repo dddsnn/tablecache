@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -111,7 +111,7 @@ class MultiIndexes(tc.Indexes[int]):
 
     def prepare_adjustment(self, index_name, *args, **kwargs):
         expire_spec = tc.StorageRecordsSpec(
-            'primary_key', [tc.Interval(float('-inf'), float('inf'))])
+            'primary_key', [tc.Interval.everything()])
         if index_name == 'primary_key':
             new_spec = self.db_records_spec('primary_key', *args)
             primary_keys = set(args)
@@ -349,8 +349,7 @@ class TestCachedTable:
             await collect_async_iter(
                 storage_table.get_records(
                     tc.StorageRecordsSpec(
-                        'primary_key',
-                        [tc.Interval(float('-inf'), float('inf'))]))),
+                        'primary_key', [tc.Interval.everything()]))),
             contains_inanyorder(*[has_entries(pk=i) for i in [2, 4]]))
 
     async def test_load_observes_loaded_records(
@@ -428,8 +427,7 @@ class TestCachedTable:
             await collect_async_iter(
                 storage_table.get_records(
                     tc.StorageRecordsSpec(
-                        'primary_key',
-                        [tc.Interval(float('-inf'), float('inf'))]))),
+                        'primary_key', [tc.Interval.everything()]))),
             contains_inanyorder(*[has_entries(pk=i, x=i + 10)
                                   for i in range(2, 4)]))
 
@@ -1071,9 +1069,9 @@ class TestInvalidRecordRepository:
 
     def test_score_invalid(self, repo):
         assert not repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(float('-inf'), float('inf')))
+            'primary_key', tc.Interval.everything())
         assert not repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(float('-inf'), float('inf')))
+            'x_range', tc.Interval.everything())
         repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
         assert not repo.interval_contains_invalid_score(
             'primary_key', tc.Interval(float('-inf'), 2))
@@ -1094,14 +1092,14 @@ class TestInvalidRecordRepository:
 
     def test_primary_key_score_invalid_implicitly(self, repo):
         assert not repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(float('-inf'), float('inf')))
+            'primary_key', tc.Interval.everything())
         repo.flag_invalid(1, {})
         assert repo.interval_contains_invalid_score(
             'primary_key', tc.Interval(2, 2.1))
 
     def test_score_invalid_raises_on_dirty_index(self, repo):
         assert not repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(float('-inf'), float('inf')))
+            'x_range', tc.Interval.everything())
         repo.flag_invalid(1, {})
         with pytest.raises(tc.DirtyIndex):
             repo.interval_contains_invalid_score('x_range', 110)
@@ -1116,15 +1114,15 @@ class TestInvalidRecordRepository:
         repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
         repo.clear()
         assert not repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(float('-inf'), float('inf')))
+            'primary_key', tc.Interval.everything())
         assert not repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(float('-inf'), float('inf')))
+            'x_range', tc.Interval.everything())
 
     def test_index_not_dirty_after_clean(self, repo):
         repo.flag_invalid(1, {})
         repo.clear()
         repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(float('-inf'), float('inf')))
+            'x_range', tc.Interval.everything())
 
     def test_len_is_number_of_primary_keys(self, repo):
         assert len(repo) == 0

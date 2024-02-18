@@ -28,8 +28,6 @@ import tablecache as tc
 import tablecache.redis as tcr
 import tablecache.redis.storage as storage
 
-_inf_to_inf = tc.Interval(float('-inf'), float('inf'))
-
 
 @pytest.fixture(scope='session')
 def redis_host():
@@ -429,13 +427,13 @@ class TestRedisTable:
 
     async def test_get_records_on_empty(self, table):
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(await collect_async_iter(records), empty())
 
     async def test_get_records_on_one_record(self, table):
         await table.put_record({'pk': 0, 's': 's1'})
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0, s='s1')))
@@ -445,7 +443,7 @@ class TestRedisTable:
         await table.put_record({'pk': 0, 's': 's2'})
         await table.put_record({'pk': 50, 's': 's3'})
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -515,7 +513,7 @@ class TestRedisTable:
         await table.put_record({'pk': 2, 's': 'cxc'})
         await table.put_record({'pk': 3, 's': 'ddd'})
         records = table.get_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf], x_in_s))
+            'primary_key', [tc.Interval.everything()], x_in_s))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
@@ -558,7 +556,7 @@ class TestRedisTable:
         with pytest.raises(KeyError):
             await table.delete_record(1)
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
@@ -569,7 +567,7 @@ class TestRedisTable:
         await table.put_record({'pk': 2, 's': 's2'})
         await table.delete_record(1)
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=2)))
@@ -582,7 +580,7 @@ class TestRedisTable:
         await table.put_record({'pk': 2, 's': 's2'})
         await table.delete_record(0)
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=2)))
@@ -643,7 +641,7 @@ class TestRedisTable:
             tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 50)]))
         assert num_deleted == 0
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(await collect_async_iter(records), empty())
 
     async def test_delete_records_deletes_nothing(self, table):
@@ -652,7 +650,7 @@ class TestRedisTable:
             tc.StorageRecordsSpec('primary_key', []))
         assert num_deleted == 0
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
@@ -665,7 +663,7 @@ class TestRedisTable:
             tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 50)]))
         assert num_deleted == 3
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(await collect_async_iter(records), empty())
 
     async def test_delete_records_deletes_some(self, table):
@@ -677,7 +675,7 @@ class TestRedisTable:
             tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 51)]))
         assert num_deleted == 2
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=-1), has_entries(pk=51)))
@@ -695,7 +693,7 @@ class TestRedisTable:
                 'primary_key', [tc.Interval(-40, -9), tc.Interval(10, 11)]))
         assert num_deleted == 3
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -715,7 +713,7 @@ class TestRedisTable:
                 'first_char', [tc.Interval(ord('c'), ord('c') + 0.1)]))
         assert num_deleted == 2
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=1, s='dzzz')))
@@ -736,7 +734,7 @@ class TestRedisTable:
                 lambda r: 'y' not in r['s']))
         assert num_deleted == 2
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -752,7 +750,7 @@ class TestRedisTable:
         await table.put_record({'pk': 2, 's': 'cyyy'})
         assert await conn.zcard('table:first_char') == 2
         await table.delete_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert await conn.zcard('table:first_char') == 0
 
     async def test_delete_records_deletes_some_from_other_indexes(
@@ -767,7 +765,8 @@ class TestRedisTable:
         assert await conn.zcard('table:first_char') == 3
         await table.delete_records(
             tc.StorageRecordsSpec(
-                'primary_key', [_inf_to_inf], lambda r: 'y' not in r['s']))
+                'primary_key', [tc.Interval.everything()],
+                lambda r: 'y' not in r['s']))
         assert await conn.zcard('table:first_char') == 1
 
     async def test_delete_records_doesnt_deletes_others_with_same_scores(
@@ -795,7 +794,7 @@ class TestRedisTable:
         with pytest.raises(KeyError):
             await table.delete_record(1)
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0)))
@@ -823,14 +822,14 @@ class TestRedisTable:
             self, table):
         await table.put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         assert_that(
             await table.get_record(2), has_entries(pk=2, s='s2'))
 
     async def test_scratch_discard_records_removes_after_merge(self, table):
         await table.put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         table.scratch_merge()
         with pytest.raises(KeyError):
             await table.get_record(2)
@@ -838,7 +837,7 @@ class TestRedisTable:
     async def test_scratch_records_can_be_deleted(self, table):
         await table.scratch_put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         table.scratch_merge()
         with pytest.raises(KeyError):
             await table.get_record(2)
@@ -846,7 +845,7 @@ class TestRedisTable:
     async def test_scratch_records_can_be_deleted_and_added_again(self, table):
         await table.scratch_put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         await table.scratch_put_record({'pk': 2, 's': 's2'})
         table.scratch_merge()
         assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
@@ -864,7 +863,7 @@ class TestRedisTable:
             'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)]))
         table.scratch_merge()
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -886,7 +885,7 @@ class TestRedisTable:
             'primary_key', [tc.Interval(0, 50)]))
         table.scratch_merge()
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=60)))
@@ -899,10 +898,10 @@ class TestRedisTable:
         await table.put_record({'pk': 2, 's': 'cxc'})
         await table.put_record({'pk': 3, 's': 'ddd'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf], x_in_s))
+            'primary_key', [tc.Interval.everything()], x_in_s))
         table.scratch_merge()
         records = table.get_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=0), has_entries(pk=3)))
@@ -921,7 +920,7 @@ class TestRedisTable:
             tc.StorageRecordsSpec(
                 'first_char', [tc.Interval(ord('d'), ord('i'))]))
         records = table.get_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         table.scratch_merge()
         assert_that(
             await collect_async_iter(records),
@@ -940,7 +939,7 @@ class TestRedisTable:
                 'first_char', [tc.Interval(ord('c'), ord('d'))]))
         table.scratch_merge()
         records = table.get_records(tc.StorageRecordsSpec(
-            'primary_key', [_inf_to_inf]))
+            'primary_key', [tc.Interval.everything()]))
         assert_that(await collect_async_iter(records), empty())
 
     async def test_scratch_discard_returns_number_of_records(self, table):
@@ -958,13 +957,13 @@ class TestRedisTable:
         await table.put_record({'pk': 1, 's': 'dzzz'})
         await table.scratch_put_record({'pk': 2, 's': 'daaa'})
         records = table.get_records(
-            tc.StorageRecordsSpec('first_char', [_inf_to_inf]))
+            tc.StorageRecordsSpec('first_char', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=1, s='dzzz')))
         table.scratch_merge()
         records = table.get_records(
-            tc.StorageRecordsSpec('first_char', [_inf_to_inf]))
+            tc.StorageRecordsSpec('first_char', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -1031,11 +1030,13 @@ class TestRedisTable:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(
                 table.delete_records(
-                    tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
+                    tc.StorageRecordsSpec(
+                        'primary_key', [tc.Interval.everything()])), 0.01)
         table.scratch_merge()
         await asyncio.wait_for(
             table.delete_records(
-                tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.everything()])), 0.01)
 
     async def test_scratch_merge_blocks_scratch_puts_until_merge_complete(
             self, table, monkeypatch):
@@ -1064,12 +1065,14 @@ class TestRedisTable:
         assert not scratch_space.is_not_merging()
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(table.scratch_discard_records(
-                tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.everything()])), 0.01)
         assert not scratch_space.is_not_merging()
         scratch_space.update_not_merging()
         assert scratch_space.is_not_merging()
         await asyncio.wait_for(table.scratch_discard_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf])), 0.01)
+            tc.StorageRecordsSpec(
+                'primary_key', [tc.Interval.everything()])), 0.01)
 
     async def test_multiple_scratch_operations(self, table):
         await table.put_record({'pk': 1, 's': 's1'})
@@ -1082,7 +1085,7 @@ class TestRedisTable:
             'primary_key', [tc.Interval(1, 1.1)]))
         table.scratch_merge()
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -1094,7 +1097,7 @@ class TestRedisTable:
             'primary_key', [tc.Interval(2, 2.1), tc.Interval(4, 4.1)]))
         await table.scratch_put_record({'pk': 6, 's': 's6'})
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(
@@ -1103,7 +1106,7 @@ class TestRedisTable:
                 has_entries(pk=5)))
         table.scratch_merge()
         records = table.get_records(
-            tc.StorageRecordsSpec('primary_key', [_inf_to_inf]))
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
         assert_that(
             await collect_async_iter(records),
             contains_inanyorder(

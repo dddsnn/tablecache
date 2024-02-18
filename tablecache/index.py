@@ -284,7 +284,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
         if all_primary_keys:
-            intervals = [storage.Interval(float('-inf'), float('inf'))]
+            intervals = [storage.Interval.everything()]
             recheck_predicate = storage.StorageRecordsSpec.always_use_record
         else:
             primary_keys = frozenset(primary_keys)
@@ -321,8 +321,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
             expire_spec = None
         else:
             expire_spec = storage.StorageRecordsSpec(
-                'primary_key',
-                [storage.Interval(float('-inf'), float('inf'))])
+                'primary_key', [storage.Interval.everything()])
         if self._covers_all and all_primary_keys:
             new_spec = None
         elif not all_primary_keys:
