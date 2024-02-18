@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -15,18 +15,24 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-import asyncio
-import pathlib
-import sys
 
-import pytest
+import hamcrest.core.base_matcher
 
-sys.path.append(str(pathlib.Path().absolute() / 'tests'))
+import tablecache as tc
 
 
-@pytest.fixture(scope='session')
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.stop()
-    loop.close()
+class IsIntervalContaining(hamcrest.core.base_matcher.BaseMatcher):
+    def __init__(self, value):
+        self.value = value
+
+    def _matches(self, item):
+        if not isinstance(item, tc.Interval):
+            return False
+        return item.ge <= self.value < item.lt
+
+    def describe_to(self, description):
+        description.append_text(f'interval containing {self.value}')
+
+
+def is_interval_containing(value):
+    return IsIntervalContaining(value)

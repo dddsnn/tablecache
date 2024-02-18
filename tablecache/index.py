@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
+import collections.abc as ca
 import dataclasses as dc
 import math
 import numbers
@@ -220,15 +221,41 @@ class Indexes[PrimaryKey](abc.ABC):
         """
 
 
-class PrimaryKeyIndexes(Indexes[numbers.Real]):
+class PrimaryKeyIndexes(Indexes[ca.Hashable]):
+    """
+    Simple indexes for only selected primary keys.
+
+    An index capable of loading either everything, or a select set of primary
+    keys. Only the primary_key index is supported. Scores are the primary key's
+    hash, so anything hashable works as keys.
+
+    The implementation is very basic and likely only useful for testing and
+    demonstration. Issues in practice could be:
+
+    - In storage_records_spec(), one interval is included for every primary
+      key, which makes no use of fast access to storage an is likely slow.
+    - When loading select keys, all of them are stored in a set, which can get
+      big.
+    - When adjusting to a different, disjoint set of primary keys, everything
+      is expired and loaded fresh, instead of only loading the difference.
+    """
     @dc.dataclass(frozen=True)
     class Adjustment(Adjustment):
-        primary_keys: set[numbers.Real]
+        primary_keys: set[ca.Hashable]
         cover_all: bool
 
     def __init__(
             self, primary_key_name: str, query_all_string: str,
             query_some_string: str) -> None:
+        """
+        :param primary_key_name: Name of the primary key.
+        :query_all_string: A query string used to query all records in the DB.
+            Will be used without parameters.
+        :query_some_string: A query string used to query only a selection of
+            primary keys. Will be used with a single parameter, which is a
+            tuple of the primary key. Essentially, the query will have to
+            include something like `WHERE primary_key = ANY($1)`.
+        """
         self._primary_key_name = primary_key_name
         self._query_all_string = query_all_string
         self._query_some_string = query_some_string
@@ -243,30 +270,41 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
     @t.override
     def score(self, index_name: str, record: tp.Record) -> numbers.Real:
         if index_name != 'primary_key':
-            raise ValueError('Only the primary_key index is supported.')
-        return record[self._primary_key_name]
+            raise ValueError('Only the primary_key index exists.')
+        return hash(record[self._primary_key_name])
 
     @t.override
-    def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
-        return primary_key
+    def primary_key_score(self, primary_key: ca.Hashable) -> numbers.Real:
+        return hash(primary_key)
 
     @t.override
     def storage_records_spec(
-            self, index_name: str, *primary_keys: numbers.Real,
+            self, index_name: str, *primary_keys: ca.Hashable,
             all_primary_keys: bool = False) -> storage.StorageRecordsSpec:
         if index_name != 'primary_key':
-            raise ValueError('Only the primary_key index is supported.')
-        intervals = [storage.Interval(
-            primary_key, math.nextafter(primary_key, float('inf')))
-            for primary_key in primary_keys]
-        return storage.StorageRecordsSpec(index_name, intervals)
+            raise ValueError('Only the primary_key index exists.')
+        if all_primary_keys:
+            intervals = [storage.Interval(float('-inf'), float('inf'))]
+            recheck_predicate = storage.StorageRecordsSpec.always_use_record
+        else:
+            primary_keys = frozenset(primary_keys)
+            intervals = []
+            for primary_key in primary_keys:
+                score = self.primary_key_score(primary_key)
+                score_plus_epsilon = math.nextafter(score, float('inf'))
+                intervals.append(storage.Interval(score, score_plus_epsilon))
+
+            def recheck_predicate(record):
+                return record[self._primary_key_name] in primary_keys
+        return storage.StorageRecordsSpec(
+            index_name, intervals, recheck_predicate)
 
     @t.override
     def db_records_spec(
-        self, index_name: str, *primary_keys: numbers.Real,
-            all_primary_keys: bool = False) -> db.DbRecordsSpec:
+        self, index_name: str, *primary_keys: ca.Hashable,
+            all_primary_keys: bool = False) -> db.QueryArgsDbRecordsSpec:
         if index_name != 'primary_key':
-            raise ValueError('Only the primary_key index is supported.')
+            raise ValueError('Only the primary_key index exists.')
         if all_primary_keys:
             return db.QueryArgsDbRecordsSpec(self._query_all_string, ())
         return db.QueryArgsDbRecordsSpec(
@@ -274,59 +312,42 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
 
     @t.override
     def prepare_adjustment(
-            self, index_name: str, *primary_keys: numbers.Real,
+            self, index_name: str, *primary_keys: ca.Hashable,
             all_primary_keys: bool = False) -> 'PrimaryKeyIndexes.Adjustment':
         if index_name != 'primary_key':
-            raise UnsupportedIndexOperation(
-                'Only the primary_key index is supported.')
-        if self._covers_all:
-            if all_primary_keys:
-                expire_spec, new_spec = None, None
-            else:
-                expire_spec = storage.StorageRecordsSpec(
-                    'primary_key',
-                    [storage.Interval(float('-inf'), float('inf'))])
-                new_spec = self.db_records_spec('primary_key', *primary_keys)
+            raise ValueError('Only the primary_key index exists.')
+        new_primary_keys = set() if all_primary_keys else set(primary_keys)
+        if all_primary_keys:
+            expire_spec = None
         else:
-            if all_primary_keys:
-                expire_spec = None
-                new_spec = self.db_records_spec(
-                    'primary_key', all_primary_keys=True)
-            else:
-                expire_spec = storage.StorageRecordsSpec(
-                    'primary_key',
-                    [storage.Interval(float('-inf'), float('inf'))])
-                new_spec = self.db_records_spec('primary_key', *primary_keys)
+            expire_spec = storage.StorageRecordsSpec(
+                'primary_key',
+                [storage.Interval(float('-inf'), float('inf'))])
+        if self._covers_all and all_primary_keys:
+            new_spec = None
+        elif not all_primary_keys:
+            new_spec = self.db_records_spec('primary_key', *primary_keys)
+        else:
+            new_spec = self.db_records_spec(
+                'primary_key', all_primary_keys=True)
         return self.Adjustment(
-            expire_spec, new_spec, set(primary_keys), all_primary_keys)
+            expire_spec, new_spec, new_primary_keys, all_primary_keys)
 
     @t.override
     def commit_adjustment(
             self, adjustment: 'PrimaryKeyIndexes.Adjustment') -> None:
-        if self._covers_all:
-            if adjustment.cover_all:
-                return
-            else:
-                self._covers_all = False
-                self._primary_keys = adjustment.primary_keys
-        else:
-            if adjustment.cover_all:
-                self._covers_all = True
-            else:
-                self._primary_keys = adjustment.primary_keys
+        self._primary_keys = adjustment.primary_keys
+        self._covers_all = adjustment.cover_all
 
     @t.override
     def covers(
-            self, index_name: str, *primary_keys: numbers.Real,
+            self, index_name: str, *primary_keys: ca.Hashable,
             all_primary_keys: bool = False) -> bool:
         if index_name != 'primary_key':
-            raise ValueError('Only the primary_key index is supported.')
+            raise ValueError('Only the primary_key index exists.')
         if self._covers_all:
             return True
         if all_primary_keys:
             return False
         return all(pk in self._primary_keys for pk in primary_keys)
 
-    @t.override
-    def observe(self, record: tp.Record) -> None:
-        self._primary_keys.add(self.score('primary_key', record))

@@ -57,7 +57,7 @@ class StorageRecordsSpec:
     The score intervals must not overlap.
     """
     @staticmethod
-    def _always_use_record(_):
+    def always_use_record(_):
         return True
 
     def __post_init__(self):
@@ -68,7 +68,7 @@ class StorageRecordsSpec:
 
     index_name: str
     score_intervals: list[Interval]
-    recheck_predicate: tp.RecheckPredicate = _always_use_record
+    recheck_predicate: tp.RecheckPredicate = always_use_record
 
 
 class StorageTable[PrimaryKey](abc.ABC):
