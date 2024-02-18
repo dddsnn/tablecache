@@ -224,6 +224,7 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
     @dc.dataclass(frozen=True)
     class Adjustment(Adjustment):
         primary_keys: set[numbers.Real]
+        cover_all: bool
 
     def __init__(
             self, primary_key_name: str, query_all_string: str,
@@ -251,8 +252,8 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
 
     @t.override
     def storage_records_spec(
-            self, index_name: str, *primary_keys: numbers.Real
-    ) -> storage.StorageRecordsSpec:
+            self, index_name: str, *primary_keys: numbers.Real,
+            all_primary_keys: bool = False) -> storage.StorageRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         intervals = [storage.Interval(
@@ -262,23 +263,24 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
 
     @t.override
     def db_records_spec(
-            self, index_name: str, *primary_keys: numbers.Real
-    ) -> db.DbRecordsSpec:
+        self, index_name: str, *primary_keys: numbers.Real,
+            all_primary_keys: bool = False) -> db.DbRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
-        if not primary_keys:
+        if all_primary_keys:
             return db.QueryArgsDbRecordsSpec(self._query_all_string, ())
         return db.QueryArgsDbRecordsSpec(
             self._query_some_string, (primary_keys,))
 
     @t.override
     def prepare_adjustment(
-            self, index_name: str, *primary_keys: numbers.Real) -> Adjustment:
+            self, index_name: str, *primary_keys: numbers.Real,
+            all_primary_keys: bool = False) -> 'PrimaryKeyIndexes.Adjustment':
         if index_name != 'primary_key':
             raise UnsupportedIndexOperation(
                 'Only the primary_key index is supported.')
         if self._covers_all:
-            if not primary_keys:
+            if all_primary_keys:
                 expire_spec, new_spec = None, None
             else:
                 expire_spec = storage.StorageRecordsSpec(
@@ -286,38 +288,42 @@ class PrimaryKeyIndexes(Indexes[numbers.Real]):
                     [storage.Interval(float('-inf'), float('inf'))])
                 new_spec = self.db_records_spec('primary_key', *primary_keys)
         else:
-            if not primary_keys:
+            if all_primary_keys:
                 expire_spec = None
-                new_spec = self.db_records_spec('primary_key')
+                new_spec = self.db_records_spec(
+                    'primary_key', all_primary_keys=True)
             else:
                 expire_spec = storage.StorageRecordsSpec(
                     'primary_key',
                     [storage.Interval(float('-inf'), float('inf'))])
                 new_spec = self.db_records_spec('primary_key', *primary_keys)
-        return self.Adjustment(expire_spec, new_spec, set(primary_keys))
+        return self.Adjustment(
+            expire_spec, new_spec, set(primary_keys), all_primary_keys)
 
     @t.override
     def commit_adjustment(
             self, adjustment: 'PrimaryKeyIndexes.Adjustment') -> None:
         if self._covers_all:
-            if not adjustment.primary_keys:
+            if adjustment.cover_all:
                 return
             else:
                 self._covers_all = False
                 self._primary_keys = adjustment.primary_keys
         else:
-            if not adjustment.primary_keys:
+            if adjustment.cover_all:
                 self._covers_all = True
             else:
                 self._primary_keys = adjustment.primary_keys
 
     @t.override
-    def covers(self, index_name: str, *primary_keys: numbers.Real) -> bool:
+    def covers(
+            self, index_name: str, *primary_keys: numbers.Real,
+            all_primary_keys: bool = False) -> bool:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index is supported.')
         if self._covers_all:
             return True
-        if not primary_keys:
+        if all_primary_keys:
             return False
         return all(pk in self._primary_keys for pk in primary_keys)
 
