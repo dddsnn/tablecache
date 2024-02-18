@@ -19,6 +19,7 @@ from tablecache.cache import CachedTable, DirtyIndex
 from tablecache.db import DbAccess, DbRecordsSpec, QueryArgsDbRecordsSpec
 from tablecache.index import (
     Adjustment,
+    AllIndexes,
     Indexes,
     PrimaryKeyIndexes,
     UnsupportedIndexOperation)

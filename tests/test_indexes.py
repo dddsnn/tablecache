@@ -22,6 +22,43 @@ import tablecache as tc
 from matchers import is_interval_containing
 
 
+class TestAllIndexes:
+    @pytest.fixture
+    def indexes(self):
+        return tc.AllIndexes('query_all')
+
+    def test_index_names(self, indexes):
+        assert indexes.index_names == frozenset(['primary_key'])
+
+    def test_storage_records_spec(self, indexes):
+        assert_that(
+            indexes.storage_records_spec('primary_key'),
+            has_properties(
+                index_name='primary_key',
+                score_intervals=[tc.Interval.everything()]))
+
+    def test_storage_records_spec_recheck_predicate(self, indexes):
+        spec = indexes.storage_records_spec(
+            'primary_key', recheck_predicate=lambda r: r['x'] < 3)
+        assert spec.recheck_predicate({'pk': 3, 'x': 1})
+        assert not spec.recheck_predicate({'pk': 1, 'x': 3})
+
+    def test_db_records_spec(self, indexes):
+        assert_that(
+            indexes.db_records_spec('primary_key'),
+            has_properties(query='query_all', args=()))
+
+    def test_prepare(self, indexes):
+        adj = indexes.prepare_adjustment('primary_key')
+        assert_that(adj, has_properties(
+            expire_spec=None,
+            new_spec=has_properties(query='query_all', args=())))
+
+    def test_covers(self, indexes):
+        assert indexes.covers('primary_key')
+        assert indexes.covers('primary_key', 'doesnt', 'matter')
+
+
 class TestPrimaryKeyIndexes:
     @pytest.fixture
     def indexes(self):

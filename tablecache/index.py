@@ -221,6 +221,66 @@ class Indexes[PrimaryKey](abc.ABC):
         """
 
 
+class AllIndexes(Indexes[t.Any]):
+    """
+    Very simple indexes loading everything.
+
+    Only the primary_key index is supported, but it essentially doesn't do
+    anything. All operations load everything. The only control there is is to
+    specify a recheck_predicate in storage_records_spec() as a filter.
+    """
+
+    def __init__(self, query_all_string: str) -> None:
+        """
+        :param query_all_string: A string to query all records from the DB.
+        """
+        self._query_all_string = query_all_string
+
+    @t.override
+    @property
+    def index_names(self) -> frozenset[str]:
+        return frozenset(['primary_key'])
+
+    @t.override
+    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index exists.')
+        return 0
+
+    @t.override
+    def primary_key_score(self, primary_key: ca.Hashable) -> numbers.Real:
+        return 0
+
+    @t.override
+    def storage_records_spec(
+        self, index_name: str, *index_args: t.Any,
+            recheck_predicate: tp.RecheckPredicate =
+            storage.StorageRecordsSpec.always_use_record
+    ) -> storage.StorageRecordsSpec:
+        """
+        :param recheck_prediate: Optional predicate to filter records.
+        """
+        return storage.StorageRecordsSpec(
+            'primary_key', [storage.Interval.everything()], recheck_predicate)
+
+    @t.override
+    def db_records_spec(self, index_name: str) -> db.QueryArgsDbRecordsSpec:
+        return db.QueryArgsDbRecordsSpec(self._query_all_string, ())
+
+    @t.override
+    def prepare_adjustment(
+            self, index_name: str, *index_args: t.Any) -> Adjustment:
+        return Adjustment(None, self.db_records_spec('primary_key'))
+
+    @t.override
+    def commit_adjustment(self, adjustment: Adjustment) -> None:
+        pass
+
+    @t.override
+    def covers(self, index_name: str, *index_args: t.Any) -> bool:
+        return True
+
+
 class PrimaryKeyIndexes(Indexes[ca.Hashable]):
     """
     Simple indexes for only selected primary keys.
