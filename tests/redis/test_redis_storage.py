@@ -27,6 +27,7 @@ import redis.asyncio as redis
 import tablecache as tc
 import tablecache.redis as tcr
 import tablecache.redis.storage as storage
+from tests.helpers import collect_async_iter
 
 
 @pytest.fixture(scope='session')
@@ -59,12 +60,6 @@ async def conn(wait_for_redis, redis_host):
     yield conn
     await conn.close()
 
-
-async def collect_async_iter(i):
-    ls = []
-    async for item in i:
-        ls.append(item)
-    return ls
 
 
 class FailCodec(tcr.Codec):

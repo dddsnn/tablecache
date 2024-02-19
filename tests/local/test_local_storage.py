@@ -1,0 +1,596 @@
+# Copyright 2024 Marc Lehmann
+
+# This file is part of tablecache.
+#
+# tablecache is free software: you can redistribute it and/or modify it under
+# the terms of the GNU Affero General Public License as published by the Free
+# Software Foundation, either version 3 of the License, or (at your option) any
+# later version.
+#
+# tablecache is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with tablecache. If not, see <https://www.gnu.org/licenses/>.
+
+import asyncio
+import operator as op
+import unittest.mock as um
+
+from hamcrest import *
+import pytest
+
+import tablecache as tc
+import tablecache.local as tcl
+from tests.helpers import collect_async_iter
+
+
+class IndexesFromScoreFunctionsDict:
+    def __init__(self, primary_key_name, score_functions):
+        self._primary_key_name = primary_key_name
+        self._score_functions = score_functions
+
+    @property
+    def index_names(self):
+        return frozenset(self._score_functions)
+
+    def score(self, index_name, record):
+        try:
+            return self._score_functions[index_name](record)
+        except KeyError:
+            raise ValueError
+
+    def primary_key_score(self, primary_key):
+        return self.score('primary_key', {self._primary_key_name: primary_key})
+
+
+class TestLocalTable:
+    @pytest.fixture
+    def make_table(self):
+        def factory(
+                table_name='table', primary_key_name='pk',
+                score_functions=None):
+            score_functions = score_functions or {
+                'primary_key': op.itemgetter(primary_key_name)}
+            return tcl.LocalStorageTable(
+                table_name=table_name, primary_key_name=primary_key_name,
+                indexes=IndexesFromScoreFunctionsDict(
+                    primary_key_name, score_functions))
+
+        return factory
+
+    @pytest.fixture
+    def table(self, make_table):
+        return make_table()
+
+    async def test_put_record_get_record(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+
+    async def test_put_record_get_record_multiple(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_put_record_raises_on_missing_primary_key(self, table):
+        with pytest.raises(ValueError):
+            await table.put_record({'s': 's1'})
+
+    async def test_get_record_raises_on_nonexistent(self, table):
+        with pytest.raises(KeyError):
+            await table.get_record(1)
+
+    async def test_get_record_handles_records_with_equal_scores(
+            self, make_table):
+        table = make_table(
+            score_functions={'primary_key': lambda r: r['pk'] % 2})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 2, 's': 's'})
+        assert_that(await table.get_record(0), has_entries(pk=0))
+        assert_that(await table.get_record(2), has_entries(pk=2))
+
+    async def test_multiple_tables(self, make_table):
+        table1 = make_table(table_name='t1')
+        table2 = make_table(table_name='t2')
+        await table1.put_record({'pk': 1, 's': 's1'})
+        await table1.put_record({'pk': 2, 's': 's2'})
+        await table2.put_record({'pk': 1, 's': 's3'})
+        assert_that(await table1.get_record(1), has_entries(pk=1, s='s1'))
+        assert_that(await table1.get_record(2), has_entries(pk=2, s='s2'))
+        assert_that(await table2.get_record(1), has_entries(pk=1, s='s3'))
+        with pytest.raises(KeyError):
+            await table2.get_record(2)
+
+    async def test_clear_only_deletes_own_keys(self, make_table):
+        table1 = make_table(table_name='t1')
+        table2 = make_table(table_name='t2')
+        await table1.put_record({'pk': 1, 's': 's1'})
+        await table2.put_record({'pk': 1, 's': 's2'})
+        await table1.clear()
+        with pytest.raises(KeyError):
+            await table1.get_record(1)
+        assert_that(await table2.get_record(1), has_entries(pk=1, s='s2'))
+
+    async def test_get_records_on_no_intervals(self, table):
+        assert_that(
+            await collect_async_iter(
+                table.get_records(tc.StorageRecordsSpec('primary_key', []))),
+            empty())
+
+    async def test_get_records_on_empty(self, table):
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_get_records_on_one_record(self, table):
+        await table.put_record({'pk': 0, 's': 's1'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0, s='s1')))
+
+    async def test_get_records_on_all_contained(self, table):
+        await table.put_record({'pk': -50, 's': 's1'})
+        await table.put_record({'pk': 0, 's': 's2'})
+        await table.put_record({'pk': 50, 's': 's3'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=-50, s='s1'), has_entries(pk=0, s='s2'),
+                has_entries(pk=50, s='s3')))
+
+    async def test_get_records_on_some_not_contained(self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(-10, 50)]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49)))
+
+    async def test_get_records_on_none_contained(self, table):
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(100, 150)]))
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_get_records_with_multiple_intervals(self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        await table.put_record({'pk': 60, 's': 's'})
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=-10), has_entries(pk=0), has_entries(pk=49),
+                has_entries(pk=50)))
+
+    async def test_get_records_uses_custom_score_function(
+            self, make_table):
+        def pk_minus_10(record):
+            return record['pk'] - 10
+
+        table = make_table(score_functions={'primary_key': pk_minus_10})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 10})
+        await table.put_record({'pk': 59})
+        await table.put_record({'pk': 60})
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(0, 50)]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=10), has_entries(pk=59)))
+
+    async def test_get_records_uses_recheck_predicate(self, table):
+        def x_in_s(record):
+            return 'x' in record['s']
+        await table.put_record({'pk': 0, 's': 'aaa'})
+        await table.put_record({'pk': 1, 's': 'bxb'})
+        await table.put_record({'pk': 2, 's': 'cxc'})
+        await table.put_record({'pk': 3, 's': 'ddd'})
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()], x_in_s))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
+
+    async def test_get_records_with_non_primary_key_index(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'haaa'})
+        await table.put_record({'pk': 3, 's': 'iaaa'})
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('d'), ord('i'))]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1), has_entries(pk=2)))
+
+    async def test_get_records_works_with_equal_primary_key_scores_in_index(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'cyyy'})
+        await table.put_record({'pk': 2, 's': 'czzz'})
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('d'))]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=0, s='cyyy'), has_entries(pk=2, s='czzz')))
+
+    async def test_delete_record_raises_on_nonexistent(self, table):
+        await table.put_record({'pk': 0, 's': 's0'})
+        with pytest.raises(KeyError):
+            await table.delete_record(1)
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0)))
+
+    async def test_delete_record_deletes(self, table):
+        await table.put_record({'pk': 0, 's': 's0'})
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.delete_record(1)
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=2)))
+
+    async def test_delete_record_doesnt_delete_other_records_with_same_score(
+            self, make_table):
+        table = make_table(
+            score_functions={'primary_key': lambda r: r['pk'] % 2})
+        await table.put_record({'pk': 0, 's': 's0'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.delete_record(0)
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=2)))
+
+    async def test_delete_records_on_empty(self, table):
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 50)]))
+        assert num_deleted == 0
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_delete_records_deletes_nothing(self, table):
+        await table.put_record({'pk': 0, 's': 's'})
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec('primary_key', []))
+        assert num_deleted == 0
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0)))
+
+    async def test_delete_records_deletes_all(self, table):
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 50)]))
+        assert num_deleted == 3
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_delete_records_deletes_some(self, table):
+        await table.put_record({'pk': -1, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        await table.put_record({'pk': 51, 's': 's'})
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 51)]))
+        assert num_deleted == 2
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=-1), has_entries(pk=51)))
+
+    async def test_delete_records_deletes_multiple_intervals(
+            self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -20, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec(
+                'primary_key', [tc.Interval(-40, -9), tc.Interval(10, 11)]))
+        assert num_deleted == 3
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=-50), has_entries(pk=0), has_entries(pk=49)))
+
+    async def test_delete_records_with_non_primary_key_index(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'cyyy'})
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('c') + 0.1)]))
+        assert num_deleted == 2
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1, s='dzzz')))
+
+    async def test_delete_records_uses_recheck_predicate(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'cyyy'})
+        await table.put_record({'pk': 3, 's': 'cxxx'})
+        num_deleted = await table.delete_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('c') + 0.1)],
+                lambda r: 'y' not in r['s']))
+        assert num_deleted == 2
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1, s='dzzz'), has_entries(pk=2, s='cyyy')))
+
+    async def test_delete_record_raises_if_deleted_in_subset_previously(
+            self, table):
+        await table.put_record({'pk': 0, 's': 's0'})
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.delete_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 10)]))
+        with pytest.raises(KeyError):
+            await table.delete_record(1)
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0)))
+
+    async def test_added_scratch_space_records_are_not_returned_immediately(
+            self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(KeyError):
+            await table.get_record(2)
+
+    async def test_added_scratch_space_records_are_returned_after_merge(
+            self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_adding_to_scratch_space_handles_updates(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
+
+    async def test_scratch_discard_records_doesnt_removed_immediately(
+            self, table):
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_scratch_discard_records_removes_after_merge(self, table):
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        table.scratch_merge()
+        with pytest.raises(KeyError):
+            await table.get_record(2)
+
+    async def test_scratch_records_can_be_deleted_and_added_again(self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        assert_that(await table.get_record(2), has_entries(pk=2, s='s2'))
+
+    async def test_scratch_discard_records_with_multiple_intervals(
+            self, table):
+        await table.put_record({'pk': -50, 's': 's'})
+        await table.put_record({'pk': -10, 's': 's'})
+        await table.put_record({'pk': 0, 's': 's'})
+        await table.put_record({'pk': 10, 's': 's'})
+        await table.put_record({'pk': 49, 's': 's'})
+        await table.put_record({'pk': 50, 's': 's'})
+        await table.put_record({'pk': 60, 's': 's'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(-10, 5), tc.Interval(40, 51)]))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=-50), has_entries(pk=10), has_entries(pk=60)))
+
+    async def test_scratch_discard_records_uses_custom_score_function(
+            self, make_table):
+        def pk_minus_10(record):
+            return record['pk'] - 10
+
+        table = make_table(score_functions={'primary_key': pk_minus_10})
+        await table.put_record({'pk': 0})
+        await table.put_record({'pk': 10})
+        await table.put_record({'pk': 59})
+        await table.put_record({'pk': 60})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(0, 50)]))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=60)))
+
+    async def test_scratch_discard_records_uses_recheck_predicate(self, table):
+        def x_in_s(record):
+            return 'x' in record['s']
+        await table.put_record({'pk': 0, 's': 'aaa'})
+        await table.put_record({'pk': 1, 's': 'bxb'})
+        await table.put_record({'pk': 2, 's': 'cxc'})
+        await table.put_record({'pk': 3, 's': 'ddd'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()], x_in_s))
+        table.scratch_merge()
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=3)))
+
+    async def test_scratch_discard_records_with_non_primary_key_index(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'haaa'})
+        await table.put_record({'pk': 3, 's': 'iaaa'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('d'), ord('i'))]))
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        table.scratch_merge()
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=0), has_entries(pk=3)))
+
+    async def test_scratch_discard_records_works_with_equal_primary_key_scores(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'cyyy'})
+        await table.put_record({'pk': 2, 's': 'czzz'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('d'))]))
+        table.scratch_merge()
+        records = table.get_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        assert_that(await collect_async_iter(records), empty())
+
+    async def test_scratch_discard_returns_number_of_records(self, table):
+        for i in range(4):
+            await table.put_record({'pk': i, 's': 's'})
+        num_records = await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 3)]))
+        assert num_records == 2
+
+    async def test_scratch_space_add_handles_indexes(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.scratch_put_record({'pk': 2, 's': 'daaa'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('first_char', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1, s='dzzz')))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('first_char', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1, s='dzzz'), has_entries(pk=2, s='daaa')))
+
+    async def test_multiple_scratch_operations(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 2, 's': 's2'})
+        await table.put_record({'pk': 3, 's': 's3'})
+        await table.scratch_put_record({'pk': 3, 's': 's3.2'})
+        await table.scratch_put_record({'pk': 4, 's': 's4'})
+        await table.scratch_put_record({'pk': 5, 's': 's5'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(1, 1.1)]))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=2), has_entries(pk=3, s='s3.2'),
+                has_entries(pk=4), has_entries(pk=5)))
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 3, 's': 's3'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(2, 2.1), tc.Interval(4, 4.1)]))
+        await table.scratch_put_record({'pk': 6, 's': 's6'})
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1), has_entries(pk=2),
+                has_entries(pk=3, s='s3'), has_entries(pk=4),
+                has_entries(pk=5)))
+        table.scratch_merge()
+        records = table.get_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=1), has_entries(pk=3, s='s3'),
+                has_entries(pk=5), has_entries(pk=6)))

@@ -19,7 +19,7 @@ from hamcrest import *
 import pytest
 
 import tablecache as tc
-from matchers import is_interval_containing
+from tests.helpers import is_interval_containing
 
 
 class TestAllIndexes:

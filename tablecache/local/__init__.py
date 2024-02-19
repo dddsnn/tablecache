@@ -1,4 +1,4 @@
-# Copyright 2023, 2024 Marc Lehmann
+# Copyright 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -15,24 +15,4 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-
-import hamcrest.core.base_matcher
-
-import tablecache as tc
-
-
-class IsIntervalContaining(hamcrest.core.base_matcher.BaseMatcher):
-    def __init__(self, value):
-        self.value = value
-
-    def _matches(self, item):
-        if not isinstance(item, tc.Interval):
-            return False
-        return item.ge <= self.value < item.lt
-
-    def describe_to(self, description):
-        description.append_text(f'interval containing {self.value}')
-
-
-def is_interval_containing(value):
-    return IsIntervalContaining(value)
+from tablecache.local.storage import LocalStorageTable
