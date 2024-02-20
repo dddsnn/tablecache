@@ -15,7 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-
 import hamcrest.core.base_matcher
 
 import tablecache as tc

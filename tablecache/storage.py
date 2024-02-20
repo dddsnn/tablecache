@@ -18,7 +18,7 @@
 import abc
 import dataclasses as dc
 import itertools as it
-import numbers
+import math
 import operator as op
 
 import tablecache.types as tp
@@ -32,15 +32,26 @@ class Interval:
     Represents an interval of the shape [ge,lt[, i.e. with a closed lower and
     open upper bound.
     """
-    ge: numbers.Real
-    lt: numbers.Real
+    ge: float
+    lt: float
+
+    def __post_init__(self):
+        if self.ge > self.lt:
+            raise ValueError('Bounds are not in order.')
 
     @staticmethod
-    def everything():
+    def everything() -> 'Interval':
         """
         The interval from negative to positive infinity, covering everything.
         """
         return Interval(float('-inf'), float('inf'))
+
+    @staticmethod
+    def only_containing(value) -> 'Interval':
+        """
+        The smallest interval containing the given value.
+        """
+        return Interval(value, math.nextafter(value, float('inf')))
 
     def __contains__(self, x):
         return self.ge <= x < self.lt

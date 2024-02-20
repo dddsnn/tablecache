@@ -15,9 +15,27 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import math
+
 import pytest
 
 import tablecache as tc
+
+
+class TestInterval:
+    def test_raises_on_bounds_not_in_order(self):
+        with pytest.raises(ValueError):
+            tc.Interval(2, 1)
+
+    def test_contains(self):
+        interval = tc.Interval(2, 5)
+        assert 2 in interval
+        assert math.nextafter(5, float('-inf')) in interval
+        assert 1 not in interval
+        assert 5 not in interval
+
+    def test_empty_interval(self):
+        assert 1 not in tc.Interval(1, 1)
 
 
 class TestStorageRecordsSpec:

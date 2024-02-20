@@ -127,7 +127,7 @@ class Indexes[PrimaryKey](abc.ABC):
         interpreted in a way specific to the index.
 
         When index_name is primary_key, this method can always be called with
-        just primary keys and no other arguments to specify those record.
+        a single primary key and no other arguments to specify that record.
         """
         raise NotImplementedError
 
@@ -208,7 +208,8 @@ class Indexes[PrimaryKey](abc.ABC):
         Raises an UnsupportedIndexOperation if the given index doesn't support
         checking coverage. However, the primary_key index always does. Also,
         like in *_records_spec(), when index_name is primary_key, this method
-        can always be called with just primary keys and no other arguments.
+        can always be called with just a single primary key and no other
+        arguments.
         """
         raise NotImplementedError
 
@@ -410,3 +411,121 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
             return False
         return all(pk in self._primary_keys for pk in primary_keys)
 
+
+class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
+    """
+    Simple indexes for a range of primary keys.
+
+    An index capable of loading a range of primary keys. Only the primary_key
+    index is supported. Primary keys must be numbers, and are equal to their
+    scores. No recheck predicate is needed.
+
+    Methods taking index args take (in addition to the index_name, which must
+    be 'primary_key'), either a single primary_key, or a range of keys via ge
+    and lt (greater-equal and less-than).
+
+    The implementation is quite simple, and adjusts will always expire all
+    current data and load the entire requested data set, even if they overlap
+    substantially.
+    """
+    @dc.dataclass(frozen=True)
+    class Adjustment(Adjustment):
+        interval: storage.Interval
+
+    def __init__(self, primary_key_name: str, query_range_string: str) -> None:
+        """
+        :param primary_key_name: Name of the primary key.
+        :query_range_string: A query string used to query a range of records in
+            the DB. Will be used with 2 parameters, the lower inclusive bound
+            and the upper exclusive bound. That means the query will likely
+            have to contain something like `WHERE primary_key >= $1 AND
+            primary_key < $2`.
+        """
+        self._primary_key_name = primary_key_name
+        self._query_range_string = query_range_string
+        self._interval = storage.Interval(0, 0)
+
+    @t.override
+    @property
+    def index_names(self) -> frozenset[str]:
+        return frozenset(['primary_key'])
+
+    @t.override
+    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index exists.')
+        return record[self._primary_key_name]
+
+    @t.override
+    def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
+        return primary_key
+
+    @t.override
+    def storage_records_spec(
+            self, index_name: str,
+            primary_key: t.Optional[numbers.Real] = None,
+            ge: t.Optional[numbers.Real] = None,
+            lt: t.Optional[numbers.Real] = None) -> storage.StorageRecordsSpec:
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index exists.')
+        return storage.StorageRecordsSpec(
+            index_name, [self._interval_from_args(primary_key, ge, lt)])
+
+    def _interval_from_args(self, primary_key, ge, lt):
+        if primary_key is not None:
+            if ({ge, lt} != {None}):
+                raise ValueError(
+                    'Specify either a single primary key or an interval.')
+            return storage.Interval.only_containing(primary_key)
+        else:
+            if primary_key is not None:
+                raise ValueError(
+                    'Specify either a single primary key or an interval.')
+            return storage.Interval(ge, lt)
+
+    @t.override
+    def db_records_spec(
+        self, index_name: str,
+            primary_key: t.Optional[numbers.Real] = None,
+            ge: t.Optional[numbers.Real] = None,
+            lt: t.Optional[numbers.Real] = None) -> db.QueryArgsDbRecordsSpec:
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index exists.')
+        interval = self._interval_from_args(primary_key, ge, lt)
+        return db.QueryArgsDbRecordsSpec(
+            self._query_range_string, (interval.ge, interval.lt))
+
+    @t.override
+    def prepare_adjustment(
+            self, index_name: str,
+            primary_key: t.Optional[numbers.Real] = None,
+            ge: t.Optional[numbers.Real] = None,
+            lt: t.Optional[numbers.Real] = None
+    ) -> 'PrimaryKeyRangeIndexes.Adjustment':
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index exists.')
+        new_interval = self._interval_from_args(primary_key, ge, lt)
+        expire_intervals = [self._interval]
+        expire_spec = storage.StorageRecordsSpec(
+            'primary_key', expire_intervals)
+        new_spec = self.db_records_spec('primary_key', primary_key, ge, lt)
+        return self.Adjustment(expire_spec, new_spec, new_interval)
+
+    @t.override
+    def commit_adjustment(
+            self, adjustment: 'PrimaryKeyRangeIndexes.Adjustment') -> None:
+        self._interval = adjustment.interval
+
+    @t.override
+    def covers(
+            self, index_name: str,
+            primary_key: t.Optional[numbers.Real] = None,
+            ge: t.Optional[numbers.Real] = None,
+            lt: t.Optional[numbers.Real] = None) -> bool:
+        if index_name != 'primary_key':
+            raise ValueError('Only the primary_key index exists.')
+        interval = self._interval_from_args(primary_key, ge, lt)
+        if primary_key is not None:
+            return primary_key in self._interval
+        return (self._interval.ge <= interval.ge and
+                interval.lt <= self._interval.lt)
