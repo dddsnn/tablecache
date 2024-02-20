@@ -31,9 +31,10 @@ class TestAllIndexes:
     def test_index_names(self, indexes):
         assert indexes.index_names == frozenset(['primary_key'])
 
-    def test_storage_records_spec(self, indexes):
+    @pytest.mark.parametrize('pks', [[], [1]])
+    def test_storage_records_spec(self, indexes, pks):
         assert_that(
-            indexes.storage_records_spec('primary_key'),
+            indexes.storage_records_spec('primary_key', *pks),
             has_properties(
                 index_name='primary_key',
                 score_intervals=[tc.Interval.everything()]))
@@ -44,13 +45,15 @@ class TestAllIndexes:
         assert spec.recheck_predicate({'pk': 3, 'x': 1})
         assert not spec.recheck_predicate({'pk': 1, 'x': 3})
 
-    def test_db_records_spec(self, indexes):
+    @pytest.mark.parametrize('pks', [[], [1]])
+    def test_db_records_spec(self, indexes, pks):
         assert_that(
-            indexes.db_records_spec('primary_key'),
+            indexes.db_records_spec('primary_key', *pks),
             has_properties(query='query_all', args=()))
 
-    def test_prepare(self, indexes):
-        adj = indexes.prepare_adjustment('primary_key')
+    @pytest.mark.parametrize('pks', [[], [1]])
+    def test_prepare(self, indexes, pks):
+        adj = indexes.prepare_adjustment('primary_key', *pks)
         assert_that(adj, has_properties(
             expire_spec=None,
             new_spec=has_properties(query='query_all', args=())))

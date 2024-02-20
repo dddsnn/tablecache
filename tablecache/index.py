@@ -227,8 +227,9 @@ class AllIndexes(Indexes[t.Any]):
     Very simple indexes loading everything.
 
     Only the primary_key index is supported, but it essentially doesn't do
-    anything. All operations load everything. The only control there is is to
-    specify a recheck_predicate in storage_records_spec() as a filter.
+    anything. All operations load everything (even if a single primary key is
+    specified). The only control there is is to specify a recheck_predicate in
+    storage_records_spec() as a filter.
     """
 
     def __init__(self, query_all_string: str) -> None:
@@ -265,7 +266,9 @@ class AllIndexes(Indexes[t.Any]):
             'primary_key', [storage.Interval.everything()], recheck_predicate)
 
     @t.override
-    def db_records_spec(self, index_name: str) -> db.QueryArgsDbRecordsSpec:
+    def db_records_spec(
+        self, index_name: str, *index_args: t.Any
+    ) -> db.QueryArgsDbRecordsSpec:
         return db.QueryArgsDbRecordsSpec(self._query_all_string, ())
 
     @t.override
