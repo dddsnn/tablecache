@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -15,23 +15,20 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import itertools as it
 import pathlib
 import setuptools
 
 requirements_path = (pathlib.Path(__file__).parent / 'requirements').absolute()
-with (requirements_path / 'base.txt').open() as f:
-    requirements = f.readlines()
-with (requirements_path / 'postgres.txt').open() as f:
-    postgres_requirements = f.readlines()
-with (requirements_path / 'local.txt').open() as f:
-    local_requirements = f.readlines()
-with (requirements_path / 'redis.txt').open() as f:
-    redis_requirements = f.readlines()
-with (requirements_path / 'test.txt').open() as f:
-    test_requirements = (
-        postgres_requirements + local_requirements + redis_requirements + f.readlines())
-with (requirements_path / 'dev.txt').open() as f:
-    dev_requirements = test_requirements + f.readlines()
+requirements = {}
+for requirements_file in requirements_path.glob('*.txt'):
+    with requirements_file.open() as f:
+        requirements[requirements_file.stem] = frozenset(f.readlines())
+requirements['test'] = frozenset(it.chain(
+    *[reqs for extra, reqs in requirements.items() if extra != 'test']))
+requirements['dev'] = frozenset(it.chain(*requirements.values()))
+extras_requirements = {extra: reqs for extra,
+                       reqs in requirements.items() if extra != 'base'}
 with (pathlib.Path(__file__).parent / 'README.md').absolute().open() as f:
     readme = f.read()
 
@@ -41,9 +38,5 @@ setuptools.setup(
     long_description_content_type='text/markdown', long_description=readme,
     author="Marc Lehmann", author_email="marc.lehmann@gmx.de",
     url='https://github.com/dddsnn/tablecache', python_requires='>=3.12',
-    install_requires=requirements,
-    extras_require={
-        'test': test_requirements, 'dev': dev_requirements,
-        'postgres': postgres_requirements, 'local': local_requirements,
-        'redis': redis_requirements},
+    install_requires=requirements['base'], extras_require=extras_requirements,
     license='AGPL-3.0-or-later')
