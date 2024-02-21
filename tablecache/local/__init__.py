@@ -15,4 +15,10 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+try:
+    import sortedcontainers
+except ImportError as e:
+    raise Exception(
+        'Please install tablecache[local] to use tablecache.local.') from e
+
 from tablecache.local.storage import LocalStorageTable

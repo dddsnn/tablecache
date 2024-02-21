@@ -15,7 +15,10 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import operator as op
 import typing as t
+
+import sortedcontainers
 
 import tablecache.index as index
 import tablecache.storage as storage
@@ -31,90 +34,119 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         self._index_names = indexes.index_names
         self._score_function = indexes.score
         self._primary_key_score_function = indexes.primary_key_score
-        self._records = {}
-        self._indexes = {}
-        self._scratch_records = {}
-        self._scratch_pks_delete = set()
+        self._indexes = self._make_index_dict()
+        self._scratch_indexes = self._make_index_dict()
+        self._scratch_records_to_delete = {}
 
     def __repr__(self) -> str:
         return f'Local table {self._table_name}'
 
+    def _make_index_dict(self):
+        return {index_name: sortedcontainers.SortedKeyList(
+            key=op.itemgetter(0)) for index_name in self._index_names}
+
     @t.override
     async def clear(self) -> None:
-        self._records = {}
-        self._indexes = {}
+        self._indexes = self._make_index_dict()
+        self._scratch_indexes = self._make_index_dict()
+        self._scratch_records_to_delete = {}
 
     @t.override
     async def put_record(self, record: tp.Record) -> None:
+        self._put_record(record)
+
+    def _put_record(self, record):
         if self._primary_key_name not in record:
             raise ValueError('Missing primary key.')
         primary_key = record[self._primary_key_name]
-        self._records[primary_key] = record
+        try:
+            self._delete_record(primary_key)
+        except KeyError:
+            pass
         for index_name in self._index_names:
             score = self._score_function(index_name, record)
-            self._indexes.setdefault(index_name, {}).setdefault(
-                score, set()).add(primary_key)
+            self._indexes[index_name].add((score, record))
 
     @t.override
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
-        return self._make_record(self._records[primary_key])
+        return self._get_record(primary_key)
+
+    def _get_record(self, primary_key):
+        primary_key_score = self._primary_key_score_function(primary_key)
+        records = self._get_records(
+            storage.StorageRecordsSpec(
+                'primary_key',
+                [storage.Interval.only_containing(primary_key_score)],
+                recheck_predicate=lambda r: r[self._primary_key_name] == primary_key), self._indexes)
+        try:
+            return next(records)
+        except StopIteration:
+            raise KeyError
 
     @t.override
     async def get_records(
             self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
-        for record in self._records.values():
-            if not records_spec.recheck_predicate(record):
-                continue
-            for interval in records_spec.score_intervals:
-                score = self._score_function(records_spec.index_name, record)
-                if score in interval:
-                    yield self._make_record(record)
-                    break
+        for record in self._get_records(records_spec, self._indexes):
+            yield record
 
-    def _make_record(self, record):
-        return record | {'source': 'storage'}
+    def _get_records(self, records_spec, indexes):
+        for interval in records_spec.score_intervals:
+            for _, record in indexes[records_spec.index_name].irange_key(
+                    interval.ge, interval.lt, inclusive=(True, False)):
+                if records_spec.recheck_predicate(record):
+                    yield record
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
-        del self._records[primary_key]
-        self._delete_index_entries(primary_key)
+        self._delete_record(primary_key)
 
-    def _delete_index_entries(self, primary_key):
-        for index in self._indexes.values():
-            for score, primary_keys in list(index.items()):
-                primary_keys.discard(primary_key)
-                if not primary_keys:
-                    del index[score]
+    def _delete_record(self, primary_key):
+        record = self._get_record(primary_key)
+        for index_name in self._index_names:
+            score = self._score_function(index_name, record)
+            self._indexes[index_name].discard((score, record))
 
     @t.override
     async def delete_records(
             self, records_spec: storage.StorageRecordsSpec) -> int:
-        delete = [r async for r in self.get_records(records_spec)]
-        for record in delete:
-            await self.delete_record(record[self._primary_key_name])
-        return len(delete)
+        records_to_delete = [r async for r in self.get_records(records_spec)]
+        for record in records_to_delete:
+            self._delete_record(record[self._primary_key_name])
+        return len(records_to_delete)
 
     @t.override
     async def scratch_put_record(self, record: tp.Record) -> None:
+        if self._primary_key_name not in record:
+            raise ValueError('Missing primary key.')
         primary_key = record[self._primary_key_name]
-        self._scratch_records[primary_key] = self._make_record(record)
-        self._scratch_pks_delete.discard(primary_key)
+        self._scratch_records_to_delete.pop(primary_key, None)
+        for index_name in self._index_names:
+            score = self._score_function(index_name, record)
+            self._scratch_indexes[index_name].add((score, record))
 
     @t.override
     async def scratch_discard_records(
             self, records_spec: storage.StorageRecordsSpec) -> int:
         num_discarded = 0
+        records_to_delete = [r for r in self._get_records(
+            records_spec, self._scratch_indexes)]
+        for record in records_to_delete:
+            for index_name in self._index_names:
+                score = self._score_function(index_name, record)
+                self._scratch_indexes[index_name].discard((score, record))
         async for record in self.get_records(records_spec):
             primary_key = record[self._primary_key_name]
-            self._scratch_records.pop(primary_key, None)
-            self._scratch_pks_delete.add(primary_key)
+            self._scratch_records_to_delete[primary_key] = record
             num_discarded += 1
         return num_discarded
 
     @t.override
     def scratch_merge(self) -> None:
-        for primary_key in self._scratch_pks_delete:
-            self._records.pop(primary_key, None)
-        self._records.update(self._scratch_records)
-        self._scratch_pks_delete.clear()
-        self._scratch_records.clear()
+        for record in self._scratch_records_to_delete.values():
+            for index_name in self._index_names:
+                score = self._score_function(index_name, record)
+                self._indexes[index_name].discard((score, record))
+        for _, record in self._scratch_indexes['primary_key']:
+            self._put_record(record)
+        self._scratch_indexes = self._make_index_dict()
+        self._scratch_records_to_delete = {}
