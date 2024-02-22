@@ -34,12 +34,15 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         self._index_names = indexes.index_names
         self._score_function = indexes.score
         self._primary_key_score_function = indexes.primary_key_score
-        self._indexes = self._make_index_dict()
-        self._scratch_indexes = self._make_index_dict()
-        self._scratch_records_to_delete = {}
+        self._reset_record_storage()
 
     def __repr__(self) -> str:
         return f'Local table {self._table_name}'
+
+    def _reset_record_storage(self):
+        self._indexes = self._make_index_dict()
+        self._scratch_indexes = self._make_index_dict()
+        self._scratch_records_to_delete = {}
 
     def _make_index_dict(self):
         return {index_name: sortedcontainers.SortedKeyList(
@@ -47,9 +50,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def clear(self) -> None:
-        self._indexes = self._make_index_dict()
-        self._scratch_indexes = self._make_index_dict()
-        self._scratch_records_to_delete = {}
+        self._reset_record_storage()
 
     @t.override
     async def put_record(self, record: tp.Record) -> None:
@@ -60,7 +61,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             raise ValueError('Missing primary key.')
         primary_key = record[self._primary_key_name]
         try:
-            self._delete_record(primary_key)
+            self._delete_record_by_primary_key(primary_key)
         except KeyError:
             pass
         for index_name in self._index_names:
@@ -98,10 +99,13 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
-        self._delete_record(primary_key)
+        self._delete_record_by_primary_key(primary_key)
 
-    def _delete_record(self, primary_key):
+    def _delete_record_by_primary_key(self, primary_key):
         record = self._get_record(primary_key)
+        self._delete_record(record)
+
+    def _delete_record(self, record):
         for index_name in self._index_names:
             score = self._score_function(index_name, record)
             self._indexes[index_name].discard((score, record))
@@ -111,7 +115,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             self, records_spec: storage.StorageRecordsSpec) -> int:
         records_to_delete = [r async for r in self.get_records(records_spec)]
         for record in records_to_delete:
-            self._delete_record(record[self._primary_key_name])
+            self._delete_record(record)
         return len(records_to_delete)
 
     @t.override

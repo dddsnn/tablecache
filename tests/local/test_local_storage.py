@@ -65,6 +65,16 @@ class TestLocalTable:
     def table(self, make_table):
         return make_table()
 
+    def assert_index_lengths(
+            self, table, index_length, scratch_add_length=0,
+            scratch_delete_length=0):
+        assert_that(
+            table._indexes.values(), only_contains(has_length(index_length)))
+        assert_that(
+            table._scratch_indexes.values(),
+            only_contains(has_length(scratch_add_length)))
+        assert len(table._scratch_records_to_delete) == scratch_delete_length
+
     async def test_put_record_get_record(self, table):
         await table.put_record({'pk': 1, 's': 's1'})
         assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
@@ -79,6 +89,91 @@ class TestLocalTable:
         with pytest.raises(ValueError):
             await table.put_record({'s': 's1'})
 
+    async def test_put_record_overwrites_old_value_with_same_primary_key(
+            self, table):
+        self.assert_index_lengths(table, 0)
+        await table.put_record({'pk': 1, 's': 'a'})
+        await table.put_record({'pk': 1, 's': 'b'})
+        self.assert_index_lengths(table, 1)
+        await table.put_record({'pk': 1, 's': 'new'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='new'))
+        self.assert_index_lengths(table, 1)
+
+    async def test_put_record_overwrites_old_other_indexes(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        self.assert_index_lengths(table, 1)
+        await table.put_record({'pk': 0, 's': 'dzzz'})
+        self.assert_index_lengths(table, 1)
+
+    async def test_put_record_doesnt_overwrite_other_records_in_other_indexes(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'czzz'})
+        self.assert_index_lengths(table, 2)
+        await table.put_record({'pk': 0, 's': 'fzzz'})
+        self.assert_index_lengths(table, 2)
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('d'))]))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=1, s='czzz')))
+
+    async def test_put_record_doesnt_overwrite_others_with_same_pk_score(
+            self, make_table):
+        table = make_table(
+            score_functions={'primary_key': lambda r: r['pk'] % 2})
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.put_record({'pk': 3, 's': 's3'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        assert_that(await table.get_record(3), has_entries(pk=3, s='s3'))
+
+    async def test_put_record_doesnt_overwrite_others_with_same_scores(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 2, 's': 'czzz'})
+        await table.put_record({'pk': 4, 's': 'czzz'})
+        self.assert_index_lengths(table, 3)
+        await table.put_record({'pk': 2, 's': 'fzzz'})
+        self.assert_index_lengths(table, 3)
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('d'))],
+                lambda r: r['s'][0] == 'c'))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(
+                has_entries(pk=0, s='czzz'), has_entries(pk=4, s='czzz')))
+
+    async def test_put_record_handles_equal_scores_and_counts_in_other_index(
+            self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': lambda r: r['pk'] % 2,
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 2, 's': 'czzz'})
+        await table.put_record({'pk': 0, 's': 'fzzz'})
+        records = table.get_records(
+            tc.StorageRecordsSpec(
+                'first_char', [tc.Interval(ord('c'), ord('d'))],
+                lambda r: r['s'][0] == 'c'))
+        assert_that(
+            await collect_async_iter(records),
+            contains_inanyorder(has_entries(pk=2, s='czzz')))
+
     async def test_get_record_raises_on_nonexistent(self, table):
         with pytest.raises(KeyError):
             await table.get_record(1)
@@ -91,6 +186,34 @@ class TestLocalTable:
         await table.put_record({'pk': 2, 's': 's'})
         assert_that(await table.get_record(0), has_entries(pk=0))
         assert_that(await table.get_record(2), has_entries(pk=2))
+
+    async def test_clear(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.get_record(1)
+        self.assert_index_lengths(table, 1)
+        await table.clear()
+        with pytest.raises(KeyError):
+            await table.get_record(1)
+        self.assert_index_lengths(table, 0)
+
+    async def test_clear_clears_scratch_space(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval(1, 2)]))
+        self.assert_index_lengths(
+            table, 1, scratch_add_length=1, scratch_delete_length=1)
+        await table.clear()
+        self.assert_index_lengths(
+            table, 0, scratch_add_length=0, scratch_delete_length=0)
 
     async def test_multiple_tables(self, make_table):
         table1 = make_table(table_name='t1')
@@ -278,6 +401,18 @@ class TestLocalTable:
             await collect_async_iter(records),
             contains_inanyorder(has_entries(pk=2)))
 
+    async def test_delete_record_deletes_from_all_indexes(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 1, 's': 'dzzz'})
+        await table.put_record({'pk': 2, 's': 'czzz'})
+        self.assert_index_lengths(table, 3)
+        await table.delete_record(0)
+        self.assert_index_lengths(table, 2)
+
     async def test_delete_records_on_empty(self, table):
         num_deleted = await table.delete_records(
             tc.StorageRecordsSpec('primary_key', [tc.Interval(0, 50)]))
@@ -382,6 +517,21 @@ class TestLocalTable:
             contains_inanyorder(
                 has_entries(pk=1, s='dzzz'), has_entries(pk=2, s='cyyy')))
 
+    async def test_delete_records_deletes_from_all_indexes(self, make_table):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 0, 's': 'czzz'})
+        await table.put_record({'pk': 2, 's': 'cyyy'})
+        await table.put_record({'pk': 3, 's': 'cxxx'})
+        self.assert_index_lengths(table, 3)
+        await table.delete_records(
+            tc.StorageRecordsSpec(
+                'primary_key', [tc.Interval.everything()],
+                lambda r: 'y' not in r['s']))
+        self.assert_index_lengths(table, 1)
+
     async def test_delete_record_raises_if_deleted_in_subset_previously(
             self, table):
         await table.put_record({'pk': 0, 's': 's0'})
@@ -425,6 +575,14 @@ class TestLocalTable:
 
     async def test_scratch_discard_records_removes_after_merge(self, table):
         await table.put_record({'pk': 2, 's': 's2'})
+        await table.scratch_discard_records(tc.StorageRecordsSpec(
+            'primary_key', [tc.Interval.everything()]))
+        table.scratch_merge()
+        with pytest.raises(KeyError):
+            await table.get_record(2)
+
+    async def test_scratch_records_can_be_deleted(self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
             'primary_key', [tc.Interval.everything()]))
         table.scratch_merge()
