@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 try:
+    import aiorwlock
     import sortedcontainers
 except ImportError as e:
     raise Exception(

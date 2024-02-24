@@ -17,7 +17,6 @@
 
 import asyncio
 import operator as op
-import unittest.mock as um
 
 from hamcrest import *
 import pytest
@@ -46,18 +45,38 @@ class IndexesFromScoreFunctionsDict:
         return self.score('primary_key', {self._primary_key_name: primary_key})
 
 
+class PausingCoroutine:
+    def __init__(self, coro):
+        self._coro = coro
+        self._event = asyncio.Event()
+
+    async def __call__(self, *args, **kwargs):
+        await self._event.wait()
+        await self._coro(*args, **kwargs)
+
+    def _continue(self):
+        assert not self._event.is_set()
+        self._event.set()
+
+
 class TestLocalTable:
     @pytest.fixture
-    def make_table(self):
+    def tables(self):
+        return []
+
+    @pytest.fixture
+    def make_table(self, tables):
         def factory(
                 table_name='table', primary_key_name='pk',
                 score_functions=None):
             score_functions = score_functions or {
                 'primary_key': op.itemgetter(primary_key_name)}
-            return tcl.LocalStorageTable(
+            table = tcl.LocalStorageTable(
                 table_name=table_name, primary_key_name=primary_key_name,
                 indexes=IndexesFromScoreFunctionsDict(
                     primary_key_name, score_functions))
+            tables.append(table)
+            return table
 
         return factory
 
@@ -65,15 +84,38 @@ class TestLocalTable:
     def table(self, make_table):
         return make_table()
 
+    @pytest.fixture
+    def scratch_space_is_clear(self, tables):
+        async def waiter():
+            for table in tables:
+                if table._scratch_merge_task:
+                    await table._scratch_merge_task
+        return waiter
+
+    @pytest.fixture
+    def pause_scratch_merge(self, tables, monkeypatch):
+        def mock_scratch_merge():
+            if len(tables) != 1:
+                raise Exception('Need exactly one table.')
+            mocked_coro = PausingCoroutine(tables[0]._scratch_merge)
+            monkeypatch.setattr(tables[0], '_scratch_merge', mocked_coro)
+            return mocked_coro
+        return mock_scratch_merge
+
+    @pytest.fixture(autouse=True)
+    async def wait_for_ongoing_merges_to_finish(
+            self, scratch_space_is_clear, tables):
+        for table in tables:
+            await scratch_space_is_clear(table)
+
     def assert_index_lengths(
-            self, table, index_length, scratch_add_length=0,
-            scratch_delete_length=0):
+            self, table, index_length, scratch_adds=0, scratch_deletes=0):
         assert_that(
             table._indexes.values(), only_contains(has_length(index_length)))
         assert_that(
             table._scratch_indexes.values(),
-            only_contains(has_length(scratch_add_length)))
-        assert len(table._scratch_records_to_delete) == scratch_delete_length
+            only_contains(has_length(scratch_adds)))
+        assert len(table._scratch_records_to_delete) == scratch_deletes
 
     async def test_put_record_get_record(self, table):
         await table.put_record({'pk': 1, 's': 's1'})
@@ -209,11 +251,9 @@ class TestLocalTable:
         await table.scratch_put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
             'primary_key', [tc.Interval(1, 2)]))
-        self.assert_index_lengths(
-            table, 1, scratch_add_length=1, scratch_delete_length=1)
+        self.assert_index_lengths(table, 1, scratch_adds=1, scratch_deletes=1)
         await table.clear()
-        self.assert_index_lengths(
-            table, 0, scratch_add_length=0, scratch_delete_length=0)
+        self.assert_index_lengths(table, 0, scratch_adds=0, scratch_deletes=0)
 
     async def test_multiple_tables(self, make_table):
         table1 = make_table(table_name='t1')
@@ -565,7 +605,7 @@ class TestLocalTable:
         table.scratch_merge()
         assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
 
-    async def test_scratch_discard_records_doesnt_removed_immediately(
+    async def test_scratch_discard_records_doesnt_remove_immediately(
             self, table):
         await table.put_record({'pk': 2, 's': 's2'})
         await table.scratch_discard_records(tc.StorageRecordsSpec(
@@ -714,6 +754,217 @@ class TestLocalTable:
             contains_inanyorder(
                 has_entries(pk=1, s='dzzz'), has_entries(pk=2, s='daaa')))
 
+    async def test_scratch_space_deletes_delete_from_storage(
+            self, table, scratch_space_is_clear):
+        await table.put_record({'pk': 1, 's': 's1'})
+        self.assert_index_lengths(table, 1, scratch_adds=0, scratch_deletes=0)
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        self.assert_index_lengths(table, 1, scratch_adds=0, scratch_deletes=1)
+        table.scratch_merge()
+        await scratch_space_is_clear()
+        self.assert_index_lengths(table, 0, scratch_adds=0, scratch_deletes=0)
+
+    async def test_scratch_space_updates_delete_overwritten_value(
+            self, table, scratch_space_is_clear):
+        await table.put_record({'pk': 1, 's': 's1'})
+        self.assert_index_lengths(table, 1, scratch_adds=0, scratch_deletes=0)
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        self.assert_index_lengths(table, 1, scratch_adds=1, scratch_deletes=0)
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
+        await scratch_space_is_clear()
+        self.assert_index_lengths(table, 1, scratch_adds=0, scratch_deletes=0)
+
+    async def test_scratch_space_delete_handles_indexes(
+            self, make_table, scratch_space_is_clear):
+        table = make_table(
+            score_functions={
+                'primary_key': op.itemgetter('pk'),
+                'first_char': lambda r: ord(r['s'][0])})
+        await table.put_record({'pk': 1, 's': 'czzz'})
+        self.assert_index_lengths(table, 1, scratch_adds=0, scratch_deletes=0)
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        self.assert_index_lengths(table, 1, scratch_adds=0, scratch_deletes=1)
+        table.scratch_merge()
+        await scratch_space_is_clear()
+        self.assert_index_lengths(table, 0, scratch_adds=0, scratch_deletes=0)
+
+    async def test_get_record_doesnt_return_deleted_in_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        with pytest.raises(KeyError):
+            await table.get_record(1)
+        paused_merge._continue()
+
+    async def test_get_record_returns_overwritten_in_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
+        paused_merge._continue()
+
+    async def test_get_record_doesnt_return_overwritten_then_deleted_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        with pytest.raises(KeyError):
+            await table.get_record(1)
+        paused_merge._continue()
+
+    async def test_get_record_returns_deleted_then_overwritten_in_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s1'))
+        table.scratch_merge()
+        assert_that(await table.get_record(1), has_entries(pk=1, s='s2'))
+        paused_merge._continue()
+
+    async def test_get_records_doesnt_return_deleted_in_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            contains_exactly(has_entries(pk=1, s='s1')))
+        table.scratch_merge()
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            empty())
+        paused_merge._continue()
+
+    async def test_get_records_returns_overwritten_in_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            contains_exactly(has_entries(pk=1, s='s1')))
+        table.scratch_merge()
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            contains_exactly(has_entries(pk=1, s='s2')))
+        paused_merge._continue()
+
+    async def test_get_records_doesnt_return_overwritten_then_deleted_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            contains_exactly(has_entries(pk=1, s='s1')))
+        table.scratch_merge()
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            empty())
+        paused_merge._continue()
+
+    async def test_get_records_returns_deleted_then_overwritten_in_scratch(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
+        await table.scratch_put_record({'pk': 1, 's': 's2'})
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            contains_exactly(has_entries(pk=1, s='s1')))
+        table.scratch_merge()
+        assert_that(
+            await collect_async_iter(table.get_records(
+                tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))),
+            contains_exactly(has_entries(pk=1, s='s2')))
+        paused_merge._continue()
+
+    async def test_scratch_activity_blocks_regular_puts(self, table):
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                table.put_record({'pk': 3, 's': 's3'}), 0.01)
+        table.scratch_merge()
+        await asyncio.wait_for(table.put_record({'pk': 3, 's': 's3'}), 0.01)
+
+    async def test_scratch_activity_blocks_regular_single_deletes(self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(table.delete_record(1), 0.01)
+        table.scratch_merge()
+        await asyncio.wait_for(table.delete_record(1), 0.01)
+
+    async def test_scratch_activity_blocks_regular_multiple_deletes(
+            self, table):
+        await table.put_record({'pk': 1, 's': 's1'})
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                table.delete_records(
+                    tc.StorageRecordsSpec(
+                        'primary_key', [tc.Interval.everything()])), 0.01)
+        table.scratch_merge()
+        await asyncio.wait_for(
+            table.delete_records(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.everything()])), 0.01)
+
+    async def test_scratch_merge_blocks_scratch_puts_until_merge_complete(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                table.scratch_put_record({'pk': 3, 's': 's3'}), 0.01)
+        paused_merge._continue()
+        await asyncio.wait_for(
+            table.scratch_put_record({'pk': 3, 's': 's3'}), 0.01)
+
+    async def test_scratch_merge_blocks_scratch_discards_until_merge_complete(
+            self, table, pause_scratch_merge):
+        paused_merge = pause_scratch_merge()
+        await table.scratch_put_record({'pk': 2, 's': 's2'})
+        table.scratch_merge()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(table.scratch_discard_records(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.everything()])), 0.01)
+        paused_merge._continue()
+        await asyncio.wait_for(table.scratch_discard_records(
+            tc.StorageRecordsSpec(
+                'primary_key', [tc.Interval.everything()])), 0.01)
+
     async def test_multiple_scratch_operations(self, table):
         await table.put_record({'pk': 1, 's': 's1'})
         await table.put_record({'pk': 2, 's': 's2'})
@@ -721,8 +972,8 @@ class TestLocalTable:
         await table.scratch_put_record({'pk': 3, 's': 's3.2'})
         await table.scratch_put_record({'pk': 4, 's': 's4'})
         await table.scratch_put_record({'pk': 5, 's': 's5'})
-        await table.scratch_discard_records(tc.StorageRecordsSpec(
-            'primary_key', [tc.Interval(1, 1.1)]))
+        await table.scratch_discard_records(
+            tc.StorageRecordsSpec('primary_key', [tc.Interval(1, 1.1)]))
         table.scratch_merge()
         records = table.get_records(
             tc.StorageRecordsSpec('primary_key', [tc.Interval.everything()]))
