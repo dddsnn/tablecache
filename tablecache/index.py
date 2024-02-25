@@ -48,6 +48,7 @@ class Adjustment:
     expire_spec: t.Optional[storage.StorageRecordsSpec]
     new_spec: t.Optional[db.DbRecordsSpec]
 
+
 class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
     """
     Score calculator for a set of indexes.

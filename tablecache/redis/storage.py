@@ -61,64 +61,66 @@ class RedisCodingError(Exception):
 
 
 class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
+    """
+    A table stored in Redis.
+
+    Enables storage and retrieval of records in Redis. Records must be
+    dict-like, with string keys. Each record must have a primary key which
+    uniquely identifies it within the table. Only attributes for which a codec
+    is specified are stored.
+
+    Each record is also associated with one or more index scores, one for each
+    of the given index names. At the very least, there has to be one for the
+    primary key (called primary_key), which returns a score for the primary
+    key. Score functions for other indexes may be defined, which allow queries
+    for multiple records via intervals of scores.
+
+    Each index is stored as a Redis sorted set with the key
+    <table_name>:<index_name>. The primary_key takes on the special role of
+    storing the records themselves. They are serialized to byte strings using
+    the attribute codecs, and can be accessed via their primary key score.
+    Other indexes only store, for their respective index score, the primary key
+    score for the record. That means there is a layer of indirection in getting
+    records via another index.
+
+    Neither primary key nor other indexes' scores need be unique, so each index
+    score may map to multiple primary key scores, each of which may belong to
+    different primary keys. All of these primary key scores need to be checked
+    (the wrong ones are filtered out via a recheck predicate). This implies
+    firstly that it can be costly if lots of records have equal index scores.
+    Secondly, the index needs to keep track of the number of primary key scores
+    it maps to. This is stored as a 32-bit unsigned integer, so there is a hard
+    limit of 2**32-1 primary key scores that each index score may map to.
+
+    While scratch space is in use (i.e. in between the first call to
+    scratch_{put,discard}_record() and the corresponding scratch_merge()),
+    regular write operations (put_record() and delete_record{,s}()) are locked.
+    Merging scratch space starts a background task that cleans up data in
+    Redis. During this operation, further scratch activity is locked.
+
+    The implementation of the scratch space requires a generation count to be
+    stored with each record, which are used to exclude records in scratch space
+    that aren't merged yet. The generation is incremented with each merge.
+    Since it is stored as a 32-bit unsigned integer, there is an upper limit of
+    the number of merges that can be done (of 2**32-1). Deletions in scratch
+    space store some data natively (i.e. in Python structures rather than in
+    Redis), so scratch operations with lots of deletions may consume
+    considerable amounts of memory.
+    """
+
     def __init__(
             self, conn: redis.Redis, *, table_name: str,
             record_scorer: index.RecordScorer[PrimaryKey],
             attribute_codecs: AttributeCodecs) -> None:
         """
-        A table stored in Redis.
-
-        Enables storage and retrieval of records in Redis. Records must be
-        dict-like, with string keys. Each record must have a primary key which
-        uniquely identifies it within the table. Only attributes for which a
-        codec is specified are stored.
-
-        Each record is also associated with one or more index scores, one for
-        each of the given index names. At the very least, there has to be one
-        for the primary key (called primary_key), which returns a score for the
-        primary key. Score functions for other indexes may be defined, which
-        allow queries for multiple records via intervals of scores.
-
-        Each index is stored as a Redis sorted set with the key
-        <table_name>:<index_name>. The primary_key takes on the special role of
-        storing the records themselves. They are serialized to byte strings
-        using the attribute codecs, and can be accessed via their primary key
-        score. Other indexes only store, for their respective index score, the
-        primary key score for the record. That means there is a layer of
-        indirection in getting records via another index.
-
-        Neither primary key nor other indexes' scores need be unique, so each
-        index score may map to multiple primary key scores, each of which may
-        belong to different primary keys. All of these primary key scores need
-        to be checked (the wrong ones are filtered out via a recheck
-        predicate). This implies firstly that it can be costly if lots of
-        records have equal index scores. Secondly, the index needs to keep
-        track of the number of primary key scores it maps to. This is stored as
-        a 32-bit unsigned integer, so there is a hard limit of 2**32-1 primary
-        key scores that each index score may map to.
-
-        While scratch space is in use (i.e. in between the first call to
-        scratch_{put,discard}_record() and the corresponding scratch_merge()),
-        regular write operations (put_record() and delete_record{,s}()) are
-        locked. Merging scratch space starts a background task that cleans up
-        data in Redis. During this operation, further scratch activity is
-        locked.
-
-        The implementation of the scratch space requires a generation count to
-        be stored with each record, which are used to exclude records in
-        scratch space that aren't merged yet. The generation is incremented
-        with each merge. Since it is stored as a 32-bit unsigned integer, there
-        is an upper limit of the number of merges that can be done (of
-        2**32-1). Deletions in scratch space store some data natively (i.e. in
-        Python structures rather than in Redis), so scratch operations with
-        lots of deletions may consume considerable amounts of memory.
-
         :param conn: An async Redis connection. The connection will not be
             closed and needs to be cleaned up from the outside.
         :param table_name: The name of the table, used as a prefix for keys in
             Redis. Must be unique within the Redis instance.
         :param record_scorer: A RecordScorer used to calculate a record's
             scores for all the indexes that need to be represented in storage.
+            The score function must not raise exceptions, or the storage may be
+            left in an undefined state.
         :param attribute_codecs: A dictionary of codecs for record attributes.
             Must map attribute names (strings) to Codec instances that are able
             to en-/decode the corresponding values. Only attributes present

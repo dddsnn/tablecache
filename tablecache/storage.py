@@ -105,6 +105,12 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
     (potentially slow) updates of the data are going on in the background. The
     implementation of the merge operation is expected to be relatively fast so
     that updates provide little disruption.
+
+    The behavior of the regular write operations (put_record() and
+    delete_record{,s}()) is not necessarily well-defined when they occur
+    concurrently (i.e. from separate tasks). When in doubt, locking should be
+    used, or the scratch space, which is guaranteed to behave in the presence
+    of multiple tasks.
     """
     @abc.abstractmethod
     async def clear(self) -> None:

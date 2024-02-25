@@ -70,6 +70,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         """
         :param record_scorer: A RecordScorer used to calculate a record's
             scores for all the indexes that need to be represented in storage.
+            The score function must not raise exceptions, or the storage may be
+            left in an undefined state.
         :param table_name: Name of the table. Only informational. If not given,
             a random UUID string is generated.
         """
