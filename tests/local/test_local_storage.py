@@ -66,13 +66,11 @@ class TestLocalTable:
 
     @pytest.fixture
     def make_table(self, tables):
-        def factory(
-                table_name='table', primary_key_name='pk',
-                score_functions=None):
+        def factory(*, primary_key_name='pk', score_functions=None):
             score_functions = score_functions or {
                 'primary_key': op.itemgetter(primary_key_name)}
             table = tcl.LocalStorageTable(
-                table_name=table_name, primary_key_name=primary_key_name,
+                primary_key_name=primary_key_name,
                 indexes=IndexesFromScoreFunctionsDict(
                     primary_key_name, score_functions))
             tables.append(table)
@@ -255,8 +253,8 @@ class TestLocalTable:
         self.assert_index_lengths(table, 0, scratch_adds=0, scratch_deletes=0)
 
     async def test_multiple_tables(self, make_table):
-        table1 = make_table(table_name='t1')
-        table2 = make_table(table_name='t2')
+        table1 = make_table()
+        table2 = make_table()
         await table1.put_record({'pk': 1, 's': 's1'})
         await table1.put_record({'pk': 2, 's': 's2'})
         await table2.put_record({'pk': 1, 's': 's3'})
@@ -267,8 +265,8 @@ class TestLocalTable:
             await table2.get_record(2)
 
     async def test_clear_only_deletes_own_keys(self, make_table):
-        table1 = make_table(table_name='t1')
-        table2 = make_table(table_name='t2')
+        table1 = make_table()
+        table2 = make_table()
         await table1.put_record({'pk': 1, 's': 's1'})
         await table2.put_record({'pk': 1, 's': 's2'})
         await table1.clear()

@@ -19,6 +19,7 @@ import asyncio
 import itertools as it
 import operator as op
 import typing as t
+import uuid
 
 import aiorwlock
 import sortedcontainers
@@ -63,11 +64,14 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     """
 
     def __init__(
-            self, *, table_name: str, primary_key_name: str,
-            indexes: index.Indexes[PrimaryKey]) -> None:
-        self._table_name = table_name
+            self, *, primary_key_name: str,
+            indexes: index.Indexes[PrimaryKey], table_name: str = None
+    ) -> None:
         self._primary_key_name = primary_key_name
         self._index_names = indexes.index_names
+        self._table_name = table_name
+        if self._table_name is None:
+            self._table_name = str(uuid.uuid4())
         self._score_function = indexes.score
         self._primary_key_score_function = indexes.primary_key_score
         self._scratch_condition = asyncio.Condition()
