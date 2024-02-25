@@ -64,16 +64,18 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     """
 
     def __init__(
-            self, *, primary_key_name: str,
-            record_scorer: index.RecordScorer[PrimaryKey], table_name: str = None
-    ) -> None:
-        self._primary_key_name = primary_key_name
-        self._index_names = record_scorer.index_names
+            self, *, record_scorer: index.RecordScorer[PrimaryKey],
+            table_name: str = None) -> None:
+        """
+        :param record_scorer: A RecordScorer used to calculate a record's
+            scores for all the indexes that need to be represented in storage.
+        :param table_name: Name of the table. Only informational. If not given,
+            a random UUID string is generated.
+        """
+        self._record_scorer = record_scorer
         self._table_name = table_name
         if self._table_name is None:
             self._table_name = str(uuid.uuid4())
-        self._score_function = record_scorer.score
-        self._primary_key_score_function = record_scorer.primary_key_score
         self._scratch_condition = asyncio.Condition()
         self._scratch_merge_task = None
         self._scratch_merge_read_lock = aiorwlock.RWLock()
@@ -90,7 +92,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     def _make_index_dict(self):
         return {
             index_name: sortedcontainers.SortedKeyList(key=op.itemgetter(0))
-            for index_name in self._index_names}
+            for index_name in self._record_scorer.index_names}
 
     @t.override
     async def clear(self) -> None:
@@ -109,11 +111,9 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             self._put_record(record)
 
     def _put_record(self, record):
-        if self._primary_key_name not in record:
-            raise ValueError('Missing primary key.')
-        primary_key = record[self._primary_key_name]
         try:
-            self._delete_record_by_primary_key(primary_key)
+            self._delete_record_by_primary_key(
+                self._record_scorer.primary_key(record))
         except KeyError:
             pass
         self._for_each_index(
@@ -121,8 +121,8 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             self._indexes[index_name].add((score, record)))
 
     def _for_each_index(self, record, function):
-        for index_name in self._index_names:
-            score = self._score_function(index_name, record)
+        for index_name in self._record_scorer.index_names:
+            score = self._record_scorer.score(index_name, record)
             function(index_name, score)
 
     @t.override
@@ -146,7 +146,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             raise KeyError
 
     def _records_spec_for_only_primary_key(self, primary_key):
-        primary_key_score = self._primary_key_score_function(primary_key)
+        primary_key_score = self._record_scorer.primary_key_score(primary_key)
         return storage.StorageRecordsSpec(
             'primary_key',
             [storage.Interval.only_containing(primary_key_score)],
@@ -154,7 +154,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     def _record_primary_key_equals(self, primary_key):
         def checker(record):
-            return record[self._primary_key_name] == primary_key
+            return self._record_scorer.primary_key(record) == primary_key
         return checker
 
     @t.override
@@ -183,7 +183,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         already_returned = set()
 
         def checker(record):
-            primary_key = record[self._primary_key_name]
+            primary_key = self._record_scorer.primary_key(record)
             is_ok = (primary_key not in self._scratch_records_to_delete and
                      primary_key not in already_returned)
             already_returned.add(primary_key)
@@ -270,10 +270,8 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             await self._scratch_put_record_locked(record)
 
     async def _scratch_put_record_locked(self, record):
-        if self._primary_key_name not in record:
-            raise ValueError('Missing primary key.')
-        primary_key = record[self._primary_key_name]
-        self._scratch_records_to_delete.pop(primary_key, None)
+        self._scratch_records_to_delete.pop(
+            self._record_scorer.primary_key(record), None)
         self._for_each_index(
             record, lambda index_name, score:
             self._scratch_indexes[index_name].add((score, record)))
@@ -300,12 +298,12 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             r for r in self._get_records_from_indexes(
                 records_spec, self._scratch_indexes)]
         for record in records_to_discard:
-            for index_name in self._index_names:
-                score = self._score_function(index_name, record)
+            for index_name in self._record_scorer.index_names:
+                score = self._record_scorer.score(index_name, record)
                 self._scratch_indexes[index_name].discard((score, record))
             await asyncio.sleep(0)  # Yield to event loop to remain lively.
         async for record in self.get_records(records_spec):
-            primary_key = record[self._primary_key_name]
+            primary_key = self._record_scorer.primary_key(record)
             self._scratch_records_to_delete[primary_key] = record
             num_discarded += 1
         return num_discarded

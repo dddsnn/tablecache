@@ -85,6 +85,12 @@ class MultiIndexes(tc.Indexes[int]):
     def primary_key_score(self, primary_key):
         return primary_key + 1
 
+    def primary_key(self, record):
+        try:
+            return record['pk']
+        except KeyError:
+            raise ValueError
+
     def storage_records_spec(self, index_name, *args, **kwargs):
         if index_name == 'primary_key':
             return tc.StorageRecordsSpec(
@@ -187,10 +193,8 @@ class MockDbAccess(tc.DbAccess):
 
 
 class MockStorageTable(tc.StorageTable):
-    def __init__(self, *, primary_key_name, indexes):
-        self._primary_key_name = primary_key_name
-        self._index_names = indexes.index_names
-        self._score_function = indexes.score
+    def __init__(self, *, record_scorer):
+        self._record_scorer = record_scorer
         self.records = {}
         self._indexes = {}
         self._scratch_records = {}
@@ -214,10 +218,10 @@ class MockStorageTable(tc.StorageTable):
         self._indexes = {}
 
     async def put_record(self, record):
-        primary_key = record[self._primary_key_name]
+        primary_key = self._record_scorer.primary_key(record)
         self.records[primary_key] = record
-        for index_name in self._index_names:
-            score = self._score_function(index_name, record)
+        for index_name in self._record_scorer.index_names:
+            score = self._record_scorer.score(index_name, record)
             self._indexes.setdefault(index_name, {}).setdefault(
                 score, set()).add(primary_key)
 
@@ -229,7 +233,8 @@ class MockStorageTable(tc.StorageTable):
             if not records_spec.recheck_predicate(record):
                 continue
             for interval in records_spec.score_intervals:
-                score = self._score_function(records_spec.index_name, record)
+                score = self._record_scorer.score(
+                    records_spec.index_name, record)
                 if score in interval:
                     yield self._make_record(record)
                     break
@@ -251,12 +256,12 @@ class MockStorageTable(tc.StorageTable):
     async def delete_records(self, records_spec):
         delete = [r async for r in self.get_records(records_spec)]
         for record in delete:
-            await self.delete_record(record[self._primary_key_name])
+            await self.delete_record(self._record_scorer.primary_key(record))
         return len(delete)
 
     async def scratch_put_record(self, record):
         self._num_scratch_ops += 1
-        primary_key = record[self._primary_key_name]
+        primary_key = self._record_scorer.primary_key(record)
         self._scratch_records[primary_key] = self._make_record(record)
         self._scratch_pks_delete.discard(primary_key)
 
@@ -264,7 +269,7 @@ class MockStorageTable(tc.StorageTable):
         self._num_scratch_ops += 1
         num_discarded = 0
         async for record in self.get_records(records_spec):
-            primary_key = record[self._primary_key_name]
+            primary_key = self._record_scorer.primary_key(record)
             self._scratch_records.pop(primary_key, None)
             self._scratch_pks_delete.add(primary_key)
             num_discarded += 1
@@ -296,10 +301,8 @@ class TestCachedTable:
     @pytest.fixture
     def make_tables(self, indexes, db_access):
         def factory(indexes=indexes):
-            storage_table = MockStorageTable(
-                primary_key_name='pk', indexes=indexes)
-            cached_table = tc.CachedTable(
-                indexes, db_access, storage_table, primary_key_name='pk')
+            storage_table = MockStorageTable(record_scorer=indexes)
+            cached_table = tc.CachedTable(indexes, db_access, storage_table)
             return cached_table, storage_table
 
         return factory

@@ -62,9 +62,9 @@ class RedisCodingError(Exception):
 
 class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     def __init__(
-            self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
-            attribute_codecs: AttributeCodecs,
-            record_scorer: index.RecordScorer[PrimaryKey]) -> None:
+            self, conn: redis.Redis, *, table_name: str,
+            record_scorer: index.RecordScorer[PrimaryKey],
+            attribute_codecs: AttributeCodecs) -> None:
         """
         A table stored in Redis.
 
@@ -117,29 +117,22 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             closed and needs to be cleaned up from the outside.
         :param table_name: The name of the table, used as a prefix for keys in
             Redis. Must be unique within the Redis instance.
-        :param primary_key_name: The name of the attribute to be used as
-            primary key. Must also be present in attribute_codecs.
+        :param record_scorer: A RecordScorer used to calculate a record's
+            scores for all the indexes that need to be represented in storage.
         :param attribute_codecs: A dictionary of codecs for record attributes.
             Must map attribute names (strings) to Codec instances that are able
             to en-/decode the corresponding values. Only attributes present
             here are stored.
-        :param record_scorer: A RecordScorer used to calculate a record's
-            scores for all the indexes that need to be represented in storage.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
             raise ValueError('Attribute names must be strings.')
-        if primary_key_name not in attribute_codecs:
-            raise ValueError('Codec for primary key is missing.')
         if 'primary_key' not in record_scorer.index_names:
             raise ValueError('Missing primary_key index.')
         self._conn = conn
         self._table_name = table_name
-        self._primary_key_name = primary_key_name
+        self._record_scorer = record_scorer
         self._row_codec = RowCodec(attribute_codecs)
-        self._index_names = record_scorer.index_names
-        self._score_function = record_scorer.score
-        self._primary_key_score_function = record_scorer.primary_key_score
         self._rwlock = aiorwlock.RWLock()
         self._scratch_space = ScratchSpace()
         self._scratch_condition = asyncio.Condition(self._rwlock.writer_lock)
@@ -149,7 +142,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def clear(self) -> None:
-        for index_name in self._index_names:
+        for index_name in self._record_scorer.index_names:
             await self._conn.delete(f'{self._table_name}:{index_name}')
 
     @t.override
@@ -172,7 +165,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             return await self._put_record_locked(record)
 
     async def _put_record_locked(self, record):
-        primary_key = self._record_primary_key(record)
+        primary_key = self._record_scorer.primary_key(record)
         try:
             await self._delete_record_locked(primary_key)
         except KeyError:
@@ -182,25 +175,18 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         await self._put_encoded_record(record, encoded_record)
 
     async def _put_encoded_record(self, record, encoded_record):
-        primary_key_score = self._score_function('primary_key', record)
+        primary_key_score = self._record_scorer.score('primary_key', record)
         await self._conn.zadd(
             f'{self._table_name}:primary_key',
             mapping=PairAsItems(memoryview(encoded_record), primary_key_score))
         await self._modify_index_entries(record, primary_key_score, 1)
 
-    def _record_primary_key(self, record):
-        try:
-            return record[self._primary_key_name]
-        except KeyError as e:
-            raise ValueError(
-                f'Record {record} is missing a primary key.') from e
-
     async def _modify_index_entries(self, record, primary_key_score, inc):
         assert inc == -1 or inc == 1
-        for index_name in self._index_names:
+        for index_name in self._record_scorer.index_names:
             if index_name == 'primary_key':
                 continue
-            index_score = self._score_function(index_name, record)
+            index_score = self._record_scorer.score(index_name, record)
             encoded_primary_key_scores = await self._conn.zrange(
                 f'{self._table_name}:{index_name}', index_score, index_score,
                 byscore=True)
@@ -246,14 +232,13 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             return decoded_record
 
     async def _get_record_locked(self, primary_key):
-        primary_key_score = self._primary_key_score_function(primary_key)
+        primary_key_score = self._record_scorer.primary_key_score(primary_key)
         records = self._get_records_by_primary_key_score(
             [storage.Interval(primary_key_score, primary_key_score)],
-            lambda r: r[self._primary_key_name] == primary_key)
+            lambda r: self._record_scorer.primary_key(r) == primary_key)
         async for encoded_record, decoded_record in records:
             return encoded_record, decoded_record
-        raise KeyError(
-            f'No record with {self._primary_key_name}={primary_key}.')
+        raise KeyError(f'No record with primary key {primary_key}.')
 
     async def _get_records_by_primary_key_score(
             self, primary_key_score_intervals, recheck_predicate,
@@ -274,7 +259,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             self, encoded_records, recheck_predicate, filter_scratch_records):
         for encoded_record in encoded_records:
             decoded_record, generation = self._row_codec.decode(encoded_record)
-            primary_key = self._record_primary_key(decoded_record)
+            primary_key = self._record_scorer.primary_key(decoded_record)
             should_include_record = recheck_predicate(decoded_record)
             if filter_scratch_records:
                 should_include_record &= (
@@ -327,7 +312,8 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         await self._delete_record(encoded_record, decoded_record)
 
     async def _delete_record(self, encoded_record, decoded_record):
-        primary_key_score = self._score_function('primary_key', decoded_record)
+        primary_key_score = self._record_scorer.score(
+            'primary_key', decoded_record)
         await self._modify_index_entries(decoded_record, primary_key_score, -1)
         await self._conn.zrem(
             f'{self._table_name}:primary_key', encoded_record)
@@ -361,7 +347,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             return await self._scratch_put_record_locked(record)
 
     async def _scratch_put_record_locked(self, record):
-        primary_key = self._record_primary_key(record)
+        primary_key = self._record_scorer.primary_key(record)
         try:
             existing_encoded_record, existing_decoded_record = (
                 await self._get_record_locked(primary_key))
@@ -396,7 +382,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         num_marked = 0
         async for _, decoded_record in records:
             self._scratch_space.mark_primary_key_for_deletion(
-                self._record_primary_key(decoded_record))
+                self._record_scorer.primary_key(decoded_record))
             num_marked += 1
         return num_marked
 
@@ -422,13 +408,14 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
                 encoded_record in encoded_records_to_delete)
         primary_keys_for_potential_deletion = (
             primary_keys_to_delete | {
-                self._record_primary_key(record)
+                self._record_scorer.primary_key(record)
                 for record in self._scratch_space.records_for_deletion})
         for primary_key in primary_keys_for_potential_deletion:
-            primary_key_score = self._primary_key_score_function(primary_key)
+            primary_key_score = self._record_scorer.primary_key_score(
+                primary_key)
             records = self._get_records_by_primary_key_score(
                 [storage.Interval(primary_key_score, primary_key_score)],
-                lambda r: r[self._primary_key_name] == primary_key,
+                lambda r: self._record_scorer.primary_key(r) == primary_key,
                 filter_scratch_records=False)
             async for encoded_record, decoded_record in records:
                 if should_delete(primary_key, encoded_record):

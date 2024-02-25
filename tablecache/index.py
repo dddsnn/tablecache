@@ -60,8 +60,8 @@ class RecordScorer[PrimaryKey](abc.ABC):
     too many collisions).
 
     At the very least, supports the index named primary_key, which maps a
-    record's primary key to a primary key score.
-
+    record's primary key to a primary key score. Also provides a function to
+    extract the primary key from a record.
 
     This is the limited interface required by implementations of StorageTable,
     but it's probably best implemented as part of an Indexes.
@@ -89,6 +89,15 @@ class RecordScorer[PrimaryKey](abc.ABC):
     @abc.abstractmethod
     def primary_key_score(self, primary_key: PrimaryKey) -> numbers.Real:
         """Calculate the primary key score."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def primary_key(self, record: tp.Record) -> PrimaryKey:
+        """
+        Extract the primary key from a record.
+
+        Raises a ValueError if the primary key is missing or otherwise invalid.
+        """
         raise NotImplementedError
 
 
@@ -248,10 +257,12 @@ class AllIndexes(Indexes[t.Any]):
     storage_records_spec() as a filter.
     """
 
-    def __init__(self, query_all_string: str) -> None:
+    def __init__(self, primary_key_name: str, query_all_string: str) -> None:
         """
+        :param primary_key_name: Name of the primary key.
         :param query_all_string: A string to query all records from the DB.
         """
+        self._primary_key_name = primary_key_name
         self._query_all_string = query_all_string
 
     @t.override
@@ -268,6 +279,13 @@ class AllIndexes(Indexes[t.Any]):
     @t.override
     def primary_key_score(self, primary_key: ca.Hashable) -> numbers.Real:
         return 0
+
+    @t.override
+    def primary_key(self, record: tp.Record) -> t.Any:
+        try:
+            return record[self._primary_key_name]
+        except KeyError:
+            raise ValueError('Missing primary key.')
 
     @t.override
     def storage_records_spec(
@@ -351,11 +369,18 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
     def score(self, index_name: str, record: tp.Record) -> numbers.Real:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
-        return hash(record[self._primary_key_name])
+        return hash(self.primary_key(record))
 
     @t.override
     def primary_key_score(self, primary_key: ca.Hashable) -> numbers.Real:
         return hash(primary_key)
+
+    @t.override
+    def primary_key(self, record: tp.Record) -> t.Any:
+        try:
+            return record[self._primary_key_name]
+        except KeyError:
+            raise ValueError('Missing primary key.')
 
     @t.override
     def storage_records_spec(
@@ -375,7 +400,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
                 intervals.append(storage.Interval(score, score_plus_epsilon))
 
             def recheck_predicate(record):
-                return record[self._primary_key_name] in primary_keys
+                return self.primary_key(record) in primary_keys
         return storage.StorageRecordsSpec(
             index_name, intervals, recheck_predicate)
 
@@ -473,11 +498,18 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
     def score(self, index_name: str, record: tp.Record) -> numbers.Real:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
-        return record[self._primary_key_name]
+        return self.primary_key(record)
 
     @t.override
     def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
         return primary_key
+
+    @t.override
+    def primary_key(self, record: tp.Record) -> numbers.Real:
+        try:
+            return record[self._primary_key_name]
+        except KeyError:
+            raise ValueError('Missing primary key.')
 
     @t.override
     def storage_records_spec(

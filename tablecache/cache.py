@@ -71,21 +71,17 @@ class CachedTable[PrimaryKey]:
 
     def __init__(
             self, indexes: index.Indexes, db_access: db.DbAccess,
-            storage_table: storage.StorageTable, *, primary_key_name: str
-    ) -> None:
+            storage_table: storage.StorageTable) -> None:
         """
         :param indexes: An Indexes instance that is used to translate query
             arguments into ways of loading actual records, as well as keeping
             track of which records are in storage.
         :param db_access: The DB access.
         :param storage_table: The storage table.
-        :param primary_key_name: The name of the attribute to be used as
-            primary key. Must also be present in attribute_codecs.
         """
         self._indexes = indexes
         self._db_access = db_access
         self._storage_table = storage_table
-        self._primary_key_name = primary_key_name
         self._invalid_record_repo = InvalidRecordRepository(indexes)
         self._loaded_event = asyncio.Event()
         self._scratch_space_lock = asyncio.Lock()
@@ -298,7 +294,7 @@ class CachedTable[PrimaryKey]:
         async for record in self._storage_table.get_records(
                 records_spec):
             if self._invalid_record_repo.primary_key_is_invalid(
-                    record[self._primary_key_name]):
+                    self._indexes.primary_key(record)):
                 return await self._refresh_and_get_records_from_storage(
                     index_name, *index_args, **index_kwargs)
             records.append(record)

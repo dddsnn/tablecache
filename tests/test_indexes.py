@@ -26,7 +26,7 @@ from tests.helpers import is_interval_containing
 class TestAllIndexes:
     @pytest.fixture
     def indexes(self):
-        return tc.AllIndexes('query_all')
+        return tc.AllIndexes('pk', 'query_all')
 
     def test_index_names(self, indexes):
         assert indexes.index_names == frozenset(['primary_key'])

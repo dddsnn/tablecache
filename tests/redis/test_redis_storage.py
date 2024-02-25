@@ -82,8 +82,7 @@ class ManuallyUnlockedScratchSpace(storage.ScratchSpace):
 
 
 class RecordScorerFromScoreFunctionsDict:
-    def __init__(self, primary_key_name, score_functions):
-        self._primary_key_name = primary_key_name
+    def __init__(self, score_functions):
         self._score_functions = score_functions
 
     @property
@@ -97,7 +96,13 @@ class RecordScorerFromScoreFunctionsDict:
             raise ValueError
 
     def primary_key_score(self, primary_key):
-        return self.score('primary_key', {self._primary_key_name: primary_key})
+        return self.score('primary_key', {'pk': primary_key})
+
+    def primary_key(self, record):
+        try:
+            return record['pk']
+        except KeyError:
+            raise ValueError
 
 
 class TestRedisTable:
@@ -117,17 +122,16 @@ class TestRedisTable:
     @pytest.fixture
     def make_table(self, conn, tables):
         def factory(
-                table_name='table', primary_key_name='pk',
-                attribute_codecs=None, score_functions=None):
+            *, table_name='table', attribute_codecs=None,
+                score_functions=None):
             attribute_codecs = attribute_codecs or {
                 'pk': tcr.IntAsStringCodec(), 's': tcr.StringCodec()}
             score_functions = score_functions or {
-                'primary_key': op.itemgetter(primary_key_name)}
+                'primary_key': op.itemgetter('pk')}
             table = tcr.RedisTable(
-                conn, table_name=table_name, primary_key_name=primary_key_name,
-                attribute_codecs=attribute_codecs,
+                conn, table_name=table_name, attribute_codecs=attribute_codecs,
                 record_scorer=RecordScorerFromScoreFunctionsDict(
-                    primary_key_name, score_functions))
+                    score_functions))
             tables.append(table)
             return table
 
@@ -161,13 +165,6 @@ class TestRedisTable:
             make_table(
                 attribute_codecs={
                     'pk': tcr.IntAsStringCodec(), 1: tcr.StringCodec()})
-
-    async def test_construction_raises_if_primary_key_missing_from_codec(
-            self, make_table):
-        with pytest.raises(ValueError):
-            make_table(
-                primary_key_name='pk',
-                attribute_codecs={'s': tcr.StringCodec()})
 
     async def test_put_record_get_record(self, table):
         await table.put_record({'pk': 1, 's': 's1'})

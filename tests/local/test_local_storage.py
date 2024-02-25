@@ -27,8 +27,7 @@ from tests.helpers import collect_async_iter
 
 
 class RecordScorerFromScoreFunctionsDict:
-    def __init__(self, primary_key_name, score_functions):
-        self._primary_key_name = primary_key_name
+    def __init__(self, score_functions):
         self._score_functions = score_functions
 
     @property
@@ -42,7 +41,13 @@ class RecordScorerFromScoreFunctionsDict:
             raise ValueError
 
     def primary_key_score(self, primary_key):
-        return self.score('primary_key', {self._primary_key_name: primary_key})
+        return self.score('primary_key', {'pk': primary_key})
+
+    def primary_key(self, record):
+        try:
+            return record['pk']
+        except KeyError:
+            raise ValueError
 
 
 class PausingCoroutine:
@@ -66,13 +71,12 @@ class TestLocalTable:
 
     @pytest.fixture
     def make_table(self, tables):
-        def factory(*, primary_key_name='pk', score_functions=None):
+        def factory(*, score_functions=None):
             score_functions = score_functions or {
-                'primary_key': op.itemgetter(primary_key_name)}
+                'primary_key': op.itemgetter('pk')}
             table = tcl.LocalStorageTable(
-                primary_key_name=primary_key_name,
                 record_scorer=RecordScorerFromScoreFunctionsDict(
-                    primary_key_name, score_functions))
+                    score_functions))
             tables.append(table)
             return table
 
