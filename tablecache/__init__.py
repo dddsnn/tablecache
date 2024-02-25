@@ -23,6 +23,7 @@ from tablecache.index import (
     Indexes,
     PrimaryKeyIndexes,
     PrimaryKeyRangeIndexes,
+    RecordScorer,
     UnsupportedIndexOperation)
 from tablecache.storage import Interval, StorageRecordsSpec, StorageTable
 from tablecache.types import (

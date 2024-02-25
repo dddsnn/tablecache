@@ -49,46 +49,22 @@ class Adjustment:
     expire_spec: t.Optional[storage.StorageRecordsSpec]
     new_spec: t.Optional[db.DbRecordsSpec]
 
-
-class Indexes[PrimaryKey](abc.ABC):
+class RecordScorer[PrimaryKey](abc.ABC):
     """
-    A set of indexes used to access storage and DB tables.
+    Score calculator for a set of indexes.
 
-    Provides a uniform way to specify a set of records to be queried from
-    either storage or DB tables. This is done with storage_records_spec() and
-    db_records_spec(), respectively.
+    Provides a way to calculate the scores of records in a number of indexes.
+    Scores are orderable (most likely some kind of number) that give records a
+    place in an index and make it possible to query many records quickly using
+    a range of scores. Scores need not be unique (although it's better to avoid
+    too many collisions).
 
-    Also keeps track of the set of records that are in storage, as opposed to
-    those that are only available via the DB. To this end, the observe()
-    callback is expected to be called by the cache whenever a record is
-    inserted into storage. Calls to covers() then return whether the set of
-    records specified there is present in storage. Finally, adjust() can be
-    used to change which records are in storage by expressing which ones should
-    be. The implementation then returns which records need to be removed from
-    storage and which ones fetched from the DB and inserted in order to attain
-    that state.
+    At the very least, supports the index named primary_key, which maps a
+    record's primary key to a primary key score.
 
-    An Indexes contains one or more indexes that can be used to specify sets of
-    records. An index is defined via a score function, which takes a record's
-    attributes as kwargs and returns a numerical score. Records can then be
-    queried as ranges of these scores quickly. An additional recheck predicate
-    can be defined by the index to filter out some potential bycatch. At the
-    very least, an index named primary_key must exist, which maps a record's
-    primary key to a score. The purpose of the Indexes is to tie its different
-    indexes together and potentially share information between them.
 
-    The access methods {storage,db}_records_spec() and covers() take an index
-    name along with arbitrary args and kwargs, which the specific
-    implementation needs to interpret in a useful way. The same parameters
-    should always represent the same set of records. E.g., a call to
-    storage_records_spec() yields a StorageRecordsSpec to get a set of records
-    from storage, while a call to db_recods_spec should yield a DbRecordsSpec
-    to get the same set of records from the DB.
-
-    The methods involving index state, covers() and adjust(), may not be
-    supported for every index. E.g., an index may only be meant for querying
-    (i.e. support covers()), but not for adjusting the indexes. In that case,
-    these methods raise an UnsupportedIndexOperation.
+    This is the limited interface required by implementations of StorageTable,
+    but it's probably best implemented as part of an Indexes.
     """
     @property
     @abc.abstractmethod
@@ -96,8 +72,8 @@ class Indexes[PrimaryKey](abc.ABC):
         """
         Return names of all indexes.
 
-        These are the names of all the indexes in this instance. Always
-        contains at least primary_key.
+        These are the names of all the indexes for which scores can be
+        calculated. Always contains at least primary_key.
         """
         raise NotImplementedError
 
@@ -115,6 +91,46 @@ class Indexes[PrimaryKey](abc.ABC):
         """Calculate the primary key score."""
         raise NotImplementedError
 
+
+class Indexes[PrimaryKey](RecordScorer[PrimaryKey]):
+    """
+    A set of indexes used to access storage and DB tables.
+
+    This adds storage state information and ways to query a storage table and
+    the DB to the RecordScorer interface. The purpose of Indexes is to tie its
+    different indexes, their respective scoring and record access, together and
+    potentially share information between them.
+
+    Provides a uniform way to specify a set of records to be queried from
+    either storage or DB tables. This is done with storage_records_spec() and
+    db_records_spec(), respectively.
+
+    Also keeps track of the set of records available from storage, as opposed
+    to those that are only available via the DB. To this end,
+    prepare_adjustment() is expected to be called before loading records into
+    storage, and commit_adjustment() when the load is complete. From that point
+    on, the state considers the records that it specified to load to be in
+    storage. Further adjustments can be made later in order to change the
+    records in storage.
+
+    The covers() method can be used to check whether a set of records is
+    available from storage.
+
+    The access methods {storage,db}_records_spec() and covers() take an index
+    name along with arbitrary args and kwargs, which the specific
+    implementation needs to interpret in a useful way. The same parameters
+    should always represent the same set of records. E.g., a call to
+    storage_records_spec() yields a StorageRecordsSpec to get a set of records
+    from storage, while a call to db_recods_spec should yield a DbRecordsSpec
+    to get the same set of records from the DB.
+
+    The methods involving index state, covers() and prepare_adjustment(), may
+    not be supported for every index. E.g., an index may only be meant for
+    querying (i.e. support covers()), but not for adjusting the indexes. In
+    that case, these methods raise an UnsupportedIndexOperation. If any method
+    is called with the name of an index that doesn't exist, a ValueError is
+    raised.
+    """
     @abc.abstractmethod
     def storage_records_spec(
         self, index_name: str, *args: t.Any, **kwargs: t.Any

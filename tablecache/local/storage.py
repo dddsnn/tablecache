@@ -65,15 +65,15 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     def __init__(
             self, *, primary_key_name: str,
-            indexes: index.Indexes[PrimaryKey], table_name: str = None
+            record_scorer: index.RecordScorer[PrimaryKey], table_name: str = None
     ) -> None:
         self._primary_key_name = primary_key_name
-        self._index_names = indexes.index_names
+        self._index_names = record_scorer.index_names
         self._table_name = table_name
         if self._table_name is None:
             self._table_name = str(uuid.uuid4())
-        self._score_function = indexes.score
-        self._primary_key_score_function = indexes.primary_key_score
+        self._score_function = record_scorer.score
+        self._primary_key_score_function = record_scorer.primary_key_score
         self._scratch_condition = asyncio.Condition()
         self._scratch_merge_task = None
         self._scratch_merge_read_lock = aiorwlock.RWLock()

@@ -61,7 +61,6 @@ async def conn(wait_for_redis, redis_host):
     await conn.close()
 
 
-
 class FailCodec(tcr.Codec):
     def encode(self, _):
         raise Exception
@@ -82,7 +81,7 @@ class ManuallyUnlockedScratchSpace(storage.ScratchSpace):
         return self._manually_not_merging
 
 
-class IndexesFromScoreFunctionsDict:
+class RecordScorerFromScoreFunctionsDict:
     def __init__(self, primary_key_name, score_functions):
         self._primary_key_name = primary_key_name
         self._score_functions = score_functions
@@ -127,7 +126,7 @@ class TestRedisTable:
             table = tcr.RedisTable(
                 conn, table_name=table_name, primary_key_name=primary_key_name,
                 attribute_codecs=attribute_codecs,
-                indexes=IndexesFromScoreFunctionsDict(
+                record_scorer=RecordScorerFromScoreFunctionsDict(
                     primary_key_name, score_functions))
             tables.append(table)
             return table

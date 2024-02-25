@@ -26,7 +26,7 @@ import tablecache.local as tcl
 from tests.helpers import collect_async_iter
 
 
-class IndexesFromScoreFunctionsDict:
+class RecordScorerFromScoreFunctionsDict:
     def __init__(self, primary_key_name, score_functions):
         self._primary_key_name = primary_key_name
         self._score_functions = score_functions
@@ -71,7 +71,7 @@ class TestLocalTable:
                 'primary_key': op.itemgetter(primary_key_name)}
             table = tcl.LocalStorageTable(
                 primary_key_name=primary_key_name,
-                indexes=IndexesFromScoreFunctionsDict(
+                record_scorer=RecordScorerFromScoreFunctionsDict(
                     primary_key_name, score_functions))
             tables.append(table)
             return table

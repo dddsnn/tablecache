@@ -64,7 +64,7 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     def __init__(
             self, conn: redis.Redis, *, table_name: str, primary_key_name: str,
             attribute_codecs: AttributeCodecs,
-            indexes: index.Indexes[PrimaryKey]) -> None:
+            record_scorer: index.RecordScorer[PrimaryKey]) -> None:
         """
         A table stored in Redis.
 
@@ -123,24 +123,23 @@ class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             Must map attribute names (strings) to Codec instances that are able
             to en-/decode the corresponding values. Only attributes present
             here are stored.
-        :param indexes: An Indexes whose indexes and their scores should be
-            respresented in storage. The data needed from it are the
-            index_names, and the score and primary_key_score functions.
+        :param record_scorer: A RecordScorer used to calculate a record's
+            scores for all the indexes that need to be represented in storage.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
             raise ValueError('Attribute names must be strings.')
         if primary_key_name not in attribute_codecs:
             raise ValueError('Codec for primary key is missing.')
-        if 'primary_key' not in indexes.index_names:
+        if 'primary_key' not in record_scorer.index_names:
             raise ValueError('Missing primary_key index.')
         self._conn = conn
         self._table_name = table_name
         self._primary_key_name = primary_key_name
         self._row_codec = RowCodec(attribute_codecs)
-        self._index_names = indexes.index_names
-        self._score_function = indexes.score
-        self._primary_key_score_function = indexes.primary_key_score
+        self._index_names = record_scorer.index_names
+        self._score_function = record_scorer.score
+        self._primary_key_score_function = record_scorer.primary_key_score
         self._rwlock = aiorwlock.RWLock()
         self._scratch_space = ScratchSpace()
         self._scratch_condition = asyncio.Condition(self._rwlock.writer_lock)
