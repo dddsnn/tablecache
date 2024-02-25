@@ -32,7 +32,8 @@ import tablecache.types as tp
 def _always_true(*args, **kwargs): return True
 
 
-class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
+class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
+        storage.StorageTable[PrimaryKey]):
     """
     A StorageTable that stores its data in native Python data structures.
 

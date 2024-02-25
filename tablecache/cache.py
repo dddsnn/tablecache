@@ -40,7 +40,7 @@ class DirtyIndex(Exception):
     """
 
 
-class CachedTable[PrimaryKey]:
+class CachedTable[PrimaryKey: tp.PrimaryKey]:
     """
     A cached table.
 
@@ -415,7 +415,7 @@ class CachedTable[PrimaryKey]:
         self._invalid_record_repo.clear()
 
 
-class InvalidRecordRepository[PrimaryKey]:
+class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
     """
     A repository of invalid records.
 

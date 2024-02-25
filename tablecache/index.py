@@ -16,7 +16,6 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
-import collections.abc as ca
 import dataclasses as dc
 import math
 import numbers
@@ -49,7 +48,7 @@ class Adjustment:
     expire_spec: t.Optional[storage.StorageRecordsSpec]
     new_spec: t.Optional[db.DbRecordsSpec]
 
-class RecordScorer[PrimaryKey](abc.ABC):
+class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
     """
     Score calculator for a set of indexes.
 
@@ -78,7 +77,7 @@ class RecordScorer[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+    def score(self, index_name: str, record: tp.Record) -> tp.Score:
         """
         Calculate a record's score for an index.
 
@@ -87,7 +86,7 @@ class RecordScorer[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def primary_key_score(self, primary_key: PrimaryKey) -> numbers.Real:
+    def primary_key_score(self, primary_key: PrimaryKey) -> tp.Score:
         """Calculate the primary key score."""
         raise NotImplementedError
 
@@ -101,7 +100,7 @@ class RecordScorer[PrimaryKey](abc.ABC):
         raise NotImplementedError
 
 
-class Indexes[PrimaryKey](RecordScorer[PrimaryKey]):
+class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
     """
     A set of indexes used to access storage and DB tables.
 
@@ -271,13 +270,13 @@ class AllIndexes(Indexes[t.Any]):
         return frozenset(['primary_key'])
 
     @t.override
-    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+    def score(self, index_name: str, record: tp.Record) -> tp.Score:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
         return 0
 
     @t.override
-    def primary_key_score(self, primary_key: ca.Hashable) -> numbers.Real:
+    def primary_key_score(self, primary_key: tp.PrimaryKey) -> tp.Score:
         return 0
 
     @t.override
@@ -319,7 +318,7 @@ class AllIndexes(Indexes[t.Any]):
         return True
 
 
-class PrimaryKeyIndexes(Indexes[ca.Hashable]):
+class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
     """
     Simple indexes for only selected primary keys.
 
@@ -339,7 +338,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
     """
     @dc.dataclass(frozen=True)
     class Adjustment(Adjustment):
-        primary_keys: set[ca.Hashable]
+        primary_keys: set[tp.PrimaryKey]
         cover_all: bool
 
     def __init__(
@@ -366,13 +365,13 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
         return frozenset(['primary_key'])
 
     @t.override
-    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+    def score(self, index_name: str, record: tp.Record) -> tp.Score:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
         return hash(self.primary_key(record))
 
     @t.override
-    def primary_key_score(self, primary_key: ca.Hashable) -> numbers.Real:
+    def primary_key_score(self, primary_key: tp.PrimaryKey) -> tp.Score:
         return hash(primary_key)
 
     @t.override
@@ -384,7 +383,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
 
     @t.override
     def storage_records_spec(
-            self, index_name: str, *primary_keys: ca.Hashable,
+            self, index_name: str, *primary_keys: tp.PrimaryKey,
             all_primary_keys: bool = False) -> storage.StorageRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
@@ -406,7 +405,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
 
     @t.override
     def db_records_spec(
-        self, index_name: str, *primary_keys: ca.Hashable,
+        self, index_name: str, *primary_keys: tp.PrimaryKey,
             all_primary_keys: bool = False) -> db.QueryArgsDbRecordsSpec:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
@@ -417,7 +416,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
 
     @t.override
     def prepare_adjustment(
-            self, index_name: str, *primary_keys: ca.Hashable,
+            self, index_name: str, *primary_keys: tp.PrimaryKey,
             all_primary_keys: bool = False) -> 'PrimaryKeyIndexes.Adjustment':
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
@@ -445,7 +444,7 @@ class PrimaryKeyIndexes(Indexes[ca.Hashable]):
 
     @t.override
     def covers(
-            self, index_name: str, *primary_keys: ca.Hashable,
+            self, index_name: str, *primary_keys: tp.PrimaryKey,
             all_primary_keys: bool = False) -> bool:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
@@ -495,13 +494,13 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
         return frozenset(['primary_key'])
 
     @t.override
-    def score(self, index_name: str, record: tp.Record) -> numbers.Real:
+    def score(self, index_name: str, record: tp.Record) -> tp.Score:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
         return self.primary_key(record)
 
     @t.override
-    def primary_key_score(self, primary_key: numbers.Real) -> numbers.Real:
+    def primary_key_score(self, primary_key: numbers.Real) -> tp.Score:
         return primary_key
 
     @t.override

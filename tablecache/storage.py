@@ -32,8 +32,8 @@ class Interval:
     Represents an interval of the shape [ge,lt[, i.e. with a closed lower and
     open upper bound.
     """
-    ge: float
-    lt: float
+    ge: tp.Score
+    lt: tp.Score
 
     def __post_init__(self):
         if self.ge > self.lt:
@@ -89,7 +89,7 @@ class StorageRecordsSpec:
     recheck_predicate: tp.RecheckPredicate = always_use_record
 
 
-class StorageTable[PrimaryKey](abc.ABC):
+class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
     """
     Fast storage table.
 

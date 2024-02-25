@@ -28,7 +28,7 @@ from tablecache.index import (
 from tablecache.storage import Interval, StorageRecordsSpec, StorageTable
 from tablecache.types import (
     AsyncRecords,
-    PrimaryKeyScoreFunction,
+    PrimaryKey,
     RecheckPredicate,
     Record,
-    ScoreFunction)
+    Score)

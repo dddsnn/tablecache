@@ -60,7 +60,7 @@ class RedisCodingError(Exception):
     """
 
 
-class RedisTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
+class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
     def __init__(
             self, conn: redis.Redis, *, table_name: str,
             record_scorer: index.RecordScorer[PrimaryKey],

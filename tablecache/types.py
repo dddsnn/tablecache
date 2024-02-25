@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -19,9 +19,8 @@ import collections.abc as ca
 import numbers
 import typing as t
 
+type PrimaryKey = ca.Hashable
+type Score = numbers.Real
 type Record = ca.Mapping[str, t.Any]
 type AsyncRecords = ca.AsyncIterator[Record]
-type ScoreFunction = ca.Callable[[str, Record], numbers.Real]
-type PrimaryKeyScoreFunction[PrimaryKey] = (
-    ca.Callable[[PrimaryKey], numbers.Real])
 type RecheckPredicate = ca.Callable[[Record], bool]
