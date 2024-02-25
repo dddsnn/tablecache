@@ -103,10 +103,9 @@ class TestLocalTable:
         return mock_scratch_merge
 
     @pytest.fixture(autouse=True)
-    async def wait_for_ongoing_merges_to_finish(
-            self, scratch_space_is_clear, tables):
-        for table in tables:
-            await scratch_space_is_clear(table)
+    async def wait_for_ongoing_merges_to_finish(self, scratch_space_is_clear):
+        yield
+        await scratch_space_is_clear()
 
     def assert_index_lengths(
             self, table, index_length, scratch_adds=0, scratch_deletes=0):

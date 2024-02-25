@@ -112,15 +112,14 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             self._delete_record_by_primary_key(primary_key)
         except KeyError:
             pass
-        self._for_each_record_and_index(
-            [record], lambda index_name, record, score:
+        self._for_each_index(
+            record, lambda index_name, score:
             self._indexes[index_name].add((score, record)))
 
-    def _for_each_record_and_index(self, records, function):
-        for record in records:
-            for index_name in self._index_names:
-                score = self._score_function(index_name, record)
-                function(index_name, record, score)
+    def _for_each_index(self, record, function):
+        for index_name in self._index_names:
+            score = self._score_function(index_name, record)
+            function(index_name, score)
 
     @t.override
     async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
@@ -211,8 +210,8 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         self._delete_record_from_indexes(record, self._indexes)
 
     def _delete_record_from_indexes(self, record, indexes):
-        self._for_each_record_and_index(
-            [record], lambda index_name, record, score:
+        self._for_each_index(
+            record, lambda index_name, score:
             indexes[index_name].discard((score, record)))
 
     @t.override
@@ -239,6 +238,7 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
                 r async for r in self.get_records(records_spec)]
             for record in records_to_delete:
                 self._delete_record_from_indexes(record, self._indexes)
+                await asyncio.sleep(0)  # Yield to event loop to remain lively.
             return len(records_to_delete)
 
     @property
@@ -270,8 +270,8 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             raise ValueError('Missing primary key.')
         primary_key = record[self._primary_key_name]
         self._scratch_records_to_delete.pop(primary_key, None)
-        self._for_each_record_and_index(
-            [record], lambda index_name, record, score:
+        self._for_each_index(
+            record, lambda index_name, score:
             self._scratch_indexes[index_name].add((score, record)))
 
     @t.override
@@ -295,9 +295,11 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
         records_to_discard = [
             r for r in self._get_records_from_indexes(
                 records_spec, self._scratch_indexes)]
-        self._for_each_record_and_index(
-            records_to_discard, lambda index_name, record, score:
-            self._scratch_indexes[index_name].discard((score, record)))
+        for record in records_to_discard:
+            for index_name in self._index_names:
+                score = self._score_function(index_name, record)
+                self._scratch_indexes[index_name].discard((score, record))
+            await asyncio.sleep(0)  # Yield to event loop to remain lively.
         async for record in self.get_records(records_spec):
             primary_key = record[self._primary_key_name]
             self._scratch_records_to_delete[primary_key] = record
@@ -322,10 +324,12 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
             while self._scratch_records_to_delete:
                 _, record = self._scratch_records_to_delete.popitem()
                 self._delete_record_from_indexes(record, self._indexes)
+                await asyncio.sleep(0)  # Yield to event loop to remain lively.
             while self._scratch_indexes['primary_key']:
                 _, record = self._scratch_indexes['primary_key'].pop()
                 self._put_record(record)
                 self._delete_record_from_indexes(record, self._scratch_indexes)
+                await asyncio.sleep(0)  # Yield to event loop to remain lively.
             assert not any(self._scratch_indexes.values())
             assert not self._scratch_records_to_delete
             self._scratch_merge_task = None
