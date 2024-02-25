@@ -32,6 +32,36 @@ def _always_true(*args, **kwargs): return True
 
 
 class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
+    """
+    A StorageTable that stores its data in native Python data structures.
+
+    This implementation of StorageTable uses SortedKeyLists from the
+    sortedcontainers library to enable fast access to records via their scores.
+    Using native data structures has the advantage that each index can store
+    direct references to all records, so there is no additional redirection
+    necessary when getting records via non-primary-key indexes.
+
+    Records inserted into the table are stored as-is, without any explicit
+    validation. As long as it's possible to calculate their scores using the
+    provided function, they are accepted. It is up to the user to ensure that
+    records are complete.
+
+    Read operations return the exact same record instances that were inserted.
+    In case they are mutable, they must not be modified. Make a copy. More
+    specifically, if a record is modified in a way that changes its score for
+    any index, that index becomes inconsistent and the record may not be
+    returned in a read operation when it should be.
+
+    Regular write operations (put_record(), delete_record{,s}()) are blocked
+    while scratch space is active (i.e. between the first call to
+    scratch_put_record() or scratch_discard_records() and the subsequent call
+    to scratch_merge()). They will resume once the merge completes. The merge
+    is done in a background task, which shuffles around some data. While this
+    task runs, scratch operations are blocked. Read operations
+    (get_record{,s}()) are never blocked entirely, although get_records() may
+    need to wait a bit if a merge operation is in progress.
+    """
+
     def __init__(
             self, *, table_name: str, primary_key_name: str,
             indexes: index.Indexes[PrimaryKey]) -> None:
@@ -64,6 +94,12 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def put_record(self, record: tp.Record) -> None:
+        """
+        Store a record.
+
+        This operation will block while scratch space is active and resume
+        after the scratch merge finishes.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
             self._put_record(record)
@@ -160,6 +196,12 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_record(self, primary_key: PrimaryKey) -> None:
+        """
+        Delete a record by primary key.
+
+        This operation will block while scratch space is active and resume
+        after the scratch merge finishes.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
             self._delete_record_by_primary_key(primary_key)
@@ -176,6 +218,21 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     @t.override
     async def delete_records(
             self, records_spec: storage.StorageRecordsSpec) -> int:
+        """
+        Delete multiple records.
+
+        This operation will block while scratch space is active and resume
+        after the scratch merge finishes.
+
+        Returns the number of records deleted.
+
+        Internally, first finds all records matching the records spec, then
+        deletes them. If another task adds a record after that first step, this
+        record will not be deleted by this operation. Similarly, if another
+        task deletes one of the records after that first step, this operation
+        will attempt to delete it again. This won't fail, but it will inflate
+        the number of records that is returned.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
             records_to_delete = [
@@ -198,6 +255,11 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def scratch_put_record(self, record: tp.Record) -> None:
+        """
+        Add a record to scratch space.
+
+        This operation will block while a merge background task is running.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_is_not_merging)
@@ -215,6 +277,14 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
     @t.override
     async def scratch_discard_records(
             self, records_spec: storage.StorageRecordsSpec) -> int:
+        """
+        Mark a set of records to be deleted in scratch space.
+
+        This operation will block while a merge background task is running.
+
+        Returns the number of records marked for deletion. This may include
+        records that have already been thusly marked before.
+        """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_is_not_merging)
@@ -236,6 +306,15 @@ class LocalStorageTable[PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     def scratch_merge(self) -> None:
+        """
+        Merge scratch space.
+
+        This immediately causes read operations to reflect the state of the
+        table that includes modifications in scratch space.
+
+        Spawns a background task that shuffles some data around. Until this
+        completes, all write operations are locked.
+        """
         self._scratch_merge_task = asyncio.create_task(self._scratch_merge())
 
     async def _scratch_merge(self):
