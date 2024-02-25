@@ -65,7 +65,7 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     """
 
     def __init__(
-            self, *, record_scorer: index.RecordScorer[PrimaryKey],
+            self, record_scorer: index.RecordScorer[PrimaryKey], *,
             table_name: str = None) -> None:
         """
         :param record_scorer: A RecordScorer used to calculate a record's
