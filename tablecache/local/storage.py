@@ -325,18 +325,19 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         self._scratch_merge_task = asyncio.create_task(self._scratch_merge())
 
     async def _scratch_merge(self):
-        async with self._scratch_merge_read_lock.writer_lock:
-            while self._scratch_records_to_delete:
+        while self._scratch_records_to_delete:
+            async with self._scratch_merge_read_lock.writer_lock:
                 _, record = self._scratch_records_to_delete.popitem()
                 self._delete_record_from_indexes(record, self._indexes)
-                await asyncio.sleep(0)  # Yield to event loop to remain lively.
-            while self._scratch_indexes['primary_key']:
+            await asyncio.sleep(0)  # Yield to event loop to remain lively.
+        while self._scratch_indexes['primary_key']:
+            async with self._scratch_merge_read_lock.writer_lock:
                 _, record = self._scratch_indexes['primary_key'].pop()
                 self._put_record(record)
                 self._delete_record_from_indexes(record, self._scratch_indexes)
-                await asyncio.sleep(0)  # Yield to event loop to remain lively.
-            assert not any(self._scratch_indexes.values())
-            assert not self._scratch_records_to_delete
-            self._scratch_merge_task = None
-            async with self._scratch_condition:
-                self._scratch_condition.notify_all()
+            await asyncio.sleep(0)  # Yield to event loop to remain lively.
+        assert not any(self._scratch_indexes.values())
+        assert not self._scratch_records_to_delete
+        self._scratch_merge_task = None
+        async with self._scratch_condition:
+            self._scratch_condition.notify_all()
