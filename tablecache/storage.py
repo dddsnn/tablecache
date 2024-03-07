@@ -20,6 +20,7 @@ import dataclasses as dc
 import itertools as it
 import math
 import operator as op
+import typing as t
 
 import tablecache.types as tp
 
@@ -39,22 +40,40 @@ class Interval:
         if self.ge > self.lt:
             raise ValueError('Bounds are not in order.')
 
+    def __repr__(self):
+        return f'Interval [{self.ge}, {self.lt}['
+
     @staticmethod
-    def everything() -> 'Interval':
+    def everything() -> t.Self:
         """
         The interval from negative to positive infinity, covering everything.
         """
         return Interval(float('-inf'), float('inf'))
 
     @staticmethod
-    def only_containing(value) -> 'Interval':
+    def only_containing(value) -> t.Self:
         """
         The smallest interval containing the given value.
         """
         return Interval(value, math.nextafter(value, float('inf')))
 
-    def __contains__(self, x):
+    def __contains__(self, x: tp.Score) -> bool:
         return self.ge <= x < self.lt
+
+    def intersects(self, other: t.Self) -> bool:
+        """Check whether the intervals have any element in common."""
+        if not isinstance(other, Interval):
+            raise TypeError(
+                'Can only check intersection with other intervals.')
+        return self.lt > other.ge and self.ge < other.lt
+
+    def covers(self, other: t.Self) -> bool:
+        """Check whether this interval contains everything in other."""
+        if not isinstance(other, Interval):
+            raise TypeError(
+                'Can only check covers with other intervals.')
+        other_is_empty = other.ge == other.lt
+        return other_is_empty or (self.ge <= other.ge and other.lt <= self.lt)
 
 
 @dc.dataclass(frozen=True)
@@ -128,17 +147,8 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
-        """
-        Retrieve a previously stored record by primary key.
 
-        Raises a KeyError if no record with that primary key exists.
 
-        May raise other exceptions if there is a problem in retrieving the
-        record.
-        """
-        raise NotImplementedError
 
     @abc.abstractmethod
     async def get_records(
@@ -158,10 +168,6 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         """
         raise NotImplementedError
 
-    @abc.abstractmethod
-    async def delete_record(self, primary_key: PrimaryKey) -> None:
-        """Delete a record by primary key."""
-        raise NotImplementedError
 
     @abc.abstractmethod
     async def delete_records(self, records_spec: StorageRecordsSpec) -> int:

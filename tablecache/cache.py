@@ -16,8 +16,8 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import itertools as it
 import logging
-import numbers
 import typing as t
 
 import tablecache.db as db
@@ -33,31 +33,30 @@ async def _async_generator(xs):
         yield x
 
 
-class DirtyIndex(Exception):
-    """
-    Raised to indicate that the queried index is dirty and the cache must be
-    refreshed.
-    """
-
-
 class CachedTable[PrimaryKey: tp.PrimaryKey]:
     """
     A cached table.
 
-    Caches a (sub-)set of records that can only be accessed relatively
-    slowly (DB) in a relatively fast storage. Not thread-safe.
+    Caches a (sub-)set of records that can only be accessed relatively slowly
+    (DB) in a relatively fast storage. Not thread-safe.
 
-    Serves single records by their primary key, or sets of records that can be
-    specified as arguments to an Indexes instance. Transparently serves them
-    from fast storage if available, or from the DB otherwise. The cache has to
-    be loaded with load() to add the desired records to storage. Read access is
-    blocked until this completes.
+    Serves sets of records that can be specified as arguments to an Indexes
+    instance. Transparently serves them from fast storage if available, or from
+    the DB otherwise. The cache has to be loaded with load() to add the desired
+    records to storage. Read access is blocked until this completes. A
+    convenience function that returns a single record is available.
 
-    The DB state is not reflected automatically. If a record in the DB changes
-    (or is deleted, or was newly added), invalidate_record() needs to be called
-    for the cache to reflect that. This doesn't neceessarily trigger an
-    immediate refresh, but it gurantees that the updated record is loaded from
-    the DB before it is served the next time.
+    Most methods for which records need to be specified can either be called
+    with an IndexSpec appropriate to the cache's Indexes instance, or more
+    conveniently with args and kwargs that will be used to construct an
+    IndexSpec (the exception to this is invalidate_records(), which needs
+    multiple IndexSpecs).
+
+    The DB state is not reflected automatically. If one or more records in the
+    DB change (or are deleted or newly added), invalidate_records() needs to be
+    called for the cache to reflect that. This doesn't trigger an immediate
+    refresh, but it gurantees that the updated record is loaded from the DB
+    before it is served the next time.
 
     Which subset of the records in DB is cached can be changed by calling
     adjust(). This operation asks a specified index what to delete and what to
@@ -85,7 +84,6 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         self._invalid_record_repo = InvalidRecordRepository(indexes)
         self._loaded_event = asyncio.Event()
         self._scratch_space_lock = asyncio.Lock()
-        self._invalid_records_lock = asyncio.Lock()
 
     async def loaded(self):
         """
@@ -96,11 +94,12 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         """
         await self._loaded_event.wait()
 
-    async def load(
-            self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
-    ) -> None:
+    async def load(self, *args: t.Any, **kwargs: t.Any) -> None:
         """
         Clear storage and load all relevant data from the DB into storage.
+
+        Takes either a single IndexSpec instance or args and kwargs to
+        construct one.
 
         This is very similar to adjust(), except that the storage is cleared
         first, a ValueError is raised if the cache was already loaded, and the
@@ -113,6 +112,7 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
+        index_spec = self._make_index_spec(*args, **kwargs)
         if self._loaded_event.is_set():
             raise ValueError(
                 'Already loaded. Use adjust() to change cached records.')
@@ -120,8 +120,7 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             f'Clearing and loading {self._indexes} of table '
             f'{self._storage_table}.')
         await self._storage_table.clear()
-        num_deleted, num_loaded = await self._adjust_plain(
-            index_name, *index_args, **index_kwargs)
+        num_deleted, num_loaded = await self._adjust_plain(index_spec)
         self._loaded_event.set()
         if num_deleted:
             _logger.warning(
@@ -130,26 +129,26 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
                 'Indexes implementation).')
         _logger.info(f'Loaded {num_loaded} records.')
 
-    async def _adjust_plain(
-            self, index_name, *index_args, **index_kwargs):
-        return await self._adjust(
-            False, index_name, *index_args, **index_kwargs)
+    def _make_index_spec(self, *args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], self._indexes.IndexSpec):
+            return args[0]
+        return self._indexes.IndexSpec(*args, **kwargs)
 
-    async def _adjust_in_scratch(
-            self, index_name, *index_args, **index_kwargs):
+    async def _adjust_plain(self, index_spec):
+        return await self._adjust(False, index_spec)
+
+    async def _adjust_in_scratch(self, index_spec):
         async with self._scratch_space_lock:
             await self._refresh_invalid_locked()
-            return await self._adjust(
-                True, index_name, *index_args, **index_kwargs)
+            return await self._adjust(True, index_spec)
 
-    async def _adjust(
-            self, use_scratch, index_name, *index_args, **index_kwargs):
+    async def _adjust(self, use_scratch, index_spec):
         try:
-            adjustment = self._indexes.prepare_adjustment(
-                index_name, *index_args, **index_kwargs)
+            adjustment = self._indexes.prepare_adjustment(index_spec)
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
-                f'Indexes don\'t support adjusting by {index_name}.') from e
+                f'Indexes don\'t support adjusting by {index_spec.index_name}.'
+            ) from e
         if use_scratch:
             put = self._storage_table.scratch_put_record
             delete = self._storage_table.scratch_discard_records
@@ -176,18 +175,19 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
                 new_records.append(record)
         return num_deleted, new_records
 
-    async def adjust(
-            self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
-    ) -> None:
+    async def adjust(self, *args: t.Any, **kwargs: t.Any) -> None:
         """
         Adjust the set of records in storage.
 
+        Takes either a single IndexSpec instance or args and kwargs to
+        construct one.
+
         Expires records from storage and loads new ones from the DB in order to
-        attain the state specified via the given index' implementation-specific
-        parameters. Uses the storage's scratch space to provide a consistent
-        view of the storage without blocking read operations. At all points
-        before this method returns, read operations reflect the state before
-        the adjustment, and at all points after they reflect the state after.
+        attain the state specified via the index spec. Uses the storage's
+        scratch space to provide a consistent view of the storage without
+        blocking read operations. At all points before this method returns read
+        operations reflect the state before the adjustment, and at all points
+        after they reflect the state after.
 
         Calls the cache's indexes' prepare_adjustment() for specs on the
         records that should be deleted and new ones to load. These are then
@@ -205,121 +205,100 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
+        index_spec = self._make_index_spec(*args, **kwargs)
         await self.loaded()
-        num_deleted, num_loaded = await self._adjust_in_scratch(
-            index_name, *index_args, **index_kwargs)
+        num_deleted, num_loaded = await self._adjust_in_scratch(index_spec)
         if num_deleted or num_loaded:
             _logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
 
-    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
+    async def get_first_record(
+            self, *args: t.Any, **kwargs: t.Any) -> tp.Record:
         """
-        Get a record by primary key.
+        Get a single record.
 
-        If the key has been marked as invalid, ensures the data is fresh first.
+        This is a convenience function around get_records(). It returns the
+        first record get_records() would have with the same arguments.
 
-        If the key belongs to a record that isn't cached, queries the DB and
-        serves it from there. This includes the case where no record with the
-        given key exists, and the Indexes aren't aware of this (i.e.
-        indexes.covers('primary_key', primary_key) returns False).
+        Note that records don't have a defined order, so this should only be
+        used if exactly 0 or 1 record is expected to be returned.
 
-        Raises a KeyError if the key doesn't exist.
+        Raises a KeyError if no such record exists.
         """
-        await self.loaded()
-        async with self._invalid_records_lock:
-            if self._invalid_record_repo.primary_key_is_invalid(primary_key):
-                await self.refresh_invalid()
-            try:
-                return await self._storage_table.get_record(primary_key)
-            except KeyError:
-                if self._indexes.covers('primary_key', primary_key):
-                    raise
-                db_records_spec = self._indexes.db_records_spec(
-                    'primary_key', primary_key)
-                return await self._db_access.get_record(db_records_spec)
+        records = self.get_records(*args, **kwargs)
+        try:
+            return await anext(records)
+        except StopAsyncIteration:
+            raise KeyError
 
     async def get_records(
-            self, index_name: str, *index_args: t.Any, **index_kwargs: t.Any
-    ) -> tp.AsyncRecords:
+            self, *args: t.Any, **kwargs: t.Any) -> tp.AsyncRecords:
         """
         Asynchronously iterate over a set of records.
 
-        Asynchronously iterates over the set of records specified via the
-        implementation-specific arguments to the given index. Records are taken
-        from fast storage if the index covers the requested set of records, and
-        all of them are valid.
+        Takes either a single IndexSpec instance or args and kwargs to
+        construct one.
+
+        Asynchronously iterates over the set of records specified via the index
+        spec. Records are taken from fast storage if the index covers the
+        requested set of records and all of them are valid.
 
         A record can become invalid if it is marked as such by a call to
         invalidate_record(), or if any record (no matter which one) is marked
-        as invalid without providing a new score for the index that is used to
-        query here. The index may also not support a coverage check at all, in
-        which case a ValueError is raised.
+        as invalid without providing scores for the index that is used to query
+        here. The index may also not support a coverage check at all, in which
+        case a ValueError is raised.
 
         Otherwise, records are taken from the (relatively slower) DB. This
         implies that querying a set of records that isn't covered (even if just
         by a little bit) is expensive.
         """
+        index_spec = self._make_index_spec(*args, **kwargs)
         await self.loaded()
         try:
-            get_from_storage = self._indexes.covers(
-                index_name, *index_args, **index_kwargs)
+            get_from_storage = self._indexes.covers(index_spec)
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
-                f'Indexes don\'t support coverage check on {index_name}.'
-            ) from e
-        async with self._invalid_records_lock:
-            if get_from_storage:
-                if not self._invalid_record_repo:
-                    records = self._storage_table.get_records(
-                        self._indexes.storage_records_spec(
-                            index_name, *index_args, **index_kwargs))
-                else:
-                    records = await self._check_and_get_records_from_storage(
-                        index_name, *index_args, **index_kwargs)
+                'Indexes don\'t support coverage check on '
+                f'{index_spec.index_name}.') from e
+        if get_from_storage:
+            if not self._invalid_record_repo:
+                records = self._storage_table.get_records(
+                    self._indexes.storage_records_spec(index_spec))
             else:
-                db_records_spec = self._indexes.db_records_spec(
-                    index_name, *index_args, **index_kwargs)
-                records = self._db_access.get_records(db_records_spec)
-            async for record in records:
-                yield record
+                records = await self._check_and_get_records_from_storage(
+                    index_spec)
+        else:
+            db_records_spec = self._indexes.db_records_spec(
+                index_spec)
+            records = self._db_access.get_records(db_records_spec)
+        async for record in records:
+            yield record
 
-    async def _check_and_get_records_from_storage(
-            self, index_name, *index_args, **index_kwargs):
-        records_spec = self._indexes.storage_records_spec(
-            index_name, *index_args, **index_kwargs)
+    async def _check_and_get_records_from_storage(self, index_spec):
+        records_spec = self._indexes.storage_records_spec(index_spec)
         if not self._intervals_are_valid(records_spec):
-            return await self._refresh_and_get_records_from_storage(
-                index_name, *index_args, **index_kwargs)
+            return await self._refresh_and_get_records_from_storage(index_spec)
         records = []
-        async for record in self._storage_table.get_records(
-                records_spec):
-            if self._invalid_record_repo.primary_key_is_invalid(
-                    self._indexes.primary_key(record)):
-                return await self._refresh_and_get_records_from_storage(
-                    index_name, *index_args, **index_kwargs)
+        async for record in self._storage_table.get_records(records_spec):
             records.append(record)
         return _async_generator(records)
 
     def _intervals_are_valid(self, records_spec):
         for interval in records_spec.score_intervals:
-            try:
-                if self._invalid_record_repo.interval_contains_invalid_score(
-                        records_spec.index_name, interval):
-                    return False
-            except DirtyIndex:
+            if self._invalid_record_repo.interval_intersects_invalid(
+                    records_spec.index_name, interval):
                 return False
         return True
 
-    async def _refresh_and_get_records_from_storage(
-            self, index_name, *index_args, **index_kwargs):
+    async def _refresh_and_get_records_from_storage(self, index_spec):
         await self.refresh_invalid()
         return self._storage_table.get_records(
-            self._indexes.storage_records_spec(
-                index_name, *index_args, **index_kwargs))
+            self._indexes.storage_records_spec(index_spec))
 
-    async def invalidate_record(
-            self, primary_key: PrimaryKey,
-            new_scores: t.Optional[t.Mapping[str, numbers.Real]] = None
+    def invalidate_records(
+            self, old_index_specs: list[index.Indexes[PrimaryKey].IndexSpec],
+            new_index_specs: list[index.Indexes[PrimaryKey].IndexSpec]
     ) -> None:
         """
         Mark a single record in storage as invalid.
@@ -357,28 +336,33 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         Implementation note: updated and deleted records aren't observed for
         the indexes again.
         """
-        await self.loaded()
-        new_scores = new_scores or {}
-        async with self._scratch_space_lock:
-            # We need both locks since neither reads nor scratch operations may
-            # happen concurrently. We need the _invalid_records_lock first, or
-            # they may be a deadlock. But the _scratch_space_lock may take a
-            # long time to acquire, and during that time we're blocking all
-            # reads via the _invalid_records_lock. So make sure the
-            # _scratch_space_lock is available right now to give us the best
-            # chance of not blocking a read.
-            pass
-        async with self._invalid_records_lock, self._scratch_space_lock:
+        if not self._loaded_event.is_set():
+            raise ValueError('Table is not yet loaded.')
+        index_for_refresh = {}
+        by_name = {'old': {}, 'new': {}}
+        for index_spec, old_or_new in it.chain(
+                zip(old_index_specs, it.repeat('old')),
+                zip(new_index_specs, it.repeat('new'))):
             try:
-                # We're only fetching here to make sure the primary key exists
-                # in storage. This is important since marking nonexistent ones
-                # as invalid will lead to them being loaded on the next
-                # refresh, even if they don't belong. This may get the indexes
-                # confused.
-                await self._storage_table.get_record(primary_key)
-            except KeyError:
-                raise
-            self._invalid_record_repo.flag_invalid(primary_key, new_scores)
+                index_for_refresh.setdefault(old_or_new, index_spec.index_name)
+                if self._indexes.covers(index_spec):
+                    if index_spec.index_name in by_name[old_or_new]:
+                        raise ValueError(
+                            f'Index {index_spec.index_name} specified more '
+                            'than once.')
+                    by_name[old_or_new][index_spec.index_name] = index_spec
+                    continue
+            except index.UnsupportedIndexOperation:
+                pass
+            raise ValueError(
+                f'Index spec {index_spec} is not certainly covered by the '
+                'indexes.')
+        if len(index_for_refresh) != 2:
+            raise ValueError(
+                'At least one old and one new index spec must be given.')
+        self._invalid_record_repo.flag_invalid(
+            by_name['old'], by_name['new'], index_for_refresh['old'],
+            index_for_refresh['new'])
 
     async def refresh_invalid(self) -> None:
         """
@@ -402,15 +386,15 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         if not self._invalid_record_repo:
             return
         _logger.info(
-            f'Refreshing {len(self._invalid_record_repo)} invalid keys.')
-        for key in self._invalid_record_repo.invalid_primary_keys:
+            f'Refreshing {len(self._invalid_record_repo)} invalid index '
+            'specs.')
+        for old_spec, new_spec in (
+                self._invalid_record_repo.specs_for_refresh()):
             await self._storage_table.scratch_discard_records(
-                self._indexes.storage_records_spec('primary_key', key))
-        db_records_spec = self._indexes.db_records_spec(
-            'primary_key', *self._invalid_record_repo.invalid_primary_keys)
-        updated_records = self._db_access.get_records(db_records_spec)
-        async for record in updated_records:
-            await self._storage_table.scratch_put_record(record)
+                self._indexes.storage_records_spec(old_spec))
+            db_records_spec = self._indexes.db_records_spec(new_spec)
+            async for record in self._db_access.get_records(db_records_spec):
+                await self._storage_table.scratch_put_record(record)
         self._storage_table.scratch_merge()
         self._invalid_record_repo.clear()
 
@@ -419,64 +403,102 @@ class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
     """
     A repository of invalid records.
 
-    Keeps track of which records have been marked as invalid, along with their
-    scores for all indexes.
+    Keeps track of intervals of records scores which have been marked as
+    invalid, along with index specs to do the eventual refresh with.
     """
 
     def __init__(self, indexes: index.Indexes[PrimaryKey]) -> None:
-        self._primary_key_score = indexes.primary_key_score
-        self.invalid_primary_keys = set()
-        self._invalid_scores = {n: set() for n in indexes.index_names}
-        self._dirty_indexes = set()
+        self._indexes = indexes
+        self.clear()
 
     def __len__(self) -> int:
-        return len(self.invalid_primary_keys)
+        return len(self._specs_for_refresh)
 
     def flag_invalid(
-            self, primary_key: PrimaryKey,
-            scores: t.Mapping[str, numbers.Real]) -> None:
+        self,
+        old_index_specs:
+            t.Mapping[str, index.Indexes[PrimaryKey].IndexSpec],
+        new_index_specs:
+            t.Mapping[str, index.Indexes[PrimaryKey].IndexSpec],
+        old_index_for_refresh: str, new_index_for_refresh: str
+    ) -> None:
         """
-        Flag a record as invalid.
+        Flag records as invalid.
 
-        scores maps index names to the record's respective score for that
-        index. These scores are trusted, as there is no way of calculating them
-        here.
+        Takes 2 dictionaries of index specs, one specifying the invalid records
+        as they exist in storage now, the other specifying the updated records.
+        These may be the same. Each dictionary maps index names to
+        corresponding index specs. All score intervals in the corresponding
+        StorageRecordsSpecs will be considered invalid in
+        interval_intersects_invalid(). Any keys in the dictionaries that aren't
+        names of indexes are ignored.
 
-        Not all scores have to be provided, but for the ones that aren't the
-        respective index is marked as dirty. This means that future calls to
-        score_is_invalid() for that index will raise an exception, since there
-        is no longer a way to check whether the score is valid or not. One
-        exception to this is the special primary_key index, the score of which
-        can be calculated if it is missing.
+        Not every index has to be present in the specs, but for the ones that
+        aren't the respective index is marked as dirty. This means that future
+        calls to interval_intersects_invalid() for that index will always
+        return True, since there is no longer a way to know what scores are
+        valid.
+
+        One old and one new index spec is stored to be part of
+        specs_for_refresh(). Which are chosen must be specified via
+        {old,new}_index_for_refresh. These must be keys into the respective
+        dictionaries.
         """
-        self.invalid_primary_keys.add(primary_key)
-        if 'primary_key' not in scores:
-            scores['primary_key'] = self._primary_key_score(primary_key)
-        for index_name, invalid_scores in self._invalid_scores.items():
-            try:
-                invalid_scores.add(scores[index_name])
-            except KeyError:
-                self._dirty_indexes.add(index_name)
+        if not old_index_specs or not new_index_specs:
+            raise ValueError(
+                'Must provide at least one old and one new index spec.')
+        self._specs_for_refresh.append(
+            (old_index_specs[old_index_for_refresh],
+             new_index_specs[new_index_for_refresh]))
+        for index_name in self._indexes.index_names:
+            self._record_invalid_intervals(
+                index_name, old_index_specs, new_index_specs)
 
-    def primary_key_is_invalid(self, primary_key: PrimaryKey) -> bool:
-        """Check whether a primary key is invalid."""
-        return primary_key in self.invalid_primary_keys
+    def _record_invalid_intervals(
+            self, index_name, old_index_specs, new_index_specs):
+        try:
+            old_index_spec = old_index_specs[index_name]
+            new_index_spec = new_index_specs[index_name]
+        except KeyError:
+            self._dirty_indexes.add(index_name)
+            return
+        for index_spec in (old_index_spec, new_index_spec):
+            records_spec = self._indexes.storage_records_spec(index_spec)
+            self._invalid_intervals[index_name].update(
+                records_spec.score_intervals)
 
-    def interval_contains_invalid_score(
+    def specs_for_refresh(self) -> t.Iterable[tuple[
+            index.Indexes[PrimaryKey].IndexSpec,
+            index.Indexes[PrimaryKey].IndexSpec]]:
+        """
+        Iterate index specs to do a refresh with.
+
+        Generates tuples (old, new), where old is an index spec of records that
+        have become invalid in storage, and new is an index spec specifying the
+        records in their valid state in the DB.
+        """
+        yield from self._specs_for_refresh
+
+    def interval_intersects_invalid(
             self, index_name: str, interval: storage.Interval) -> bool:
         """
         Check whether the interval contains an invalid score.
 
-        If the queried index has been marked as dirty, raises DirtyIndex.
+        This is the case if the interval intersects any of the intervals
+        previously marked invalid for the given index, or if the entire index
+        has been marked as dirty.
+
+        If the given index_name doesn't exist, raises a KeyError.
         """
         if index_name in self._dirty_indexes:
-            raise DirtyIndex
-        return any(
-            score in interval for score in self._invalid_scores[index_name])
+            return True
+        for invalid_interval in self._invalid_intervals[index_name]:
+            if interval.intersects(invalid_interval):
+                return True
+        return False
 
     def clear(self) -> None:
         """Reset the state."""
-        self.invalid_primary_keys.clear()
-        for invalid_scores in self._invalid_scores.values():
-            invalid_scores.clear()
-        self._dirty_indexes.clear()
+        self._invalid_intervals = {n: set() for n in self._indexes.index_names}
+        self._specs_for_refresh = []
+        self._dirty_indexes = set()

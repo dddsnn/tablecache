@@ -16,11 +16,14 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import collections.abc as ca
 import dataclasses as dc
+import itertools as it
 import numbers
 import queue
 import unittest.mock as um
 import threading
+import typing as t
 
 from hamcrest import *
 import pytest
@@ -36,6 +39,12 @@ async def collect_async_iter(i):
 
 
 class SpyIndexes(tc.PrimaryKeyIndexes):
+    class IndexSpec(tc.PrimaryKeyIndexes.IndexSpec):
+        def __eq__(self, other):
+            return (self.index_name == other.index_name and
+                    self.primary_keys == other.primary_keys and
+                    self.all_primary_keys == other.all_primary_keys)
+
     def __init__(self):
         super().__init__('pk', 'query_all_pks', 'query_some_pks')
         self.prepare_adjustment_mock = um.Mock(return_values=[])
@@ -61,10 +70,28 @@ class SpyIndexes(tc.PrimaryKeyIndexes):
 
 
 class MultiIndexes(tc.Indexes[int]):
+    class IndexSpec(tc.Indexes[int].IndexSpec):
+        def __init__(
+                self, index_name, *primary_keys, all_primary_keys=False,
+                min=None, max=None):
+            if index_name == 'primary_key':
+                assert min is None and max is None
+            elif index_name == 'x_range':
+                assert (not primary_keys and not all_primary_keys and
+                        None not in [min, max])
+            else:
+                raise ValueError
+            super().__init__(index_name)
+            self.primary_keys = set(primary_keys)
+            self.all_primary_keys = all_primary_keys
+            self.min = min
+            self.max = max
+
     @dc.dataclass(frozen=True)
     class Adjustment(tc.Adjustment):
+        all_primary_keys: bool
         primary_keys: set[numbers.Real]
-        range: tuple[numbers.Real, numbers.Real]
+        range: t.Optional[tuple[numbers.Real, numbers.Real]]
 
     def __init__(self):
         self._contains_all = False
@@ -77,13 +104,10 @@ class MultiIndexes(tc.Indexes[int]):
 
     def score(self, index_name, record):
         if index_name == 'primary_key':
-            return self.primary_key_score(record['pk'])
+            return self.primary_key(record) + 1
         elif index_name == 'x_range':
             return record['x'] + 100
         raise ValueError
-
-    def primary_key_score(self, primary_key):
-        return primary_key + 1
 
     def primary_key(self, record):
         try:
@@ -91,66 +115,75 @@ class MultiIndexes(tc.Indexes[int]):
         except KeyError:
             raise ValueError
 
-    def storage_records_spec(self, index_name, *args, **kwargs):
-        if index_name == 'primary_key':
-            return tc.StorageRecordsSpec(
-                index_name, [tc.Interval(pk + 1, pk + 1.1) for pk in args])
-        if index_name == 'x_range':
-            ge = kwargs['min']
-            lt = kwargs['max']
+    def storage_records_spec(self, spec):
+        if spec.index_name == 'primary_key':
+            if spec.all_primary_keys:
+                intervals = [tc.Interval.everything()]
+            else:
+                intervals = [
+                    tc.Interval(pk + 1, pk + 1.1) for pk in spec.primary_keys]
+            return tc.StorageRecordsSpec(spec.index_name, intervals)
+        if spec.index_name == 'x_range':
+            ge = spec.min
+            lt = spec.max
             mid = ge + (lt - ge) / 2
             return tc.StorageRecordsSpec(
-                index_name, [
+                spec.index_name, [
                     tc.Interval(ge + 100, mid + 100),
                     tc.Interval(mid + 100, lt + 100)])
         raise NotImplementedError
 
-    def db_records_spec(self, index_name, *args, **kwargs):
-        if index_name == 'primary_key':
-            if args:
-                return tc.QueryArgsDbRecordsSpec('query_some_pks', (args,))
-            return tc.QueryArgsDbRecordsSpec('query_all_pks', ())
-        if index_name == 'x_range':
+    def db_records_spec(self, spec):
+        if spec.index_name == 'primary_key':
+            if spec.all_primary_keys:
+                return tc.QueryArgsDbRecordsSpec('query_all_pks', ())
             return tc.QueryArgsDbRecordsSpec(
-                'query_x_range', (kwargs['min'], kwargs['max']))
+                'query_some_pks', (spec.primary_keys,))
+        if spec.index_name == 'x_range':
+            return tc.QueryArgsDbRecordsSpec(
+                'query_x_range', (spec.min, spec.max))
         raise NotImplementedError
 
-    def prepare_adjustment(self, index_name, *args, **kwargs):
+    def prepare_adjustment(self, spec):
         expire_spec = tc.StorageRecordsSpec(
             'primary_key', [tc.Interval.everything()])
-        if index_name == 'primary_key':
-            new_spec = self.db_records_spec('primary_key', *args)
-            primary_keys = set(args)
+        new_spec = self.db_records_spec(spec)
+        if spec.index_name == 'primary_key':
+            primary_keys = spec.primary_keys
             range_ = None
-        elif index_name == 'x_range':
-            new_spec = self.db_records_spec('x_range', **kwargs)
+        elif spec.index_name == 'x_range':
             primary_keys = None
-            range_ = (kwargs['min'], kwargs['max'])
+            range_ = (spec.min, spec.max)
         else:
             raise NotImplementedError
-        return self.Adjustment(expire_spec, new_spec, primary_keys, range_)
+        return self.Adjustment(
+            expire_spec, new_spec, bool(spec.all_primary_keys), primary_keys,
+            range_)
 
     def commit_adjustment(self, adjustment):
         if adjustment.primary_keys is not None:
             assert adjustment.range is None
-            self._contains_all = adjustment.primary_keys == set()
-            self._primary_keys = adjustment.primary_keys
+            self._contains_all = adjustment.all_primary_keys
         else:
             assert adjustment.range is not None
             self._contains_all = False
-            self._primary_keys = set()
+        self._primary_keys = adjustment.primary_keys or set()
         self._range = adjustment.range
 
-    def covers(self, index_name, *args, **kwargs):
+    def covers(self, spec):
         if self._contains_all:
             return True
-        if index_name == 'primary_key':
-            return args and all(pk in self._primary_keys for pk in args)
-        if index_name == 'x_range':
+        if spec.all_primary_keys:
+            return False
+        if spec.index_name == 'primary_key':
+            return (
+                spec.primary_keys and
+                all(pk in self._primary_keys for pk in spec.primary_keys))
+        if spec.index_name == 'x_range':
             if self._range is None:
                 return False
             loaded_ge, loaded_lt = self._range
-            ge, lt = kwargs['min'], kwargs['max']
+            ge, lt = spec.min, spec.max
             return loaded_ge <= ge <= lt <= loaded_lt
         raise NotImplementedError
 
@@ -168,20 +201,15 @@ class MockDbAccess(tc.DbAccess):
             def record_matches(_): return True
         elif records_spec.query == 'query_some_pks':
             assert_that(
-                records_spec.args,
-                all_of(
-                    instance_of(tuple),
-                    contains_exactly(instance_of(tuple))))
+                records_spec.args, contains_exactly(instance_of(ca.Iterable)))
 
             def record_matches(r): return r['pk'] in records_spec.args[0]
         else:
             assert records_spec.query == 'query_x_range'
             assert_that(
                 records_spec.args,
-                all_of(
-                    instance_of(tuple),
-                    contains_exactly(
-                        instance_of(numbers.Real), instance_of(numbers.Real))))
+                contains_exactly(
+                    instance_of(numbers.Real), instance_of(numbers.Real)))
             ge, lt = records_spec.args
             def record_matches(r): return ge <= r['x'] < lt
         for record in self.records:
@@ -225,9 +253,6 @@ class MockStorageTable(tc.StorageTable):
             self._indexes.setdefault(index_name, {}).setdefault(
                 score, set()).add(primary_key)
 
-    async def get_record(self, primary_key):
-        return self._make_record(self.records[primary_key])
-
     async def get_records(self, records_spec):
         for record in self.records.values():
             if not records_spec.recheck_predicate(record):
@@ -241,10 +266,6 @@ class MockStorageTable(tc.StorageTable):
 
     def _make_record(self, record):
         return record | {'source': 'storage'}
-
-    async def delete_record(self, primary_key):
-        del self.records[primary_key]
-        self._delete_index_entries(primary_key)
 
     def _delete_index_entries(self, primary_key):
         for index in self._indexes.values():
@@ -312,18 +333,22 @@ class TestCachedTable:
         table, _ = make_tables()
         return table
 
-    async def test_load_and_get_record(self, table, db_access):
+    def table_has_invalid_records(self, table):
+        return bool(table._invalid_record_repo)
+
+    async def test_load_and_get_first_record(self, table, db_access):
         db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
         await table.load('primary_key', all_primary_keys=True)
         assert_that(
-            await table.get_record(1),
+            await table.get_first_record('primary_key', 1),
             has_entries(pk=1, k='v1', source='storage'))
 
-    async def test_get_record_raises_on_nonexistent(self, table, db_access):
+    async def test_get_first_record_raises_on_nonexistent(
+            self, table, db_access):
         db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
         await table.load('primary_key', all_primary_keys=True)
         with pytest.raises(KeyError):
-            await table.get_record(3)
+            await table.get_first_record('primary_key', 3)
 
     async def test_get_records_all(self, table, db_access):
         db_access.records = [{'pk': i} for i in range(6)]
@@ -370,23 +395,37 @@ class TestCachedTable:
         table, storage_table = make_tables()
         db_access.records = [{'pk': 1, 'k': 'v1'}]
         storage_table.records = {2: {'pk': 2, 'k': 'v2'}}
-        assert_that(await storage_table.get_record(2), has_entries(k='v2'))
+        assert_that(
+            await collect_async_iter(storage_table.get_records(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.only_containing(2)]))),
+            contains_exactly(has_entries(k='v2')))
         await table.load('primary_key', all_primary_keys=True)
-        assert_that(await table.get_record(1), has_entries(k='v1'))
-        assert_that(await storage_table.get_record(1), has_entries(k='v1'))
+        assert_that(
+            await table.get_first_record('primary_key', 1),
+            has_entries(k='v1'))
+        assert_that(
+            await collect_async_iter(storage_table.get_records(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.only_containing(1)]))),
+            contains_exactly(has_entries(k='v1')))
         with pytest.raises(KeyError):
-            await table.get_record(2)
-        with pytest.raises(KeyError):
-            await storage_table.get_record(2)
+            await table.get_first_record('primary_key', 2)
+        assert_that(
+            await collect_async_iter(storage_table.get_records(
+                tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.only_containing(2)]))),
+            empty())
 
     async def test_load_adjusts_indexes(self, table, db_access, indexes):
         mock = um.Mock()
         mock.prepare = indexes.prepare_adjustment_mock
         mock.commit = indexes.commit_adjustment_mock
         db_access.records = [{'pk': i} for i in range(6)]
-        await table.load('primary_key', 2, 4)
+        index_spec = indexes.IndexSpec('primary_key', 2, 4)
+        await table.load(index_spec)
         assert mock.mock_calls == [
-            um.call.prepare('primary_key', 2, 4),
+            um.call.prepare(index_spec),
             um.call.commit(indexes.prepare_adjustment_mock.return_value)]
 
     async def test_load_calls_observes_after_commit_adjustment(
@@ -396,21 +435,20 @@ class TestCachedTable:
         mock.commit = indexes.commit_adjustment_mock
         mock.observe = indexes.observe_mock
         db_access.records = [{'pk': i} for i in range(6)]
-        await table.load('primary_key', 2, 4)
+        index_spec = indexes.IndexSpec('primary_key', 2, 4)
+        await table.load(index_spec)
         assert mock.mock_calls == [
-            um.call.prepare('primary_key', 2, 4),
+            um.call.prepare(index_spec),
             um.call.commit(indexes.prepare_adjustment_mock.return_value),
             um.call.observe(um.ANY), um.call.observe(um.ANY)]
 
     async def test_load_raises_if_index_doesnt_support_adjusting(
             self, make_tables, db_access):
         class Indexes(MultiIndexes):
-            def prepare_adjustment(
-                    self, index_name, *index_args, **index_kwargs):
-                if index_name == 'x_range':
+            def prepare_adjustment(self, spec):
+                if spec.index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
-                return super().prepare_adjustment(
-                    index_name, *index_args, **index_kwargs)
+                return super().prepare_adjustment(spec)
         table, _ = make_tables(Indexes())
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         with pytest.raises(ValueError):
@@ -449,62 +487,36 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='db') for i in range(2, 5)]))
 
-    async def test_get_record_also_checks_db_in_case_not_cached(
-            self, table, db_access):
-        db_access.records = [{'pk': i} for i in range(6)]
-        await table.load('primary_key', *range(2, 4))
-        assert_that(await table.get_record(1), has_entries(pk=1, source='db'))
-
-    async def test_get_record_doesnt_check_db_if_all_in_cache(
-            self, make_tables, db_access):
-        table, storage_table = make_tables()
-        db_access.records = [{'pk': i} for i in range(6)]
-        await table.load('primary_key', 1)
-        del storage_table.records[1]
-        with pytest.raises(KeyError):
-            await table.get_record(1)
-
     async def test_doesnt_automatically_reflect_db_state(
             self, table, db_access):
         db_access.records = [{'pk': 1, 'k': 'v1'}]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': 1, 'k': 'v2'}]
-        assert_that(await table.get_record(1), has_entries(pk=1, k='v1'))
-
-    async def test_get_record_refreshes_existing_invalid_keys(
-            self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.load('primary_key', all_primary_keys=True)
-        db_access.records = [{'pk': 1, 'k': 'b1'}]
-        await table.invalidate_record(1)
-        assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
+        assert_that(
+            await table.get_first_record('primary_key', 1),
+            has_entries(pk=1, k='v1'))
 
     async def test_get_records_refreshes_existing_invalid_keys(
-            self, table, db_access):
+            self, table, db_access, indexes):
         db_access.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': 1, 'k': 'b1'}]
-        await table.invalidate_record(1)
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 1)],
+            [indexes.IndexSpec('primary_key', 1)])
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', 1)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
-    async def test_get_record_only_refreshes_once(self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.load('primary_key', all_primary_keys=True)
-        db_access.records = [{'pk': 1, 'k': 'b1'}]
-        await table.invalidate_record(1)
-        await table.get_record(1)
-        db_access.records = [{'pk': 1, 'k': 'c1'}]
-        assert_that(await table.get_record(1), has_entries(pk=1, k='b1'))
-
     async def test_get_records_only_refreshes_once(
-            self, table, db_access):
+            self, table, db_access, indexes):
         db_access.records = [{'pk': 1, 'k': 'a1'}]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': 1, 'k': 'b1'}]
-        await table.invalidate_record(1)
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 1)],
+            [indexes.IndexSpec('primary_key', 1)])
         await collect_async_iter(table.get_records('primary_key', 1, 2))
         db_access.records = [{'pk': 1, 'k': 'c1'}]
         assert_that(
@@ -512,20 +524,14 @@ class TestCachedTable:
                 table.get_records('primary_key', 1, 2)),
             contains_inanyorder(has_entries(pk=1, k='b1')))
 
-    async def test_get_record_deletes_invalid_keys(self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}, {'pk': 2, 'k': 'a2'}]
-        await table.load('primary_key', all_primary_keys=True)
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.invalidate_record(2)
-        with pytest.raises(KeyError):
-            await table.get_record(2)
-
     async def test_get_records_deletes_invalid_keys(
-            self, table, db_access):
+            self, table, db_access, indexes):
         db_access.records = [{'pk': i, 'k': f'a{i}'} for i in range(3)]
         await table.load('primary_key', all_primary_keys=True)
-        db_access.records = [{'pk': 0, 'k': 'a0'}, {'pk': 2, 'k': 'a2'}]
-        await table.invalidate_record(1)
+        del db_access.records[1]
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 1)],
+            [indexes.IndexSpec('primary_key', 1)])
         assert_that(
             await collect_async_iter(
                 table.get_records('primary_key', *range(3))),
@@ -541,13 +547,10 @@ class TestCachedTable:
             def score(self, index_name, record):
                 return 0
 
-            def primary_key_score(self, primary_key):
-                return 0
-
-            def storage_records_spec(self, index_name, *primary_keys):
+            def storage_records_spec(self, spec):
                 return tc.StorageRecordsSpec(
-                    index_name, [tc.Interval(0, 1)],
-                    lambda r: r['pk'] in primary_keys)
+                    spec.index_name, [tc.Interval(0, 1)],
+                    lambda r: r['pk'] in spec.primary_keys)
         table, _ = make_tables(RecheckOnlyIndexes())
         db_access.records = [{'pk': i} for i in range(3)]
         await table.load('primary_key', all_primary_keys=True)
@@ -556,17 +559,6 @@ class TestCachedTable:
                 table.get_records('primary_key', 0, 2)),
             contains_inanyorder(
                 has_entries(pk=0), has_entries(pk=2)))
-
-    async def test_get_record_blocks_while_not_loaded(self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
-        get_task = asyncio.create_task(table.get_record(1))
-        load_wait_task = asyncio.create_task(table.loaded())
-        await asyncio.sleep(0.001)
-        assert not get_task.done()
-        assert not load_wait_task.done()
-        await table.load('primary_key', all_primary_keys=True)
-        await get_task
-        await load_wait_task
 
     async def test_get_records_blocks_while_not_loaded(self, table, db_access):
         db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
@@ -581,24 +573,12 @@ class TestCachedTable:
         await get_task
         await load_wait_task
 
-    async def test_invalidate_record_raises_on_nonexistent(
-            self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'a1'}]
-        await table.load('primary_key', all_primary_keys=True)
-        with pytest.raises(KeyError):
-            await table.invalidate_record(2)
-
-    async def test_invalidate_record_blocks_while_not_loaded(
-            self, table, db_access):
-        db_access.records = [{'pk': 1, 'k': 'v1'}, {'pk': 2, 'k': 'v2'}]
-        invalidate_task = asyncio.create_task(table.invalidate_record(1))
-        load_wait_task = asyncio.create_task(table.loaded())
-        await asyncio.sleep(0.001)
-        assert not invalidate_task.done()
-        assert not load_wait_task.done()
-        await table.load('primary_key', all_primary_keys=True)
-        await invalidate_task
-        await load_wait_task
+    async def test_invalidate_record_raises_if_not_loaded(
+            self, table, indexes):
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', 1)],
+                [indexes.IndexSpec('primary_key', 1)])
 
     async def test_adjust_discards_old_data(self, table, db_access):
         db_access.records = [{'pk': i} for i in range(4)]
@@ -622,10 +602,14 @@ class TestCachedTable:
 
     async def test_adjust_discards_no_old_data(self, make_tables, db_access):
         class Indexes(SpyIndexes):
-            def prepare_adjustment(self, *args, **kwargs):
-                delete_nothing = kwargs.pop('delete_nothing', False)
-                adjustment = super().prepare_adjustment(*args, **kwargs)
-                if delete_nothing:
+            class IndexSpec(SpyIndexes.IndexSpec):
+                def __init__(self, *args, **kwargs):
+                    self.delete_nothing = kwargs.pop('delete_nothing', False)
+                    super().__init__(*args, **kwargs)
+
+            def prepare_adjustment(self, spec):
+                adjustment = super().prepare_adjustment(spec)
+                if spec.delete_nothing:
                     assert adjustment.expire_spec is None
                 return adjustment
         table, _ = make_tables(indexes=Indexes())
@@ -661,10 +645,14 @@ class TestCachedTable:
 
     async def test_adjust_loads_no_new_data(self, make_tables, db_access):
         class Indexes(SpyIndexes):
-            def prepare_adjustment(self, *args, **kwargs):
-                load_nothing = kwargs.pop('load_nothing', False)
-                adjustment = super().prepare_adjustment(*args, **kwargs)
-                if load_nothing:
+            class IndexSpec(SpyIndexes.IndexSpec):
+                def __init__(self, *args, **kwargs):
+                    self.load_nothing = kwargs.pop('load_nothing', False)
+                    super().__init__(*args, **kwargs)
+
+            def prepare_adjustment(self, spec):
+                adjustment = super().prepare_adjustment(spec)
+                if spec.load_nothing:
                     adjustment = dc.replace(adjustment, new_spec=None)
                 return adjustment
         table, _ = make_tables(indexes=Indexes())
@@ -723,10 +711,10 @@ class TestCachedTable:
         await table.load('primary_key', *range(2))
         await table.adjust('primary_key', *range(4))
         assert mock.mock_calls == [
-            um.call.prepare('primary_key', *range(2)),
+            um.call.prepare(indexes.IndexSpec('primary_key', *range(2))),
             um.call.commit(indexes.prepare_adjustment_mock.return_values[0]),
             um.call.observe(um.ANY), um.call.observe(um.ANY),
-            um.call.prepare('primary_key', *range(4)),
+            um.call.prepare(indexes.IndexSpec('primary_key', *range(4))),
             um.call.commit(indexes.prepare_adjustment_mock.return_values[1]),
             um.call.observe(um.ANY), um.call.observe(um.ANY),
             um.call.observe(um.ANY), um.call.observe(um.ANY)]
@@ -752,12 +740,10 @@ class TestCachedTable:
     async def test_adjust_raises_if_index_doesnt_support_adjusting(
             self, make_tables, db_access):
         class Indexes(MultiIndexes):
-            def prepare_adjustment(
-                    self, index_name, *index_args, **index_kwargs):
-                if index_name == 'x_range':
+            def prepare_adjustment(self, spec):
+                if spec.index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
-                return super().prepare_adjustment(
-                    index_name, *index_args, **index_kwargs)
+                return super().prepare_adjustment(spec)
         table, _ = make_tables(Indexes())
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', *range(2))
@@ -864,14 +850,17 @@ class TestCachedTable:
         await adjust_task
         await load_wait_task
 
-    async def test_adjust_refreshes_first(self, table, db_access):
+    async def test_adjust_refreshes_first(self, table, db_access, indexes):
         db_access.records = [{'pk': i, 's': f'a{i}'} for i in range(2)]
         await table.load('primary_key', 0)
         db_access.records = [{'pk': i, 's': f'b{i}'} for i in range(4)]
-        await table.invalidate_record(0)
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 0)],
+            [indexes.IndexSpec('primary_key', 0)])
         await table.adjust('primary_key', 1)
         assert_that(
-            await table.get_record(0), has_entries(s='b0', source='db'))
+            await table.get_first_record('primary_key', 0),
+            has_entries(s='b0', source='db'))
 
     async def test_get_records_by_other_index(
             self, make_tables, db_access):
@@ -888,16 +877,94 @@ class TestCachedTable:
     async def test_get_records_raises_if_index_doesnt_support_covers(
             self, make_tables, db_access):
         class Indexes(MultiIndexes):
-            def covers(self, index_name, *index_args, **index_kwargs):
-                if index_name == 'x_range':
+            def covers(self, spec):
+                if spec.index_name == 'x_range':
                     raise tc.UnsupportedIndexOperation
-                return super().adjust(index_name, *index_args, **index_kwargs)
+                return super().covers(spec)
         table, _ = make_tables(Indexes())
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', all_primary_keys=True)
         with pytest.raises(ValueError):
             await collect_async_iter(
                 table.get_records('x_range', min=12, max=14))
+
+    async def test_invalidate_records_raises_without_old_spec(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', all_primary_keys=True)
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [], [indexes.IndexSpec('primary_key', *range(6))])
+
+    async def test_invalidate_records_raises_without_new_spec(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', all_primary_keys=True)
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(6))], [])
+
+    async def test_invalidate_records_raises_with_dulicate_old_spec(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', all_primary_keys=True)
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(6)),
+                 indexes.IndexSpec('primary_key', *range(6))],
+                [indexes.IndexSpec('primary_key', *range(6))])
+
+    async def test_invalidate_records_raises_with_dulicate_new_spec(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', all_primary_keys=True)
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(6))],
+                [indexes.IndexSpec('primary_key', *range(6)),
+                 indexes.IndexSpec('primary_key', *range(6))])
+
+    async def test_invalidate_records_raises_with_old_spec_that_is_not_covered(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', *range(4))
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(6))],
+                [indexes.IndexSpec('primary_key', *range(4))])
+
+    async def test_invalidate_records_raises_with_new_spec_that_is_not_covered(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', *range(4))
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(4))],
+                [indexes.IndexSpec('primary_key', *range(6))])
+
+    async def test_invalidate_records_raises_with_uncertain_old_coverage(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', *range(4))
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(4)),
+                 indexes.IndexSpec('x_range', min=10, max=14)],
+                [indexes.IndexSpec('primary_key', *range(4))])
+
+    async def test_invalidate_records_raises_with_uncertain_new_coverage(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', *range(4))
+        with pytest.raises(ValueError):
+            table.invalidate_records(
+                [indexes.IndexSpec('primary_key', *range(4))],
+                [indexes.IndexSpec('primary_key', *range(4)),
+                 indexes.IndexSpec('x_range', min=10, max=14)])
 
     async def test_changing_scores_with_score_hint_dont_return_old_records(
             self, make_tables, db_access):
@@ -906,9 +973,11 @@ class TestCachedTable:
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
-        for primary_key in range(6):
-            new_score = indexes.score('x_range', {'x': primary_key + 100})
-            await table.invalidate_record(primary_key, {'x_range': new_score})
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', *range(6)),
+             indexes.IndexSpec('x_range', min=10, max=16)],
+            [indexes.IndexSpec('primary_key', *range(6)),
+             indexes.IndexSpec('x_range', min=100, max=106)])
         assert_that(
             await collect_async_iter(
                 table.get_records('x_range', min=12, max=14)), empty())
@@ -920,9 +989,11 @@ class TestCachedTable:
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
-        for primary_key in range(6):
-            new_score = indexes.score('x_range', {'x': primary_key + 100})
-            await table.invalidate_record(primary_key, {'x_range': new_score})
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', *range(6)),
+             indexes.IndexSpec('x_range', min=10, max=16)],
+            [indexes.IndexSpec('primary_key', *range(6)),
+             indexes.IndexSpec('x_range', min=100, max=106)])
         assert_that(
             await collect_async_iter(
                 table.get_records('x_range', min=100, max=106)),
@@ -936,8 +1007,9 @@ class TestCachedTable:
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
-        for primary_key in range(6):
-            await table.invalidate_record(primary_key, {})
+        table.invalidate_records(
+            [MultiIndexes.IndexSpec('primary_key', *range(6))],
+            [MultiIndexes.IndexSpec('primary_key', *range(6))])
         assert_that(
             await collect_async_iter(
                 table.get_records('x_range', min=12, max=14)), empty())
@@ -948,8 +1020,162 @@ class TestCachedTable:
         db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
-        for primary_key in range(6):
-            await table.invalidate_record(primary_key, {})
+        table.invalidate_records(
+            [MultiIndexes.IndexSpec('primary_key', *range(6))],
+            [MultiIndexes.IndexSpec('primary_key', *range(6))])
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=100, max=106)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 100, source='storage')
+                  for i in range(6)]))
+
+    async def test_refreshes_after_invalidate_records_on_affected_old(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('x_range', min=10, max=106)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=102, max=104)])
+        assert self.table_has_invalid_records(table)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=11, max=13)),
+            contains_inanyorder(
+                has_entries(pk=1, x=11, source='storage')))
+        assert not self.table_has_invalid_records(table)
+
+    async def test_refreshes_after_invalidate_records_on_affected_new(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('x_range', min=10, max=106)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=102, max=104)])
+        assert self.table_has_invalid_records(table)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=101, max=103)),
+            contains_inanyorder(
+                has_entries(pk=2, x=102, source='storage')))
+        assert not self.table_has_invalid_records(table)
+
+    async def test_doesnt_refresh_after_invalidate_records_on_unaffected_old(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('x_range', min=10, max=106)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=102, max=104)])
+        assert self.table_has_invalid_records(table)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=14, max=16)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 10, source='storage')
+                  for i in range(4, 6)]))
+        assert self.table_has_invalid_records(table)
+
+    async def test_doesnt_refresh_after_invalidate_records_on_unaffected_new(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('x_range', min=10, max=106)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=102, max=104)])
+        assert self.table_has_invalid_records(table)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=104, max=106)), empty())
+        assert self.table_has_invalid_records(table)
+
+    async def test_invalidate_records_tolerates_overspecified_new(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', all_primary_keys=True)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=100, max=106)])
+        assert_that(
+            await collect_async_iter(
+                table.get_records('primary_key', all_primary_keys=True)),
+            contains_inanyorder(
+                *it.chain([has_entries(pk=i, x=i + 10, source='storage')
+                           for i in [0, 1, 4, 5]],
+                          [has_entries(pk=i, x=i + 100, source='storage')
+                           for i in [2, 3]])))
+
+    async def test_invalidate_records_can_add(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': 0, 'x': 10}, {'pk': 2, 'x': 12}]
+        await table.load('x_range', min=10, max=13)
+        db_access.records.append({'pk': 1, 'x': 11})
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=10, max=13)],
+            [indexes.IndexSpec('x_range', min=10, max=13)])
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=10, max=13)),
+            contains_inanyorder(
+                *[has_entries(pk=i, x=i + 10, source='storage')
+                  for i in range(3)]))
+
+    async def test_invalidate_records_can_delete(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(3)]
+        await table.load('x_range', min=10, max=13)
+        del db_access.records[1]
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=10, max=13)],
+            [indexes.IndexSpec('x_range', min=10, max=13)])
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=10, max=13)),
+            contains_inanyorder(
+                has_entries(pk=0, x=10, source='storage'),
+                has_entries(pk=2, x=12, source='storage')))
+
+    async def test_invalidate_records_uses_first_specs_for_refresh(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('primary_key', all_primary_keys=True)
+        db_access.records = [{'pk': i, 'x': i + 100} for i in range(6)]
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', *range(6)),
+             indexes.IndexSpec('x_range', min=10, max=11)],
+            [indexes.IndexSpec('primary_key', *range(6)),
+             indexes.IndexSpec('x_range', min=100, max=101)])
         assert_that(
             await collect_async_iter(
                 table.get_records('x_range', min=100, max=106)),
@@ -963,7 +1189,9 @@ class TestCachedTable:
         db_access.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': i} for i in range(3)]
-        await table.invalidate_record(3)
+        table.invalidate_records(
+            [MultiIndexes.IndexSpec('primary_key', 3)],
+            [MultiIndexes.IndexSpec('primary_key', 3)])
         storage_table._enable_merge_wait()
         exceptions = []
         task_queue = queue.Queue()
@@ -973,7 +1201,10 @@ class TestCachedTable:
             storage_table._merge_wait_start()
             try:
                 assert_that(
-                    await storage_table.get_record(3), has_entries(pk=3))
+                    await collect_async_iter(storage_table.get_records(
+                        tc.StorageRecordsSpec(
+                            'primary_key', [tc.Interval.only_containing(3)]))),
+                    contains_exactly(has_entries(pk=3)))
             except Exception as e:
                 exceptions.append(e)
             assert not refresh_task.done()
@@ -987,7 +1218,7 @@ class TestCachedTable:
         for e in exceptions:
             raise e
         with pytest.raises(KeyError):
-            await table.get_record(3)
+            await table.get_first_record('primary_key', 3)
 
     async def test_refresh_invalid_uses_scratch_space_for_updating(
             self, make_tables, db_access):
@@ -995,7 +1226,9 @@ class TestCachedTable:
         db_access.records = [{'pk': 0, 's': 'x'}]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': 0, 's': 'y'}]
-        await table.invalidate_record(0)
+        table.invalidate_records(
+            [MultiIndexes.IndexSpec('primary_key', 0)],
+            [MultiIndexes.IndexSpec('primary_key', 0)])
         storage_table._enable_merge_wait()
         exceptions = []
         task_queue = queue.Queue()
@@ -1005,7 +1238,10 @@ class TestCachedTable:
             storage_table._merge_wait_start()
             try:
                 assert_that(
-                    await storage_table.get_record(0), has_entries(s='x'))
+                    await collect_async_iter(storage_table.get_records(
+                        tc.StorageRecordsSpec(
+                            'primary_key', [tc.Interval.only_containing(0)]))),
+                    contains_exactly(has_entries(s='x')))
             except Exception as e:
                 exceptions.append(e)
             assert not refresh_task.done()
@@ -1019,7 +1255,8 @@ class TestCachedTable:
         for e in exceptions:
             raise e
         assert_that(
-            await table.get_record(0), has_entries(s='y', source='storage'))
+            await table.get_first_record('primary_key', 0),
+            has_entries(s='y', source='storage'))
 
     async def test_refresh_invalid_doesnt_block_gets_for_valid_keys(
             self, make_tables, db_access):
@@ -1027,7 +1264,9 @@ class TestCachedTable:
         db_access.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', all_primary_keys=True)
         db_access.records = [{'pk': i} for i in range(3)]
-        await table.invalidate_record(3)
+        table.invalidate_records(
+            [MultiIndexes.IndexSpec('primary_key', 3)],
+            [MultiIndexes.IndexSpec('primary_key', 3)])
         storage_table._enable_merge_wait()
         exceptions = []
         task_queue = queue.Queue()
@@ -1036,7 +1275,11 @@ class TestCachedTable:
             refresh_task = task_queue.get()
             storage_table._merge_wait_start()
             try:
-                assert_that(await table.get_record(2), has_entries(pk=2))
+                assert_that(
+                    await collect_async_iter(storage_table.get_records(
+                        tc.StorageRecordsSpec(
+                            'primary_key', [tc.Interval.only_containing(2)]))),
+                    contains_exactly(has_entries(pk=2)))
             except Exception as e:
                 exceptions.append(e)
             assert not refresh_task.done()
@@ -1053,84 +1296,157 @@ class TestCachedTable:
 
 class TestInvalidRecordRepository:
     @pytest.fixture
-    def repo(self):
+    def indexes(self):
+        return MultiIndexes()
+
+    @pytest.fixture
+    def pk_interval(self, indexes):
+        def factory(min, max=None):
+            if max is None:
+                return tc.Interval.only_containing(
+                    indexes.score('primary_key', {'pk': min}))
+            return tc.Interval(
+                indexes.score('primary_key', {'pk': min}),
+                indexes.score('primary_key', {'pk': max}))
+        return factory
+
+    @pytest.fixture
+    def x_range_interval(self, indexes):
+        def factory(min, max):
+            return tc.Interval(
+                indexes.score('x_range', {'x': min}),
+                indexes.score('x_range', {'x': max}))
+        return factory
+
+    @pytest.fixture
+    def repo(self, indexes):
         import tablecache.cache
-        return tablecache.cache.InvalidRecordRepository(
-            MultiIndexes())
+        return tablecache.cache.InvalidRecordRepository(indexes)
 
-    @pytest.mark.parametrize(
-        'scores', [{}, {'primary_key': 3}, {'primary_key': 3, 'x_range': 110}])
-    def test_primary_key_invalid(self, repo, scores):
-        assert not repo.primary_key_is_invalid(2)
-        assert 2 not in repo.invalid_primary_keys
-        repo.flag_invalid(2, scores)
-        assert repo.primary_key_is_invalid(2)
-        assert 2 in repo.invalid_primary_keys
-        for x in scores.values():
-            assert not repo.primary_key_is_invalid(x)
-            assert x not in repo.invalid_primary_keys
-
-    def test_score_invalid(self, repo):
-        assert not repo.interval_contains_invalid_score(
+    def test_interval_invalid(
+            self, repo, indexes, pk_interval, x_range_interval):
+        assert not repo.interval_intersects_invalid(
             'primary_key', tc.Interval.everything())
-        assert not repo.interval_contains_invalid_score(
+        assert not repo.interval_intersects_invalid(
             'x_range', tc.Interval.everything())
-        repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
-        assert not repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(float('-inf'), 2))
-        assert not repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(float('-inf'), 110))
-        assert repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(2, 2.1))
-        assert repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(110, 110.1))
-        assert not repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(2.1, float('inf')))
-        assert not repo.interval_contains_invalid_score(
-            'x_range', tc.Interval(110.1, float('inf')))
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2),
+             'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2),
+             'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
+            'primary_key', 'primary_key')
+        assert not repo.interval_intersects_invalid(
+            'primary_key', pk_interval(float('-inf'), 2))
+        assert not repo.interval_intersects_invalid(
+            'x_range', x_range_interval(float('-inf'), 10))
+        assert not repo.interval_intersects_invalid(
+            'x_range', x_range_interval(20, 110))
+        assert not repo.interval_intersects_invalid(
+            'x_range', x_range_interval(120, float('inf')))
+        assert repo.interval_intersects_invalid('primary_key', pk_interval(2))
+        assert repo.interval_intersects_invalid(
+            'x_range', x_range_interval(0, 15))
+        assert repo.interval_intersects_invalid(
+            'x_range', x_range_interval(0, 30))
+        assert repo.interval_intersects_invalid(
+            'x_range', x_range_interval(15, 16))
+        assert repo.interval_intersects_invalid(
+            'x_range', x_range_interval(15, 25))
+        assert repo.interval_intersects_invalid(
+            'x_range', x_range_interval(115, 125))
+        assert not repo.interval_intersects_invalid(
+            'primary_key', pk_interval(2.1, float('inf')))
 
-    def test_score_invalid_raises_with_unknown_index_name(self, repo):
+    def test_interval_invalid_raises_if_index_for_refresh_not_given(
+            self, repo, indexes):
         with pytest.raises(KeyError):
-            repo.interval_contains_invalid_score('no_such_index', 2)
+            repo.flag_invalid(
+                {'primary_key': indexes.IndexSpec('primary_key', 2)},
+                {'primary_key': indexes.IndexSpec('primary_key', 2)},
+                'x_range', 'x_range')
 
-    def test_primary_key_score_invalid_implicitly(self, repo):
-        assert not repo.interval_contains_invalid_score(
+    def test_interval_invalid_on_dirty_index(
+            self, repo, indexes, x_range_interval):
+        assert not repo.interval_intersects_invalid(
+            'x_range', tc.Interval.everything())
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            'primary_key', 'primary_key')
+        assert repo.interval_intersects_invalid(
+            'x_range', x_range_interval(0, 5))
+
+    def test_specs_for_refresh(self, repo, indexes):
+        assert_that(list(repo.specs_for_refresh()), empty())
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            'primary_key', 'primary_key')
+        assert_that(
+            list(repo.specs_for_refresh()),
+            contains_inanyorder(
+                contains_exactly(
+                    has_properties(index_name='primary_key', primary_keys={2}),
+                    has_properties(index_name='primary_key', primary_keys={2})
+                )))
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 3),
+             'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
+            {'primary_key': indexes.IndexSpec('primary_key', 3),
+             'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
+            'primary_key', 'x_range')
+        assert_that(
+            list(repo.specs_for_refresh()),
+            contains_inanyorder(
+                contains_exactly(
+                    has_properties(index_name='primary_key', primary_keys={2}),
+                    has_properties(index_name='primary_key', primary_keys={2})
+                ), contains_exactly(
+                    has_properties(index_name='primary_key', primary_keys={3}),
+                    has_properties(index_name='x_range', min=110, max=120)
+                )))
+
+    def test_interval_not_invalid_after_clear(self, repo, indexes):
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2),
+             'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2),
+             'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
+            'primary_key', 'primary_key')
+        assert repo.interval_intersects_invalid(
             'primary_key', tc.Interval.everything())
-        repo.flag_invalid(1, {})
-        assert repo.interval_contains_invalid_score(
-            'primary_key', tc.Interval(2, 2.1))
-
-    def test_score_invalid_raises_on_dirty_index(self, repo):
-        assert not repo.interval_contains_invalid_score(
+        assert repo.interval_intersects_invalid(
             'x_range', tc.Interval.everything())
-        repo.flag_invalid(1, {})
-        with pytest.raises(tc.DirtyIndex):
-            repo.interval_contains_invalid_score('x_range', 110)
-
-    def test_primary_key_not_invalid_after_clear(self, repo):
-        repo.flag_invalid(1, {})
         repo.clear()
-        assert not repo.primary_key_is_invalid(1)
-        assert 1 not in repo.invalid_primary_keys
-
-    def test_score_not_invalid_after_clear(self, repo):
-        repo.flag_invalid(1, {'primary_key': 2, 'x_range': 110})
-        repo.clear()
-        assert not repo.interval_contains_invalid_score(
+        assert not repo.interval_intersects_invalid(
             'primary_key', tc.Interval.everything())
-        assert not repo.interval_contains_invalid_score(
+        assert not repo.interval_intersects_invalid(
             'x_range', tc.Interval.everything())
 
-    def test_index_not_dirty_after_clean(self, repo):
-        repo.flag_invalid(1, {})
+    def test_index_not_dirty_after_clean(self, repo, indexes):
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            'primary_key', 'primary_key')
+        assert repo.interval_intersects_invalid(
+            'x_range', tc.Interval.everything())
         repo.clear()
-        repo.interval_contains_invalid_score(
+        assert not repo.interval_intersects_invalid(
             'x_range', tc.Interval.everything())
 
-    def test_len_is_number_of_primary_keys(self, repo):
+    def test_len_is_number_of_specs_for_refresh(self, repo, indexes):
         assert len(repo) == 0
-        repo.flag_invalid(1, {})
-        repo.flag_invalid(2, {})
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            'primary_key', 'primary_key')
+        assert len(repo) == 1
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 3),
+             'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
+            {'primary_key': indexes.IndexSpec('primary_key', 3),
+             'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
+            'primary_key', 'x_range')
         assert len(repo) == 2
-        repo.flag_invalid(3, {})
-        assert len(repo) == 3
+        repo.clear()
+        assert len(repo) == 0

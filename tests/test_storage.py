@@ -37,6 +37,49 @@ class TestInterval:
     def test_empty_interval(self):
         assert 1 not in tc.Interval(1, 1)
 
+    def test_intersects_on_empty(self):
+        assert not tc.Interval(10, 10).intersects(tc.Interval(10, 10))
+
+    def test_intersects_on_disjoint(self):
+        assert not tc.Interval(0, 10).intersects(tc.Interval(20, 30))
+        assert not tc.Interval(20, 30).intersects(tc.Interval(0, 10))
+
+    def test_intersects_on_adjacent(self):
+        assert not tc.Interval(0, 10).intersects(tc.Interval(10, 20))
+        assert not tc.Interval(10, 20).intersects(tc.Interval(0, 10))
+
+    def test_intersects_on_overlap(self):
+        assert tc.Interval(10, 20).intersects(tc.Interval(5, 15))
+        assert tc.Interval(10, 20).intersects(tc.Interval(15, 25))
+        assert tc.Interval(5, 15).intersects(tc.Interval(10, 20))
+        assert tc.Interval(15, 25).intersects(tc.Interval(10, 20))
+
+    def test_intersects_on_contained(self):
+        assert tc.Interval(10, 20).intersects(tc.Interval(12, 13))
+        assert tc.Interval(12, 13).intersects(tc.Interval(10, 20))
+        assert tc.Interval(10, 20).intersects(tc.Interval(10, 20))
+
+    def test_covers_on_empty(self):
+        assert tc.Interval(10, 10).covers(tc.Interval(10, 10))
+        assert tc.Interval(20, 20).covers(tc.Interval(10, 10))
+
+    def test_covers_on_intersection(self):
+        assert not tc.Interval(0, 10).covers(tc.Interval(20, 30))
+        assert not tc.Interval(20, 30).covers(tc.Interval(0, 10))
+        assert not tc.Interval(0, 10).covers(tc.Interval(10, 20))
+        assert not tc.Interval(10, 20).covers(tc.Interval(0, 10))
+        assert not tc.Interval(10, 20).covers(tc.Interval(5, 15))
+        assert not tc.Interval(10, 20).covers(tc.Interval(15, 25))
+        assert not tc.Interval(5, 15).covers(tc.Interval(10, 20))
+        assert not tc.Interval(15, 25).covers(tc.Interval(10, 20))
+
+    def test_covers_on_self_contains_other(self):
+        assert tc.Interval(10, 20).covers(tc.Interval(12, 13))
+        assert tc.Interval(10, 20).covers(tc.Interval(10, 20))
+
+    def test_covers_on_other_contains_self(self):
+        assert not tc.Interval(12, 13).covers(tc.Interval(10, 20))
+
 
 class TestStorageRecordsSpec:
     @pytest.mark.parametrize(

@@ -41,27 +41,32 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     sortedcontainers library to enable fast access to records via their scores.
     Using native data structures has the advantage that each index can store
     direct references to all records, so there is no additional redirection
-    necessary when getting records via non-primary-key indexes.
+    necessary when getting records via indexes.
 
     Records inserted into the table are stored as-is, without any explicit
-    validation. As long as it's possible to calculate their scores using the
-    provided function, they are accepted. It is up to the user to ensure that
-    records are complete.
+    validation. As long as it's possible to calculate their scores and extract
+    a primary key using the record scorer, they are accepted. It is up to the
+    user to ensure that records are complete.
 
     Read operations return the exact same record instances that were inserted.
-    In case they are mutable, they must not be modified. Make a copy. More
-    specifically, if a record is modified in a way that changes its score for
-    any index, that index becomes inconsistent and the record may not be
-    returned in a read operation when it should be.
+    In case they are mutable, they must not be modified while they reside in
+    storage. Make a copy. More specifically, if a record is modified in a way
+    that changes its score for any index, that index becomes inconsistent and
+    the record may not be returned in a read operation when it should be.
 
-    Regular write operations (put_record(), delete_record{,s}()) are blocked
-    while scratch space is active (i.e. between the first call to
+    Regular write operations (put_record(), delete_records()) are blocked while
+    scratch space is active (i.e. between the first call to
     scratch_put_record() or scratch_discard_records() and the subsequent call
     to scratch_merge()). They will resume once the merge completes. The merge
-    is done in a background task, which shuffles around some data. While this
-    task runs, scratch operations are blocked. Read operations
-    (get_record{,s}()) are never blocked entirely, although get_records() may
-    need to wait a bit if a merge operation is in progress.
+    is done in a background task, which shuffles some data around. While this
+    task runs, scratch operations are blocked.
+
+    Read operations are generally prioritized over write operations.
+    get_records() is never blocked entirely, although it may need to wait
+    momentarily to take away a lock from an ongoing merge operation.
+    Asynchronous write operations that can take a while (the scratch merge task
+    in particular) regularly yield back to the event loop when it is safe to
+    allow read operations to jump in.
     """
 
     def __init__(
@@ -85,9 +90,17 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         self._reset_record_storage()
 
     def __repr__(self) -> str:
-        return f'Local table {self._table_name}'
+        num_records = len(self._records)
+        num_scratch_add = len(self._scratch_records)
+        num_scratch_delete = len(self._scratch_records_to_delete)
+        return (
+            f'Local table {self._table_name} with {num_records} records '
+            f'(scratch space: {num_scratch_add} to add, {num_scratch_delete} '
+            'to delete)')
 
     def _reset_record_storage(self):
+        self._records = {}
+        self._scratch_records = {}
         self._indexes = self._make_index_dict()
         self._scratch_indexes = self._make_index_dict()
         self._scratch_records_to_delete = {}
@@ -111,54 +124,30 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
-            self._put_record(record)
+            self._put_record_to_dicts(record, self._records, self._indexes)
 
-    def _put_record(self, record):
+    def _put_record_to_dicts(self, record, records, indexes):
+        primary_key = self._record_scorer.primary_key(record)
         try:
-            self._delete_record_by_primary_key(
-                self._record_scorer.primary_key(record))
+            existing_record = records.pop(primary_key)
+            self._discard_record_from_dicts(
+                existing_record, records, indexes, primary_key)
         except KeyError:
             pass
-        self._for_each_index(
-            record, lambda index_name, score:
-            self._indexes[index_name].add((score, record)))
-
-    def _for_each_index(self, record, function):
+        records[primary_key] = record
         for index_name in self._record_scorer.index_names:
             score = self._record_scorer.score(index_name, record)
-            function(index_name, score)
+            indexes[index_name].add((score, record))
+        return primary_key
 
-    @t.override
-    async def get_record(self, primary_key: PrimaryKey) -> tp.Record:
-        return self._get_record(primary_key)
-
-    def _get_record(self, primary_key):
-        if self._include_scratch_records:
-            if primary_key in self._scratch_records_to_delete:
-                raise KeyError
-            indexes_to_try = [self._scratch_indexes, self._indexes]
-        else:
-            indexes_to_try = [self._indexes]
-        records_spec = self._records_spec_for_only_primary_key(primary_key)
-        records = it.chain(
-            *[self._get_records_from_indexes(records_spec, indexes)
-              for indexes in indexes_to_try])
-        try:
-            return next(records)
-        except StopIteration:
-            raise KeyError
-
-    def _records_spec_for_only_primary_key(self, primary_key):
-        primary_key_score = self._record_scorer.primary_key_score(primary_key)
-        return storage.StorageRecordsSpec(
-            'primary_key',
-            [storage.Interval.only_containing(primary_key_score)],
-            recheck_predicate=self._record_primary_key_equals(primary_key))
-
-    def _record_primary_key_equals(self, primary_key):
-        def checker(record):
-            return self._record_scorer.primary_key(record) == primary_key
-        return checker
+    def _discard_record_from_dicts(
+            self, record, records, indexes, primary_key=None):
+        if primary_key is None:
+            primary_key = self._record_scorer.primary_key(record)
+        records.pop(primary_key, None)
+        for index_name in self._record_scorer.index_names:
+            score = self._record_scorer.score(index_name, record)
+            indexes[index_name].discard((score, record))
 
     @t.override
     async def get_records(
@@ -182,6 +171,13 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
             if record_is_ok(record):
                 yield record
 
+    def _get_records_from_indexes(self, records_spec, indexes):
+        for interval in records_spec.score_intervals:
+            for _, record in indexes[records_spec.index_name].irange_key(
+                    interval.ge, interval.lt, inclusive=(True, False)):
+                if records_spec.recheck_predicate(record):
+                    yield record
+
     def _record_is_not_deleted_and_not_previously_returned(self):
         already_returned = set()
 
@@ -192,34 +188,6 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
             already_returned.add(primary_key)
             return is_ok
         return checker
-
-    def _get_records_from_indexes(self, records_spec, indexes):
-        for interval in records_spec.score_intervals:
-            for _, record in indexes[records_spec.index_name].irange_key(
-                    interval.ge, interval.lt, inclusive=(True, False)):
-                if records_spec.recheck_predicate(record):
-                    yield record
-
-    @t.override
-    async def delete_record(self, primary_key: PrimaryKey) -> None:
-        """
-        Delete a record by primary key.
-
-        This operation will block while scratch space is active and resume
-        after the scratch merge finishes.
-        """
-        async with self._scratch_condition:
-            await self._scratch_condition.wait_for(self._scratch_is_clear)
-            self._delete_record_by_primary_key(primary_key)
-
-    def _delete_record_by_primary_key(self, primary_key):
-        record = self._get_record(primary_key)
-        self._delete_record_from_indexes(record, self._indexes)
-
-    def _delete_record_from_indexes(self, record, indexes):
-        self._for_each_index(
-            record, lambda index_name, score:
-            indexes[index_name].discard((score, record)))
 
     @t.override
     async def delete_records(
@@ -244,7 +212,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
             records_to_delete = [
                 r async for r in self.get_records(records_spec)]
             for record in records_to_delete:
-                self._delete_record_from_indexes(record, self._indexes)
+                self._discard_record_from_dicts(
+                    record, self._records, self._indexes)
                 await asyncio.sleep(0)  # Yield to event loop to remain lively.
             return len(records_to_delete)
 
@@ -270,14 +239,9 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_is_not_merging)
-            await self._scratch_put_record_locked(record)
-
-    async def _scratch_put_record_locked(self, record):
-        self._scratch_records_to_delete.pop(
-            self._record_scorer.primary_key(record), None)
-        self._for_each_index(
-            record, lambda index_name, score:
-            self._scratch_indexes[index_name].add((score, record)))
+            primary_key = self._put_record_to_dicts(
+                record, self._scratch_records, self._scratch_indexes)
+            self._scratch_records_to_delete.pop(primary_key, None)
 
     @t.override
     async def scratch_discard_records(
@@ -327,14 +291,17 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     async def _scratch_merge(self):
         while self._scratch_records_to_delete:
             async with self._scratch_merge_read_lock.writer_lock:
-                _, record = self._scratch_records_to_delete.popitem()
-                self._delete_record_from_indexes(record, self._indexes)
+                primary_key, record = self._scratch_records_to_delete.popitem()
+                self._discard_record_from_dicts(
+                    record, self._records, self._indexes, primary_key)
             await asyncio.sleep(0)  # Yield to event loop to remain lively.
-        while self._scratch_indexes['primary_key']:
+        while self._scratch_records:
             async with self._scratch_merge_read_lock.writer_lock:
-                _, record = self._scratch_indexes['primary_key'].pop()
-                self._put_record(record)
-                self._delete_record_from_indexes(record, self._scratch_indexes)
+                primary_key, record = self._scratch_records.popitem()
+                self._put_record_to_dicts(record, self._records, self._indexes)
+                self._discard_record_from_dicts(
+                    record, self._scratch_records, self._scratch_indexes,
+                    primary_key)
             await asyncio.sleep(0)  # Yield to event loop to remain lively.
         assert not any(self._scratch_indexes.values())
         assert not self._scratch_records_to_delete
