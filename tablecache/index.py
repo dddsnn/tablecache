@@ -16,7 +16,6 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import abc
-import dataclasses as dc
 import math
 import numbers
 import operator as op
@@ -33,7 +32,6 @@ class UnsupportedIndexOperation(Exception):
     """
 
 
-@dc.dataclass(frozen=True)
 class Adjustment:
     """
     A specification of an adjustment to be made to the cache.
@@ -46,8 +44,15 @@ class Adjustment:
     either to None signals that no records should be expired or loaded,
     respectively.
     """
-    expire_spec: t.Optional[storage.StorageRecordsSpec]
-    new_spec: t.Optional[db.DbRecordsSpec]
+
+    def __init__(
+        self, expire_spec: t.Optional[storage.StorageRecordsSpec],
+            new_spec: t.Optional[db.DbRecordsSpec]) -> None:
+        self.expire_spec = expire_spec
+        self.new_spec = new_spec
+
+    def observe_loaded(self, record):
+        pass
 
 
 class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
@@ -203,7 +208,7 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
 
         Returns whether all of the records specified via the index spec are in
         storage. This determination is based on previous calls to
-        commit_adjustment() and observe().
+        commit_adjustment().
 
         May also return False if the records may be covered, but there isn't
         enough information to be certain. This could happen when the Indexes
@@ -224,13 +229,7 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
         """
         raise NotImplementedError
 
-    def observe(self, record: tp.Record) -> None:
-        """
-        Observe a record being inserted into storage.
 
-        This can be used by the implementation to maintain information on which
-        records exist and update statistics.
-        """
 
 
 class AllIndexes(Indexes[tp.PrimaryKey]):
@@ -353,10 +352,14 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
                 'IndexSpec specifying records with primary keys '
                 f'{self.primary_keys}')
 
-    @dc.dataclass(frozen=True)
     class Adjustment(Adjustment):
-        primary_keys: set[tp.PrimaryKey]
-        cover_all: bool
+        def __init__(
+            self, expire_spec: t.Optional[storage.StorageRecordsSpec],
+            new_spec: t.Optional[db.DbRecordsSpec],
+                primary_keys: set[tp.PrimaryKey], cover_all: bool) -> None:
+            super().__init__(expire_spec, new_spec)
+            self.primary_keys = primary_keys
+            self.cover_all = cover_all
 
     def __init__(
             self, primary_key_name: str, query_all_string: str,
@@ -483,8 +486,13 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
                 'IndexSpec specifying records with primary keys in '
                 f'{self.interval}')
 
-    @dc.dataclass(frozen=True)
     class Adjustment(Adjustment):
+        def __init__(
+                self, expire_spec: t.Optional[storage.StorageRecordsSpec],
+                new_spec: t.Optional[db.DbRecordsSpec],
+                interval: storage.Interval) -> None:
+            super().__init__(expire_spec, new_spec)
+            self.interval = interval
         interval: storage.Interval
 
     def __init__(self, primary_key_name: str, query_range_string: str) -> None:

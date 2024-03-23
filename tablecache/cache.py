@@ -155,25 +155,24 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         else:
             put = self._storage_table.put_record
             delete = self._storage_table.delete_records
-        num_deleted, records = await self._apply_adjustment(
+        num_deleted, num_loaded = await self._apply_adjustment(
             adjustment, put, delete)
         if use_scratch:
             self._storage_table.scratch_merge()
         self._indexes.commit_adjustment(adjustment)
-        for record in records:
-            self._indexes.observe(record)
-        return num_deleted, len(records)
+        return num_deleted, num_loaded
 
     async def _apply_adjustment(self, adjustment, put, delete):
-        num_deleted, new_records = 0, []
+        num_deleted = num_loaded = 0
         if adjustment.expire_spec:
             num_deleted = await delete(adjustment.expire_spec)
         if adjustment.new_spec:
             async for record in self._db_access.get_records(
                     adjustment.new_spec):
                 await put(record)
-                new_records.append(record)
-        return num_deleted, new_records
+                adjustment.observe_loaded(record)
+                num_loaded += 1
+        return num_deleted, num_loaded
 
     async def adjust(self, *args: t.Any, **kwargs: t.Any) -> None:
         """

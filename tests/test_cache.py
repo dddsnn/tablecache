@@ -17,13 +17,11 @@
 
 import asyncio
 import collections.abc as ca
-import dataclasses as dc
 import itertools as it
 import numbers
 import queue
 import unittest.mock as um
 import threading
-import typing as t
 
 from hamcrest import *
 import pytest
@@ -49,23 +47,19 @@ class SpyIndexes(tc.PrimaryKeyIndexes):
         super().__init__('pk', 'query_all_pks', 'query_some_pks')
         self.prepare_adjustment_mock = um.Mock(return_values=[])
         self.commit_adjustment_mock = um.Mock()
-        self.observe_mock = um.Mock()
+        self.adjustments = []
 
     def prepare_adjustment(self, *args, **kwargs):
-        result = super().prepare_adjustment(*args, **kwargs)
         self.prepare_adjustment_mock(*args, **kwargs)
-        self.prepare_adjustment_mock.return_values.append(result)
-        self.prepare_adjustment_mock.return_value = result
-        return result
+        real_adjustment = super().prepare_adjustment(*args, **kwargs)
+        self.adjustments.append(
+            um.Mock(wraps=real_adjustment, **real_adjustment.__dict__))
+        self.prepare_adjustment_mock.return_value = self.adjustments[-1]
+        return self.adjustments[-1]
 
     def commit_adjustment(self, *args, **kwargs):
         result = super().commit_adjustment(*args, **kwargs)
         self.commit_adjustment_mock(*args, **kwargs)
-        return result
-
-    def observe(self, *args, **kwargs):
-        result = super().observe(*args, **kwargs)
-        self.observe_mock(*args, **kwargs)
         return result
 
 
@@ -87,11 +81,18 @@ class MultiIndexes(tc.Indexes[int]):
             self.min = min
             self.max = max
 
-    @dc.dataclass(frozen=True)
     class Adjustment(tc.Adjustment):
-        all_primary_keys: bool
-        primary_keys: set[numbers.Real]
-        range: t.Optional[tuple[numbers.Real, numbers.Real]]
+        def __init__(
+                self, expire_spec, new_spec, all_primary_keys, primary_keys,
+                range):
+            super().__init__(expire_spec, new_spec)
+            self.all_primary_keys = all_primary_keys
+            self.primary_keys = primary_keys
+            self.range = range
+            self.expired_records, self.loaded_records = [], []
+
+        def observe_loaded(self, record):
+            self.loaded_records.append(record)
 
     def __init__(self):
         self._contains_all = False
@@ -161,6 +162,8 @@ class MultiIndexes(tc.Indexes[int]):
             range_)
 
     def commit_adjustment(self, adjustment):
+        self._primary_keys.difference_update(
+            self.primary_key(r) for r in adjustment.expired_records)
         if adjustment.primary_keys is not None:
             assert adjustment.range is None
             self._contains_all = adjustment.all_primary_keys
@@ -169,6 +172,8 @@ class MultiIndexes(tc.Indexes[int]):
             self._contains_all = False
         self._primary_keys = adjustment.primary_keys or set()
         self._range = adjustment.range
+        self._primary_keys.update(
+            self.primary_key(r) for r in adjustment.loaded_records)
 
     def covers(self, spec):
         if self._contains_all:
@@ -186,9 +191,6 @@ class MultiIndexes(tc.Indexes[int]):
             ge, lt = spec.min, spec.max
             return loaded_ge <= ge <= lt <= loaded_lt
         raise NotImplementedError
-
-    def observe(self, record):
-        self._primary_keys.add(record['pk'])
 
 
 class MockDbAccess(tc.DbAccess):
@@ -384,12 +386,14 @@ class TestCachedTable:
             self, table, db_access, indexes):
         db_access.records = [{'pk': i} for i in range(6)]
         await table.load('primary_key', 2, 4)
-        expected_observations = await collect_async_iter(
+        expected_loaded = await collect_async_iter(
             db_access.get_records(
                 tc.QueryArgsDbRecordsSpec('query_some_pks', ((2, 4),))))
         assert_that(
-            indexes.observe_mock.call_args_list,
-            contains_inanyorder(*[um.call(r) for r in expected_observations]))
+            indexes.adjustments, contains_exactly(has_properties(
+                observe_loaded=has_properties(
+                    call_args_list=contains_inanyorder(
+                        *[um.call(r) for r in expected_loaded])))))
 
     async def test_load_clears_storage_first(self, make_tables, db_access):
         table, storage_table = make_tables()
@@ -426,21 +430,8 @@ class TestCachedTable:
         await table.load(index_spec)
         assert mock.mock_calls == [
             um.call.prepare(index_spec),
+            *[um.call.prepare().observe_loaded(um.ANY) for _ in range(2)],
             um.call.commit(indexes.prepare_adjustment_mock.return_value)]
-
-    async def test_load_calls_observes_after_commit_adjustment(
-            self, table, db_access, indexes):
-        mock = um.Mock()
-        mock.prepare = indexes.prepare_adjustment_mock
-        mock.commit = indexes.commit_adjustment_mock
-        mock.observe = indexes.observe_mock
-        db_access.records = [{'pk': i} for i in range(6)]
-        index_spec = indexes.IndexSpec('primary_key', 2, 4)
-        await table.load(index_spec)
-        assert mock.mock_calls == [
-            um.call.prepare(index_spec),
-            um.call.commit(indexes.prepare_adjustment_mock.return_value),
-            um.call.observe(um.ANY), um.call.observe(um.ANY)]
 
     async def test_load_raises_if_index_doesnt_support_adjusting(
             self, make_tables, db_access):
@@ -653,7 +644,7 @@ class TestCachedTable:
             def prepare_adjustment(self, spec):
                 adjustment = super().prepare_adjustment(spec)
                 if spec.load_nothing:
-                    adjustment = dc.replace(adjustment, new_spec=None)
+                    adjustment.new_spec = None
                 return adjustment
         table, _ = make_tables(indexes=Indexes())
         db_access.records = [{'pk': i} for i in range(4)]
@@ -687,37 +678,21 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
-    async def test_adjust_observes_new_records(
+    async def test_adjust_observes_newly_loaded_records(
             self, table, db_access, indexes):
         db_access.records = [{'pk': i} for i in range(4)]
         await table.load('primary_key', *range(2))
         await table.adjust('primary_key', *range(4))
-        expected_observations = await collect_async_iter(
+        expected_loaded = await collect_async_iter(
             db_access.get_records(
-                tc.QueryArgsDbRecordsSpec('query_some_pks', ((2, 3),))))
+                tc.QueryArgsDbRecordsSpec('query_some_pks', ((0, 1, 2, 3),))))
         assert_that(
-            indexes.observe_mock.call_args_list,
-            contains_inanyorder(
-                *[anything() for _ in range(4)],
-                *[um.call(r) for r in expected_observations]))
-
-    async def test_adjust_observes_new_records_after_commit_adjustment(
-            self, table, db_access, indexes):
-        mock = um.Mock()
-        mock.prepare = indexes.prepare_adjustment_mock
-        mock.commit = indexes.commit_adjustment_mock
-        mock.observe = indexes.observe_mock
-        db_access.records = [{'pk': i} for i in range(4)]
-        await table.load('primary_key', *range(2))
-        await table.adjust('primary_key', *range(4))
-        assert mock.mock_calls == [
-            um.call.prepare(indexes.IndexSpec('primary_key', *range(2))),
-            um.call.commit(indexes.prepare_adjustment_mock.return_values[0]),
-            um.call.observe(um.ANY), um.call.observe(um.ANY),
-            um.call.prepare(indexes.IndexSpec('primary_key', *range(4))),
-            um.call.commit(indexes.prepare_adjustment_mock.return_values[1]),
-            um.call.observe(um.ANY), um.call.observe(um.ANY),
-            um.call.observe(um.ANY), um.call.observe(um.ANY)]
+            indexes.adjustments, contains_exactly(
+                anything(),
+                has_properties(
+                    observe_loaded=has_properties(
+                        call_args_list=contains_inanyorder(
+                            *[um.call(r) for r in expected_loaded])))))
 
     async def test_adjust_by_other_index(self, make_tables, db_access):
         table, _ = make_tables(MultiIndexes())
