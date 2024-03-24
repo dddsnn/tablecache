@@ -107,8 +107,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
 
         Like adjust(), calls the cache's indexes' prepare_adjustment() to
         determine which records need to be loaded, and then commit_adjustment()
-        when they have. Additionally, for each loaded record the indexes'
-        observe() is called after the commit.
+        when they have. Additionally, for each loaded record the adjustment's
+        observe_loaded() is called.
 
         Raises a ValueError if the specified index doesn't support adjusting.
         """
@@ -165,7 +165,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     async def _apply_adjustment(self, adjustment, put, delete):
         num_deleted = num_loaded = 0
         if adjustment.expire_spec:
-            async for _ in delete(adjustment.expire_spec):
+            async for record in delete(adjustment.expire_spec):
+                adjustment.observe_expired(record)
                 num_deleted += 1
         if adjustment.new_spec:
             async for record in self._db_access.get_records(
@@ -190,10 +191,11 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         after they reflect the state after.
 
         Calls the cache's indexes' prepare_adjustment() for specs on the
-        records that should be deleted and new ones to load. These are then
-        staged in the storage's scratch space. Finally, the scratch space is
-        merged, the indexes' commit_adjustment() is called, and for each added
-        record, the indexes' observe() is called.
+        records that should be expired and new ones to load. These are then
+        staged in the storage's scratch space. For each record that is expired
+        or loaded, the adjustment's observe_expired() or observe_loaded() is
+        called. Finally, the scratch space is merged, the indexes'
+        commit_adjustment() is called
 
         Note that, since observe() is called at the very end, a full list of
         all added records needs to be stored temporarily. This may consume a

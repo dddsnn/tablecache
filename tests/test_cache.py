@@ -388,6 +388,7 @@ class TestCachedTable:
                 tc.QueryArgsDbRecordsSpec('query_some_pks', ((2, 4),))))
         assert_that(
             indexes.adjustments, contains_exactly(has_properties(
+                observe_expired=has_properties(call_args_list=[]),
                 observe_loaded=has_properties(
                     call_args_list=contains_inanyorder(
                         *[um.call(r) for r in expected_loaded])))))
@@ -675,18 +676,23 @@ class TestCachedTable:
             contains_inanyorder(
                 *[has_entries(pk=i, source='storage') for i in range(4)]))
 
-    async def test_adjust_observes_newly_loaded_records(
+    async def test_adjust_observes_expired_and_newly_loaded_records(
             self, table, db_access, indexes):
         db_access.records = [{'pk': i} for i in range(4)]
-        await table.load('primary_key', *range(2))
-        await table.adjust('primary_key', *range(4))
+        await table.load('primary_key', *range(3))
+        expected_expired = await collect_async_iter(
+            table.get_records('primary_key', 0))
         expected_loaded = await collect_async_iter(
             db_access.get_records(
-                tc.QueryArgsDbRecordsSpec('query_some_pks', ((0, 1, 2, 3),))))
+                tc.QueryArgsDbRecordsSpec('query_some_pks', ((3,),))))
+        await table.adjust('primary_key', *range(1, 4))
         assert_that(
             indexes.adjustments, contains_exactly(
                 anything(),
                 has_properties(
+                    observe_expired=has_properties(
+                        call_args_list=contains_inanyorder(
+                            *[um.call(r) for r in expected_expired])),
                     observe_loaded=has_properties(
                         call_args_list=contains_inanyorder(
                             *[um.call(r) for r in expected_loaded])))))

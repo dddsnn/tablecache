@@ -43,6 +43,11 @@ class Adjustment:
     storage. Likewise, ones specified via new_spec may already exist. Setting
     either to None signals that no records should be expired or loaded,
     respectively.
+
+    The observe_expired() and observe_loaded() methods are callbacks that
+    should be called with expired and loaded records as the adjustment is
+    applied. This may be used to maintain information about which records exist
+    for the index.
     """
 
     def __init__(
@@ -51,7 +56,26 @@ class Adjustment:
         self.expire_spec = expire_spec
         self.new_spec = new_spec
 
+    def observe_expired(self, record):
+        """
+        Observe a record being expired.
+
+        Used to store any information needed to maintain the index.
+
+        It's valid to observe the same record being loaded again.
+        """
+        pass
+
     def observe_loaded(self, record):
+        """
+        Observe a record being loaded.
+
+        Used to store any information needed to maintain the index.
+
+        It's valid to observe a record being loaded that was previously
+        observed being expired, as well as observe records that have already
+        been loaded.
+        """
         pass
 
 
@@ -179,9 +203,11 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
 
         This method only specifies what would need to change in order to adjust
         the indexes, but does not modify the internal state of the Indexes.
-
-        May return a subclass of Adjustment that contains additional
-        information needed in commit_adjustment().
+        However, a subclass of Adjustment may be return that contains
+        additional information needed in commit_adjustment(), as well as
+        implementing observe_expired() and observe_loaded(). These will be
+        called with all the records that were expired and loaded, and can store
+        information needed to maintain the index.
 
         Raises an UnsupportedIndexOperation if adjusting by the given index is
         not supported.
@@ -228,8 +254,6 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
         checking coverage.
         """
         raise NotImplementedError
-
-
 
 
 class AllIndexes(Indexes[tp.PrimaryKey]):
