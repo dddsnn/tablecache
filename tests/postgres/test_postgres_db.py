@@ -122,8 +122,15 @@ class TestPostgresAccess:
         return tc.QueryArgsDbRecordsSpec(query_string, tuple(user_ids))
 
     @pytest.fixture
-    async def access(self, wait_for_postgres, postgres_dsn):
-        async with tcp.PostgresAccess(dsn=postgres_dsn) as access:
+    async def make_access(self, wait_for_postgres, postgres_dsn):
+        def factory(record_parser=None):
+            return tcp.PostgresAccess(
+                record_parser=record_parser, dsn=postgres_dsn)
+        return factory
+
+    @pytest.fixture
+    async def access(self, make_access):
+        async with make_access() as access:
             yield access
 
     async def test_get_records_on_empty(self, access):
@@ -166,3 +173,19 @@ class TestPostgresAccess:
                 access.get_records(self.query_spec(2, 3))),
             contains_inanyorder(
                 has_entries(user_id=2), has_entries(user_id=3)))
+
+    async def test_record_parser(self, make_access, insert_user):
+        def parse(record):
+            record_dict = dict(record)
+            record_dict['user_name'] += '_foo'
+            record_dict['completely_new_attribute'] = 2
+            return record_dict
+        async with make_access(parse) as access:
+            await insert_user(1, 'u1', 1, 11, 'c1')
+            assert_that(
+                await collect_async_iter(
+                    access.get_records(self.query_spec(1))),
+                contains_inanyorder(
+                    has_entries(
+                        user_id=1, user_name='u1_foo',
+                        completely_new_attribute=2)))

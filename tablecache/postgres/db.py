@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import collections.abc as ca
 import typing as t
 
 import asyncpg
@@ -34,13 +35,19 @@ class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
     opened/closed on __aenter__() and __aexit__().
     """
 
-    def __init__(self, **pool_kwargs: t.Any) -> None:
+    def __init__(
+            self, record_parser: ca.Callable[[tp.Record], t.Any] = None,
+            **pool_kwargs: t.Any) -> None:
         """
+        :param record_parser: An optional function that is applied to each
+            record before it is returned. The default is to return the record
+            as-is.
         :param pool_kwargs: Arguments that will be passed to
             asyncpg.create_pool() to create the connection pool. The pool is
             only created, not connected. Arguments min_size=0 and max_size=1
             are added unless otherwise specified.
         """
+        self._record_parser = record_parser or self._identity_parser
         pool_kwargs.setdefault('min_size', 0)
         pool_kwargs.setdefault('max_size', 1)
         self._pool = asyncpg.create_pool(**pool_kwargs)
@@ -53,10 +60,14 @@ class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
         await self._pool.__aexit__()
         return False
 
+    @staticmethod
+    def _identity_parser(record):
+        return record
+
     @t.override
     async def get_records(
             self, records_spec: db.QueryArgsDbRecordsSpec) -> tp.AsyncRecords:
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(
                     records_spec.query, *records_spec.args):
-                yield record
+                yield self._record_parser(record)
