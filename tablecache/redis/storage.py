@@ -311,20 +311,19 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_records(
-            self, records_spec: storage.StorageRecordsSpec) -> int:
+            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_space.is_clear)
-            return await self._delete_records_locked(records_spec)
+            async for record in self._delete_records_locked(records_spec):
+                yield record
 
     async def _delete_records_locked(self, records_spec):
-        num_deleted = 0
         async for _, decoded_record in (
                 self._get_records_locked(records_spec)):
             primary_key = self._record_scorer.primary_key(decoded_record)
             await self._delete_record(primary_key, decoded_record)
-            num_deleted += 1
-        return num_deleted
+            yield decoded_record
 
     @t.override
     async def scratch_put_record(self, record: tp.Record) -> None:
@@ -355,9 +354,14 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def scratch_discard_records(
-            self, records_spec: storage.StorageRecordsSpec) -> int:
+            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Mark a set of records to be deleted in scratch space.
+
+        Asynchronously iterates over the records that are marked for discarding
+        as they exist in storage. These records will continue to be available
+        until scratch space is merged. Must be fully consumed to finish the
+        operation.
 
         Regular write operations are locked until scratch space is merged.
 
@@ -367,17 +371,16 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_space.is_not_merging)
-            return await self._scratch_discard_records_locked(records_spec)
+            async for record in self._scratch_discard_records_locked(
+                    records_spec):
+                yield record
 
     async def _scratch_discard_records_locked(self, records_spec):
-        records = self._get_records_locked(
-            records_spec, filter_scratch_records=False)
-        primary_keys = [
-            self._record_scorer.primary_key(decoded_record)
-            async for _, decoded_record in records]
-        for primary_key in primary_keys:
+        async for _, decoded_record in self._get_records_locked(
+                records_spec, filter_scratch_records=False):
+            primary_key = self._record_scorer.primary_key(decoded_record)
             self._scratch_space.mark_primary_key_for_deletion(primary_key)
-        return len(primary_keys)
+            yield decoded_record
 
     @t.override
     def scratch_merge(self) -> None:

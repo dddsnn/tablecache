@@ -165,7 +165,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     async def _apply_adjustment(self, adjustment, put, delete):
         num_deleted = num_loaded = 0
         if adjustment.expire_spec:
-            num_deleted = await delete(adjustment.expire_spec)
+            async for _ in delete(adjustment.expire_spec):
+                num_deleted += 1
         if adjustment.new_spec:
             async for record in self._db_access.get_records(
                     adjustment.new_spec):
@@ -389,8 +390,9 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             'specs.')
         for old_spec, new_spec in (
                 self._invalid_record_repo.specs_for_refresh()):
-            await self._storage_table.scratch_discard_records(
-                self._indexes.storage_records_spec(old_spec))
+            async for _ in self._storage_table.scratch_discard_records(
+                    self._indexes.storage_records_spec(old_spec)):
+                pass
             db_records_spec = self._indexes.db_records_spec(new_spec)
             async for record in self._db_access.get_records(db_records_spec):
                 await self._storage_table.scratch_put_record(record)

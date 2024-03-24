@@ -170,14 +170,16 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
 
     @abc.abstractmethod
-    async def delete_records(self, records_spec: StorageRecordsSpec) -> int:
+    async def delete_records(
+            self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Delete multiple records.
 
         Deletes exactly those records that would have been returned by
         get_records() when called with the same argument.
 
-        Returns the number of records deleted.
+        Asynchronously iterates over the records that are deleted as they exist
+        in storage. Must be fully consumed to finish deletion.
         """
         raise NotImplementedError
 
@@ -193,7 +195,7 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def scratch_discard_records(
-            self, records_spec: StorageRecordsSpec) -> int:
+            self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Mark a set of records to be deleted in scratch space.
 
@@ -202,7 +204,10 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
         This can be undone by adding the record again via scratch_put_record().
 
-        Returns the number of records marked for deletion.
+        Asynchronously iterates over the records that are marked for discarding
+        as they exist in storage. These records will continue to be available
+        until scratch space is merged. Must be fully consumed to finish the
+        operation.
         """
         raise NotImplementedError
 

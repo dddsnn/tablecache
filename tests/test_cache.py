@@ -277,10 +277,9 @@ class MockStorageTable(tc.StorageTable):
                     del index[score]
 
     async def delete_records(self, records_spec):
-        delete = [r async for r in self.get_records(records_spec)]
-        for record in delete:
+        async for record in self.get_records(records_spec):
             await self.delete_record(self._record_scorer.primary_key(record))
-        return len(delete)
+            yield record
 
     async def scratch_put_record(self, record):
         self._num_scratch_ops += 1
@@ -290,13 +289,11 @@ class MockStorageTable(tc.StorageTable):
 
     async def scratch_discard_records(self, records_spec):
         self._num_scratch_ops += 1
-        num_discarded = 0
         async for record in self.get_records(records_spec):
             primary_key = self._record_scorer.primary_key(record)
             self._scratch_records.pop(primary_key, None)
             self._scratch_pks_delete.add(primary_key)
-            num_discarded += 1
-        return num_discarded
+            yield record
 
     def scratch_merge(self):
         if self._wait_merge:

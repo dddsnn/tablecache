@@ -191,14 +191,15 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
 
     @t.override
     async def delete_records(
-            self, records_spec: storage.StorageRecordsSpec) -> int:
+            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Delete multiple records.
 
+        Asynchronously iterates over the records that are deleted as they exist
+        in storage. Must be fully consumed to finish deletion.
+
         This operation will block while scratch space is active and resume
         after the scratch merge finishes.
-
-        Returns the number of records deleted.
 
         Internally, first finds all records matching the records spec, then
         deletes them. If another task adds a record after that first step, this
@@ -214,8 +215,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
             for record in records_to_delete:
                 self._discard_record_from_dicts(
                     record, self._records, self._indexes)
+                yield record
                 await asyncio.sleep(0)  # Yield to event loop to remain lively.
-            return len(records_to_delete)
 
     @property
     def _include_scratch_records(self):
@@ -245,22 +246,26 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
 
     @t.override
     async def scratch_discard_records(
-            self, records_spec: storage.StorageRecordsSpec) -> int:
+            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
         """
         Mark a set of records to be deleted in scratch space.
 
-        This operation will block while a merge background task is running.
+        Asynchronously iterates over the records that are marked for discarding
+        as they exist in storage. This may include records that have already
+        been marked for discarding. These records will continue to be available
+        until scratch space is merged. Must be fully consumed to finish the
+        operation.
 
-        Returns the number of records marked for deletion. This may include
-        records that have already been thusly marked before.
+        This operation will block while a merge background task is running.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_is_not_merging)
-            return await self._scratch_discard_records_locked(records_spec)
+            async for record in self._scratch_discard_records_locked(
+                    records_spec):
+                yield record
 
     async def _scratch_discard_records_locked(self, records_spec):
-        num_discarded = 0
         records_to_discard = [
             r for r in self._get_records_from_indexes(
                 records_spec, self._scratch_indexes)]
@@ -272,8 +277,7 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         async for record in self.get_records(records_spec):
             primary_key = self._record_scorer.primary_key(record)
             self._scratch_records_to_delete[primary_key] = record
-            num_discarded += 1
-        return num_discarded
+            yield record
 
     @t.override
     def scratch_merge(self) -> None:
