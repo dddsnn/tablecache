@@ -232,6 +232,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             return await anext(records)
         except StopAsyncIteration:
             raise KeyError
+        finally:
+            await records.aclose()
 
     async def get_records(
             self, *args: t.Any, **kwargs: t.Any) -> tp.AsyncRecords:
@@ -274,8 +276,11 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             db_records_spec = self._indexes.db_records_spec(
                 index_spec)
             records = self._db_access.get_records(db_records_spec)
-        async for record in records:
-            yield record
+        try:
+            async for record in records:
+                yield record
+        finally:
+            await records.aclose()
 
     async def _check_and_get_records_from_storage(self, index_spec):
         records_spec = self._indexes.storage_records_spec(index_spec)
