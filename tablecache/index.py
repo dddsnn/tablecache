@@ -321,8 +321,6 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
       key, which makes no use of fast access to storage an is likely slow.
     - When loading select keys, all of them are stored in a set, which can get
       big.
-    - When adjusting to a different, disjoint set of primary keys, everything
-      is expired and loaded fresh, instead of only loading the difference.
     """
     class IndexSpec(Indexes[tp.PrimaryKey].IndexSpec):
         def __init__(
@@ -427,11 +425,21 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
     def prepare_adjustment(self, spec: IndexSpec) -> Adjustment:
         if spec.all_primary_keys:
             expire_spec = None
+        elif not self._covers_all:
+            expired_primary_keys = self._primary_keys - set(spec.primary_keys)
+            expire_spec = storage.StorageRecordsSpec(
+                'primary_key',
+                [storage.Interval.only_containing(hash(primary_key))
+                 for primary_key in expired_primary_keys])
         else:
             expire_spec = storage.StorageRecordsSpec(
                 'primary_key', [storage.Interval.everything()])
         if self._covers_all and spec.all_primary_keys:
             new_spec = None
+        elif not spec.all_primary_keys and not self._covers_all:
+            new_primary_keys = set(spec.primary_keys) - self._primary_keys
+            new_spec = self.db_records_spec(
+                self.IndexSpec('primary_key', *new_primary_keys))
         else:
             new_spec = self.db_records_spec(spec)
         return self.Adjustment(

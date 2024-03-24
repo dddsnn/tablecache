@@ -103,7 +103,9 @@ class TestPrimaryKeyIndexes:
     def test_db_records_spec_with_some(self, indexes, pks):
         assert_that(
             indexes.db_records_spec(indexes.IndexSpec('primary_key', *pks)),
-            has_properties(query='query_some', args=(tuple(pks),)))
+            has_properties(
+                query='query_some',
+                args=contains_exactly(contains_inanyorder(*pks))))
 
     def test_db_records_spec_with_all(self, indexes):
         assert_that(
@@ -132,7 +134,8 @@ class TestPrimaryKeyIndexes:
                 expire_spec=has_properties(
                     score_intervals=expected_expire_intervals),
                 new_spec=has_properties(
-                    query='query_some', args=(tuple(pks),))))
+                    query='query_some',
+                    args=contains_exactly(contains_inanyorder(*pks)))))
 
     @pytest.mark.parametrize('pks', [[], [1, 2]])
     def test_prepare_some_to_all(self, indexes, pks):
@@ -161,7 +164,24 @@ class TestPrimaryKeyIndexes:
                 expire_spec=has_properties(
                     score_intervals=expected_expire_intervals),
                 new_spec=has_properties(
-                    query='query_some', args=(tuple(pks2),))))
+                    query='query_some',
+                    args=contains_exactly(contains_inanyorder(*pks2)))))
+
+    def test_prepare_some_to_some_retains_overlap(self, indexes):
+        adj = indexes.prepare_adjustment(
+            indexes.IndexSpec('primary_key', 0, '1', 2, '3'))
+        indexes.commit_adjustment(adj)
+        adj = indexes.prepare_adjustment(
+            indexes.IndexSpec('primary_key', 2, '3', 4, '5'))
+        expected_expire_intervals = all_of(
+            *[has_item(is_interval_containing(hash(pk))) for pk in [0, '1']])
+        assert_that(
+            adj, has_properties(
+                expire_spec=has_properties(
+                    score_intervals=expected_expire_intervals),
+                new_spec=has_properties(
+                    query='query_some',
+                    args=contains_exactly(contains_inanyorder(4, '5')))))
 
     def test_covers_all(self, indexes):
         adj = indexes.prepare_adjustment(
