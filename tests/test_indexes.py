@@ -55,7 +55,7 @@ class TestAllIndexes:
             indexes.storage_records_spec(indexes.IndexSpec('all')))
         assert_that(adj, has_properties(
             expire_spec=None,
-            new_spec=has_properties(query='query_all', args=())))
+            load_spec=has_properties(query='query_all', args=())))
 
     def test_covers(self, indexes):
         assert indexes.covers(
@@ -119,7 +119,7 @@ class TestPrimaryKeyIndexes:
         indexes.commit_adjustment(adj)
         adj = indexes.prepare_adjustment(
             indexes.IndexSpec('primary_key', all_primary_keys=True))
-        assert_that(adj, has_properties(expire_spec=None, new_spec=None))
+        assert_that(adj, has_properties(expire_spec=None, load_spec=None))
 
     @pytest.mark.parametrize('pks', [[], [1, 2]])
     def test_prepare_all_to_some(self, indexes, pks):
@@ -133,7 +133,7 @@ class TestPrimaryKeyIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=expected_expire_intervals),
-                new_spec=has_properties(
+                load_spec=has_properties(
                     query='query_some',
                     args=contains_exactly(contains_inanyorder(*pks)))))
 
@@ -147,7 +147,7 @@ class TestPrimaryKeyIndexes:
         assert_that(
             adj, has_properties(
                 expire_spec=None,
-                new_spec=has_properties(query='query_all', args=())))
+                load_spec=has_properties(query='query_all', args=())))
 
     @pytest.mark.parametrize('pks1', [[], [1, '2']])
     @pytest.mark.parametrize('pks2', [[], [3, '4']])
@@ -163,7 +163,7 @@ class TestPrimaryKeyIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=expected_expire_intervals),
-                new_spec=has_properties(
+                load_spec=has_properties(
                     query='query_some',
                     args=contains_exactly(contains_inanyorder(*pks2)))))
 
@@ -179,7 +179,7 @@ class TestPrimaryKeyIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=expected_expire_intervals),
-                new_spec=has_properties(
+                load_spec=has_properties(
                     query='query_some',
                     args=contains_exactly(contains_inanyorder(4, '5')))))
 
@@ -286,7 +286,7 @@ class TestPrimaryKeyRangeIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=contains_exactly(tc.Interval(-5, 3))),
-                new_spec=has_properties(query='query_range', args=(5, 10))))
+                load_spec=has_properties(query='query_range', args=(5, 10))))
 
     def test_prepare_overlap(self, indexes):
         adj = indexes.prepare_adjustment(
@@ -298,7 +298,7 @@ class TestPrimaryKeyRangeIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=contains_exactly(tc.Interval(-5, 3))),
-                new_spec=has_properties(query='query_range', args=(0, 10))))
+                load_spec=has_properties(query='query_range', args=(0, 10))))
 
     def test_prepare_equal(self, indexes):
         adj = indexes.prepare_adjustment(
@@ -310,7 +310,7 @@ class TestPrimaryKeyRangeIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=contains_exactly(tc.Interval(-5, 3))),
-                new_spec=has_properties(query='query_range', args=(-5, 3))))
+                load_spec=has_properties(query='query_range', args=(-5, 3))))
 
     def test_prepare_contained(self, indexes):
         adj = indexes.prepare_adjustment(
@@ -322,7 +322,7 @@ class TestPrimaryKeyRangeIndexes:
             adj, has_properties(
                 expire_spec=has_properties(
                     score_intervals=contains_exactly(tc.Interval(-5, 3))),
-                new_spec=has_properties(query='query_range', args=(-4, 2))))
+                load_spec=has_properties(query='query_range', args=(-4, 2))))
 
     def test_covers(self, indexes):
         adj = indexes.prepare_adjustment(

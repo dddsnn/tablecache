@@ -168,9 +168,9 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             async for record in delete(adjustment.expire_spec):
                 adjustment.observe_expired(record)
                 num_deleted += 1
-        if adjustment.new_spec:
+        if adjustment.load_spec:
             async for record in self._db_access.get_records(
-                    adjustment.new_spec):
+                    adjustment.load_spec):
                 await put(record)
                 adjustment.observe_loaded(record)
                 num_loaded += 1

@@ -40,7 +40,7 @@ class Adjustment:
     as ones that should be loaded from the DB and put into storage.
 
     The records specified via the expire_spec need not necessarily exist in
-    storage. Likewise, ones specified via new_spec may already exist. Setting
+    storage. Likewise, ones specified via load_spec may already exist. Setting
     either to None signals that no records should be expired or loaded,
     respectively.
 
@@ -52,9 +52,9 @@ class Adjustment:
 
     def __init__(
         self, expire_spec: t.Optional[storage.StorageRecordsSpec],
-            new_spec: t.Optional[db.DbRecordsSpec]) -> None:
+            load_spec: t.Optional[db.DbRecordsSpec]) -> None:
         self.expire_spec = expire_spec
-        self.new_spec = new_spec
+        self.load_spec = load_spec
 
     def observe_expired(self, record):
         """
@@ -377,9 +377,9 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
     class Adjustment(Adjustment):
         def __init__(
             self, expire_spec: t.Optional[storage.StorageRecordsSpec],
-            new_spec: t.Optional[db.DbRecordsSpec],
+            load_spec: t.Optional[db.DbRecordsSpec],
                 primary_keys: set[tp.PrimaryKey], cover_all: bool) -> None:
-            super().__init__(expire_spec, new_spec)
+            super().__init__(expire_spec, load_spec)
             self.primary_keys = primary_keys
             self.cover_all = cover_all
 
@@ -459,15 +459,15 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
             expire_spec = storage.StorageRecordsSpec(
                 'primary_key', [storage.Interval.everything()])
         if self._covers_all and spec.all_primary_keys:
-            new_spec = None
+            load_spec = None
         elif not spec.all_primary_keys and not self._covers_all:
             new_primary_keys = set(spec.primary_keys) - self._primary_keys
-            new_spec = self.db_records_spec(
+            load_spec = self.db_records_spec(
                 self.IndexSpec('primary_key', *new_primary_keys))
         else:
-            new_spec = self.db_records_spec(spec)
+            load_spec = self.db_records_spec(spec)
         return self.Adjustment(
-            expire_spec, new_spec, set(spec.primary_keys),
+            expire_spec, load_spec, set(spec.primary_keys),
             spec.all_primary_keys)
 
     @t.override
@@ -498,7 +498,7 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
     current data and load the entire requested data set, even if they overlap
     substantially.
     """
-    class IndexSpec(Indexes[tp.PrimaryKey].IndexSpec):
+    class IndexSpec(Indexes[numbers.Real].IndexSpec):
         def __init__(
                 self, index_name: str, *, ge: numbers.Real, lt: numbers.Real):
             """
@@ -521,11 +521,10 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
     class Adjustment(Adjustment):
         def __init__(
                 self, expire_spec: t.Optional[storage.StorageRecordsSpec],
-                new_spec: t.Optional[db.DbRecordsSpec],
+                load_spec: t.Optional[db.DbRecordsSpec],
                 interval: storage.Interval) -> None:
-            super().__init__(expire_spec, new_spec)
+            super().__init__(expire_spec, load_spec)
             self.interval = interval
-        interval: storage.Interval
 
     def __init__(self, primary_key_name: str, query_range_string: str) -> None:
         """
@@ -573,8 +572,8 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
     def prepare_adjustment(self, spec: IndexSpec) -> Adjustment:
         expire_spec = storage.StorageRecordsSpec(
             'primary_key', [self._interval])
-        new_spec = self.db_records_spec(spec)
-        return self.Adjustment(expire_spec, new_spec, spec.interval)
+        load_spec = self.db_records_spec(spec)
+        return self.Adjustment(expire_spec, load_spec, spec.interval)
 
     @t.override
     def commit_adjustment(self, adjustment: Adjustment) -> None:

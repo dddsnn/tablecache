@@ -83,9 +83,9 @@ class MultiIndexes(tc.Indexes[int]):
 
     class Adjustment(tc.Adjustment):
         def __init__(
-                self, expire_spec, new_spec, all_primary_keys, primary_keys,
+                self, expire_spec, load_spec, all_primary_keys, primary_keys,
                 range):
-            super().__init__(expire_spec, new_spec)
+            super().__init__(expire_spec, load_spec)
             self.all_primary_keys = all_primary_keys
             self.primary_keys = primary_keys
             self.range = range
@@ -148,7 +148,7 @@ class MultiIndexes(tc.Indexes[int]):
     def prepare_adjustment(self, spec):
         expire_spec = tc.StorageRecordsSpec(
             'primary_key', [tc.Interval.everything()])
-        new_spec = self.db_records_spec(spec)
+        load_spec = self.db_records_spec(spec)
         if spec.index_name == 'primary_key':
             primary_keys = spec.primary_keys
             range_ = None
@@ -158,7 +158,7 @@ class MultiIndexes(tc.Indexes[int]):
         else:
             raise NotImplementedError
         return self.Adjustment(
-            expire_spec, new_spec, bool(spec.all_primary_keys), primary_keys,
+            expire_spec, load_spec, bool(spec.all_primary_keys), primary_keys,
             range_)
 
     def commit_adjustment(self, adjustment):
@@ -642,7 +642,7 @@ class TestCachedTable:
             def prepare_adjustment(self, spec):
                 adjustment = super().prepare_adjustment(spec)
                 if spec.load_nothing:
-                    adjustment.new_spec = None
+                    adjustment.load_spec = None
                 return adjustment
         table, _ = make_tables(indexes=Indexes())
         db_access.records = [{'pk': i} for i in range(4)]
