@@ -16,7 +16,6 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
-import itertools as it
 import logging
 import typing as t
 
@@ -26,11 +25,6 @@ import tablecache.storage as storage
 import tablecache.types as tp
 
 _logger = logging.getLogger(__name__)
-
-
-async def _async_generator(xs):
-    for x in xs:
-        yield x
 
 
 class CachedTable[PrimaryKey: tp.PrimaryKey]:
@@ -266,12 +260,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
                 'Indexes don\'t support coverage check on '
                 f'{index_spec.index_name}.') from e
         if get_from_storage:
-            if not self._invalid_record_repo:
-                records = self._storage_table.get_records(
-                    self._indexes.storage_records_spec(index_spec))
-            else:
-                records = await self._check_and_get_records_from_storage(
-                    index_spec)
+            records = await self._check_and_get_records_from_storage(
+                index_spec)
         else:
             db_records_spec = self._indexes.db_records_spec(
                 index_spec)
@@ -285,11 +275,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     async def _check_and_get_records_from_storage(self, index_spec):
         records_spec = self._indexes.storage_records_spec(index_spec)
         if not self._intervals_are_valid(records_spec):
-            return await self._refresh_and_get_records_from_storage(index_spec)
-        records = []
-        async for record in self._storage_table.get_records(records_spec):
-            records.append(record)
-        return _async_generator(records)
+            await self.refresh_invalid()
+        return self._storage_table.get_records(records_spec)
 
     def _intervals_are_valid(self, records_spec):
         for interval in records_spec.score_intervals:
@@ -297,11 +284,6 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
                     records_spec.index_name, interval):
                 return False
         return True
-
-    async def _refresh_and_get_records_from_storage(self, index_spec):
-        await self.refresh_invalid()
-        return self._storage_table.get_records(
-            self._indexes.storage_records_spec(index_spec))
 
     def invalidate_records(
             self, old_index_specs: list[index.Indexes[PrimaryKey].IndexSpec],
@@ -345,31 +327,36 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         """
         if not self._loaded_event.is_set():
             raise ValueError('Table is not yet loaded.')
-        index_for_refresh = {}
-        by_name = {'old': {}, 'new': {}}
-        for index_spec, old_or_new in it.chain(
-                zip(old_index_specs, it.repeat('old')),
-                zip(new_index_specs, it.repeat('new'))):
-            try:
-                index_for_refresh.setdefault(old_or_new, index_spec.index_name)
-                if self._indexes.covers(index_spec):
-                    if index_spec.index_name in by_name[old_or_new]:
-                        raise ValueError(
-                            f'Index {index_spec.index_name} specified more '
-                            'than once.')
-                    by_name[old_or_new][index_spec.index_name] = index_spec
-                    continue
-            except index.UnsupportedIndexOperation:
-                pass
-            raise ValueError(
-                f'Index spec {index_spec} is not certainly covered by the '
-                'indexes.')
-        if len(index_for_refresh) != 2:
+        old_index_for_refresh, old_specs_by_name = (
+            self._parse_index_specs_for_invalidation(old_index_specs))
+        new_index_for_refresh, new_specs_by_name = (
+            self._parse_index_specs_for_invalidation(new_index_specs))
+        if not old_index_for_refresh or not new_index_for_refresh:
             raise ValueError(
                 'At least one old and one new index spec must be given.')
         self._invalid_record_repo.flag_invalid(
-            by_name['old'], by_name['new'], index_for_refresh['old'],
-            index_for_refresh['new'])
+            old_specs_by_name, new_specs_by_name, old_index_for_refresh,
+            new_index_for_refresh)
+
+    def _parse_index_specs_for_invalidation(self, index_specs):
+        first_index_name = None
+        specs_by_name = {}
+        for index_spec in index_specs:
+            if index_spec.index_name in specs_by_name:
+                raise ValueError(
+                    f'Index {index_spec.index_name} specified more than once.')
+            try:
+                if not self._indexes.covers(index_spec):
+                    raise ValueError(
+                        f'Index spec {index_spec} is not covered by the '
+                        'indexes.')
+            except index.UnsupportedIndexOperation as e:
+                raise ValueError(
+                    f'Index spec {index_spec} is not covered by the '
+                    'indexes (doesn\'t support coverage check).') from e
+            first_index_name = first_index_name or index_spec.index_name
+            specs_by_name[index_spec.index_name] = index_spec
+        return first_index_name, specs_by_name
 
     async def refresh_invalid(self) -> None:
         """
@@ -395,16 +382,21 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         _logger.info(
             f'Refreshing {len(self._invalid_record_repo)} invalid index '
             'specs.')
-        for old_spec, new_spec in (
-                self._invalid_record_repo.specs_for_refresh()):
+        num_deleted = num_loaded = 0
+        old_and_new_specs = self._invalid_record_repo.specs_for_refresh()
+        for old_spec, new_spec in old_and_new_specs:
             async for _ in self._storage_table.scratch_discard_records(
                     self._indexes.storage_records_spec(old_spec)):
-                pass
+                num_deleted += 1
             db_records_spec = self._indexes.db_records_spec(new_spec)
             async for record in self._db_access.get_records(db_records_spec):
                 await self._storage_table.scratch_put_record(record)
+                num_loaded += 1
         self._storage_table.scratch_merge()
         self._invalid_record_repo.clear()
+        _logger.info(
+            f'Refresh done. Deleted {num_deleted} and loaded {num_loaded} '
+            f'records across {len(old_and_new_specs)} index spec pairs.')
 
 
 class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
@@ -475,17 +467,17 @@ class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
             self._invalid_intervals[index_name].update(
                 records_spec.score_intervals)
 
-    def specs_for_refresh(self) -> t.Iterable[tuple[
+    def specs_for_refresh(self) -> list[tuple[
             index.Indexes[PrimaryKey].IndexSpec,
             index.Indexes[PrimaryKey].IndexSpec]]:
         """
-        Iterate index specs to do a refresh with.
+        Get index specs to do a refresh with.
 
-        Generates tuples (old, new), where old is an index spec of records that
-        have become invalid in storage, and new is an index spec specifying the
-        records in their valid state in the DB.
+        Returns a list of tuples (old, new), where old is an index spec of
+        records that have become invalid in storage, and new is an index spec
+        specifying the records in their valid state in the DB.
         """
-        yield from self._specs_for_refresh
+        return list(self._specs_for_refresh)
 
     def interval_intersects_invalid(
             self, index_name: str, interval: storage.Interval) -> bool:

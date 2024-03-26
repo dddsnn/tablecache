@@ -1355,13 +1355,13 @@ class TestInvalidRecordRepository:
             'x_range', x_range_interval(0, 5))
 
     def test_specs_for_refresh(self, repo, indexes):
-        assert_that(list(repo.specs_for_refresh()), empty())
+        assert_that(repo.specs_for_refresh(), empty())
         repo.flag_invalid(
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
             'primary_key', 'primary_key')
         assert_that(
-            list(repo.specs_for_refresh()),
+            repo.specs_for_refresh(),
             contains_inanyorder(
                 contains_exactly(
                     has_properties(index_name='primary_key', primary_keys={2}),
@@ -1374,7 +1374,7 @@ class TestInvalidRecordRepository:
              'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
             'primary_key', 'x_range')
         assert_that(
-            list(repo.specs_for_refresh()),
+            repo.specs_for_refresh(),
             contains_inanyorder(
                 contains_exactly(
                     has_properties(index_name='primary_key', primary_keys={2}),
