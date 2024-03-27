@@ -25,8 +25,10 @@ for requirements_file in requirements_path.glob('*.txt'):
     with requirements_file.open() as f:
         requirements[requirements_file.stem] = frozenset(f.readlines())
 requirements['test'] = frozenset(it.chain(
-    *[reqs for extra, reqs in requirements.items() if extra != 'test']))
-requirements['dev'] = frozenset(it.chain(*requirements.values()))
+    *[reqs for extra, reqs in requirements.items()
+      if extra not in ['base', 'dev', 'docs']]))
+requirements['dev'] = frozenset(it.chain(
+    *[reqs for extra, reqs in requirements.items()if extra != 'base']))
 extras_requirements = {extra: reqs for extra,
                        reqs in requirements.items() if extra != 'base'}
 with (pathlib.Path(__file__).parent / 'README.md').absolute().open() as f:
