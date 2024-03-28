@@ -250,6 +250,12 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
         covered by storage, and the cache doesn't need to go to the DB to check
         if that record exists.
 
+        The implementation may lie a bit about what is covered in the pursuit
+        of performance. E.g., it may claim to cover records it technically
+        can't have seen, but which can't be very old, trading exact
+        consistency with the DB for eventual consistency in order to reduce the
+        number of cache misses.
+
         Raises an UnsupportedIndexOperation if the given index doesn't support
         checking coverage.
         """

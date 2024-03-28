@@ -42,24 +42,20 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
 
     Most methods for which records need to be specified can either be called
     with an IndexSpec appropriate to the cache's Indexes instance, or more
-    conveniently with args and kwargs that will be used to construct an
+    conveniently with args and kwargs that will be passed to the Indexes
+    IndexSpec innerclass in order to construct an
     IndexSpec (the exception to this is invalidate_records(), which needs
     multiple IndexSpecs).
 
     The DB state is not reflected automatically. If one or more records in the
     DB change (or are deleted or newly added), invalidate_records() needs to be
     called for the cache to reflect that. This doesn't trigger an immediate
-    refresh, but it gurantees that the updated record is loaded from the DB
+    refresh, but it guarantees that the updated record is loaded from the DB
     before it is served the next time.
 
     Which subset of the records in DB is cached can be changed by calling
-    adjust(). This operation asks a specified index what to delete and what to
-    load new, so it is implementation-specific to the chosen index.
-
-    In general, many of the cache's methods take an index name along with index
-    args and kwargs. These all query the chache's Indexes instance, which acts
-    as the abstraction between DB and storage. The Indexes make it possible to
-    specify the same subset of records in both.
+    adjust(). This operation can load new records and also expire ones no
+    longer needed.
     """
 
     def __init__(
@@ -290,40 +286,51 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             new_index_specs: list[index.Indexes[PrimaryKey].IndexSpec]
     ) -> None:
         """
-        Mark a single record in storage as invalid.
+        Mark records in storage as invalid.
 
-        The record with the given primary key is marked as not existing in
-        storage with the same data as in DB. This could either be because the
-        record was deleted from the DB, or because it was updated in the DB.
-        Data belonging to an invalidated key is guaranteed to be fetched from
-        the DB again before being served to a client. Keys that are no longer
-        found in the DB are deleted.
+        All records that are currently in storage and match any index spec in
+        old_index_specs or new_index_specs are marked as invalid. This means
+        that before any future request for any of these records, they are
+        guaranteed to be refreshed (i.e. fetched from the DB) first. This
+        guarantee holds for read operations that start after this method
+        returns. Reads that have already started (in a different task) may
+        respect invalidations that happen here, but probably won't. It is valid
+        to specify records that haven't actually changed (they will be
+        refreshed as well, though).
 
-        If the given primary key doesn't exist in storage, a KeyError is
-        raised. This method can't be used to load new records, use adjust() for
-        that.
+        During a refresh, all records matching the first index spec in
+        old_index_specs are deleted, then records are loaded again using the
+        first index spec in new_index_specs. It is valid (and perfectly
+        reasonable) if old_index_specs == new_index_specs.
 
-        Internally, the score of the record for each of the relevant indexes is
-        required to mark it invalid for queries for a set of records against
-        that index. Index scores may be given via the new_scores parameter,
-        which is a dictionary mapping index names to the record's new scores.
-        N.B.: These must be the record's new scores, i.e. if the record was
-        updated in a way that changed it's score for any index, the new updated
-        score must be provided.
+        All index specs in both lists should specify the same set of records,
+        only for different indexes. Having the first element in new_index_specs
+        specify a proper superset of records to that in old_index_specs is
+        possible. Some of the new records will simply be loaded unnecessarily
+        (but records can't exist twice, since they'e unique by their primary
+        key). However, specifying fewer records in new_index_specs will cause
+        records to be lost.
 
-        The implementation will trust that these are correct, and supplying
-        wrong ones will lead to the record not being properly invalidated.
-        Scores needn't be specified, however when they're not for any given
-        index, that entire index is marked dirty, and any query against that
-        index will trigger a full refresh. One exception to this is the
-        primary_key index, for which no score needs to be specified since that
-        score can always be calculated and primary keys can never change.
+        Each index must only be specified once in each list. All indexes for
+        which an index spec is given must support coverage checks and certainly
+        cover that index spec (i.e. covers() returns True).
 
-        This method needs to wait for any ongoing adjustments or refreshes, so
-        it may occasionally take a while.
+        Not all indexes must be represented in the index spec lists, but those
+        that aren't are marked as dirty. Any reads against a dirty index will
+        unconditionally cause a refresh (as opposed to indexes that aren't
+        dirty, which will only be refreshed if the records queried for have
+        been marked as invalid). This is necessary since, without information
+        on which records are invalid, we must assume that all of them are.
 
-        Implementation note: updated and deleted records aren't observed for
-        the indexes again.
+        This method can be used to load new records, as long as they are
+        covered by all given indexes.
+
+        Raises a ValueError if the table is not yet loaded, an index is
+        specified more than once, or one of the index specs lists is empty.
+
+        Implementation note: records that are updated or deleted during a
+        refresh are not observed in an adjustment (i.e. observe_expired(),
+        observe_loaded()). If this is needed, adjust() must be used instead.
         """
         if not self._loaded_event.is_set():
             raise ValueError('Table is not yet loaded.')

@@ -147,9 +147,6 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         """
         raise NotImplementedError
 
-
-
-
     @abc.abstractmethod
     async def get_records(
             self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
@@ -167,7 +164,6 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         No particular order is guaranteed.
         """
         raise NotImplementedError
-
 
     @abc.abstractmethod
     async def delete_records(
