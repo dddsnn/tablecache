@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Asd &#8212; tablecache 4.0.0 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d1102ebc" />
+    <link rel="stylesheet" type="text/css" href="_static/alabaster.css?v=12dfc556" />
+    <script src="_static/documentation_options.js?v=3304f9e4"></script>
+    <script src="_static/doctools.js?v=888ff710"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Welcome to tablecache’s documentation!" href="index.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="asd">
+<h1>Asd<a class="headerlink" href="#asd" title="Link to this heading">¶</a></h1>
+<!-- ```{autosummary}
+---
+toctree: generated
+---
+tablecache.Adjustment
+``` -->
+<p>.. py:class:: Indexes()
+:module: tablecache
+:canonical: tablecache.index.Indexes</p>
+<p>A set of indexes used to access storage and DB tables.</p>
+<p>This adds storage state information and ways to query a storage table and
+the DB to the RecordScorer interface. The purpose of Indexes is to tie its
+different indexes, their respective scoring and record access, together and
+potentially share information between them.</p>
+<p>Provides a uniform way to specify a set of records to be queried from
+either storage or DB tables. This is done with storage_records_spec() and
+db_records_spec(), respectively.</p>
+<p>Also keeps track of the set of records available from storage, as opposed
+to those that are only available via the DB. To this end,
+prepare_adjustment() is expected to be called before loading records into
+storage, and commit_adjustment() when the load is complete. From that point
+on, the state considers the records that it specified to load to be in
+storage. Further adjustments can be made later in order to change the
+records in storage.</p>
+<p>The covers() method can be used to check whether a set of records is
+available from storage.</p>
+<p>Methods for which a set of records needs to be specified
+({storage,db}_records_spec(), covers(), and prepare_adjustment()) take an
+instance of the IndexSpec inner class. This encapsulates the way to specify
+a particular set of records for the particular Indexes implementation.
+Subclasses may define their own IndexSpecs, but these must be inner classes
+and subclasses of IndexSpec (i.e. issubclass(
+MyIndexesImplementation.IndexSpec, Indexes,IndexSpec)).</p>
+<p>The methods involving index state, covers() and prepare_adjustment(), may
+not be supported for every index. E.g., an index may only be meant for
+querying (i.e. support covers()), but not for adjusting the indexes. In
+that case, these methods raise an UnsupportedIndexOperation. If any method
+is called with the name of an index that doesn’t exist, a ValueError is
+raised.</p>
+<p>.. py:class:: Indexes.IndexSpec(index_name: str)
+:module: tablecache
+:canonical: tablecache.index.Indexes.IndexSpec</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>  Specification of a set of records in an index.
+</pre></div>
+</div>
+<p>.. py:method:: Indexes.commit_adjustment(adjustment: ~tablecache.index.Adjustment) -&gt; None
+:module: tablecache
+:abstractmethod:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>  Commits a prepared adjustment.
+
+  Takes an Adjustment previously returned from prepare_adjustment() and
+  modifies internal state to reflect it. After the call, the indexes
+  assume that the records that were specified to be deleted from storage
+  are no longer covered, and likewise that those specified to be loaded
+  are. Future calls to covers() will reflect that.
+</pre></div>
+</div>
+<p>.. py:method:: Indexes.covers(spec: ~tablecache.index.Indexes.IndexSpec) -&gt; bool
+:module: tablecache
+:abstractmethod:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>  Check whether the specified records are covered by storage.
+
+  Returns whether all of the records specified via the index spec are in
+  storage. This determination is based on previous calls to
+  commit_adjustment().
+
+  May also return False if the records may be covered, but there isn&#39;t
+  enough information to be certain. This could happen when the Indexes
+  are adjusted by a different index than this covers check is done. E.g.,
+  if an adjustment containing a specific set of primary keys is committed
+  and then a covers check is done for a range of primary keys, there may
+  not be enough information to determine whether the set that was loaded
+  contained all primary keys in the range.
+
+  A record may also be considered covered if it doesn&#39;t exist. E.g., say
+  records with primary keys between 0 and 10 were loaded into storage,
+  but none even exists with primary key 5. Then that record is still
+  covered by storage, and the cache doesn&#39;t need to go to the DB to check
+  if that record exists.
+
+  The implementation may lie a bit about what is covered in the pursuit
+  of performance. E.g., it may claim to cover records it technically
+  can&#39;t have seen, but which can&#39;t be very old, trading exact
+  consistency with the DB for eventual consistency in order to reduce the
+  number of cache misses.
+
+  Raises an UnsupportedIndexOperation if the given index doesn&#39;t support
+  checking coverage.
+</pre></div>
+</div>
+<p>.. py:method:: Indexes.db_records_spec(spec: ~tablecache.index.Indexes.IndexSpec) -&gt; ~tablecache.db.DbRecordsSpec
+:module: tablecache
+:abstractmethod:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>  Specify records in the DB based on an index.
+
+  Like storage_records_spec(), but specifies the same set of records in
+  the DB.
+</pre></div>
+</div>
+<p>.. py:method:: Indexes.prepare_adjustment(spec: ~tablecache.index.Indexes.IndexSpec) -&gt; ~tablecache.index.Adjustment
+:module: tablecache
+:abstractmethod:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>  Prepare an adjustment of which records are covered by the indexes.
+
+  Returns an Adjustment, which contains a StorageRecordsSpec of records
+  to delete from storage and a DbRecordsSpec of ones to load from the DB
+  in order to attain the state in which exactly the records specified via
+  the index spec are loaded.
+
+  This method only specifies what would need to change in order to adjust
+  the indexes, but does not modify the internal state of the Indexes.
+  However, a subclass of Adjustment may be return that contains
+  additional information needed in commit_adjustment(), as well as
+  implementing observe_expired() and observe_loaded(). These will be
+  called with all the records that were expired and loaded, and can store
+  information needed to maintain the index.
+
+  Raises an UnsupportedIndexOperation if adjusting by the given index is
+  not supported.
+</pre></div>
+</div>
+<p>.. py:method:: Indexes.storage_records_spec(spec: ~tablecache.index.Indexes.IndexSpec) -&gt; ~tablecache.storage.StorageRecordsSpec
+:module: tablecache
+:abstractmethod:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span>  Specify records in storage based on an index.
+
+  Returns a StorageRecordsSpec that specifies the set of records in
+  storage that matches the index spec.
+</pre></div>
+</div>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="index.html">tablecache</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Asd</a></li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+      <li>Previous: <a href="index.html" title="previous chapter">Welcome to tablecache’s documentation!</a></li>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>document.getElementById('searchbox').style.display = "block"</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2024, Marc Lehmann.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 7.2.6</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 0.7.16</a>
+      
+      |
+      <a href="_sources/asd.md.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

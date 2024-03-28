@@ -24,9 +24,30 @@ import tablecache.index as index
 import tablecache.storage as storage
 import tablecache.types as tp
 
+# TODO logger per table, with table name in logger name+++++++++
 _logger = logging.getLogger(__name__)
 
 
+# TODO refresh periodically++++++++++
+# TODO choose whether to only refresh some or do over entirely+++++++++
+# TODO log warnings when a request causes the db to be hit+++++++++++++
+# TODO should we call Indexes.observe() on deletions or updates? (e.g. with an
+# extra param that's either 'new','updated',or 'deleted'). if so, check all
+# write access to _storage_table. also, we could
+# observe that a record doesn't exist in db. e.g. then the indexes know they
+# cover that pk and we can raise a KeyError from a cache hit++++++++++
+
+# TODO metrics for:
+# - cache hits and misses++++++++++++++
+# - number of refreshes triggered manually/triggered by cache miss+++++++
+# - num records in storage++++++++++
+# - number of adjusts+++++++++
+# - adjust number of adds and deletes+++++++++
+#
+#
+# TODO generic PrimaryKey needed? just the generic indexes, so we have the
+# exact type of IndexSpec?+++++++++++++++
+# TODO could actually add back get_record() and delete_record(), storages have pks again+++++++++++++++++++
 class CachedTable[PrimaryKey: tp.PrimaryKey]:
     """
     A cached table.
@@ -58,8 +79,12 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     longer needed.
     """
 
+    # PERF allow to be lenient with outdated records: if the record has been
+    # marked invalid less than n seconds ago, still serve the outdated one from
+    # storage. then ensure refreshes happen regularly at less than n second
+    # intervals so we never have to wait+++++++++++++++++
     def __init__(
-            self, indexes: index.Indexes, db_access: db.DbAccess,
+            self, indexes: index.Indexes[PrimaryKey], db_access: db.DbAccess,
             storage_table: storage.StorageTable) -> None:
         """
         :param indexes: An Indexes instance that is used to translate query
@@ -106,6 +131,9 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         if self._loaded_event.is_set():
             raise ValueError(
                 'Already loaded. Use adjust() to change cached records.')
+        # TODO split log: first log the clear, then the load after the adjust
+        # is done so the __repr__ is actually useful+++++++++++
+        # TODO better logging in general+++++++++++++++++++
         _logger.info(
             f'Clearing and loading {self._indexes} of table '
             f'{self._storage_table}.')
@@ -198,6 +226,9 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         Raises a ValueError if the specified index doesn't support adjusting.
         """
         index_spec = self._make_index_spec(*args, **kwargs)
+        # _logger.info(
+        #     f'Adjusting table {self._storage_table.table_name} to '
+        #     f'{self.cached_subset}.')#TODO++++++++++++
         await self.loaded()
         num_deleted, num_loaded = await self._adjust_in_scratch(index_spec)
         if num_deleted or num_loaded:
@@ -225,6 +256,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         finally:
             await records.aclose()
 
+    # PERF maybe don't bother hitting the db if only a bit of subset overlaps
+    # into the future+++++++++++++++++++++
     async def get_records(
             self, *args: t.Any, **kwargs: t.Any) -> tp.AsyncRecords:
         """
@@ -281,6 +314,20 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
                 return False
         return True
 
+    # TODO add an option to state for which indexes new scores don't
+    # change and just use the old ones+++++++++++
+    # TODO currently, we can only ever mark entire intervals
+    # invalid. maybe add invalidate_delete() to explicitly state a few
+    # records that have been deleted, similarly invalidate_add() or
+    # something, and invalidate_change(). in these the user would have to
+    # make sure that nothing else changes (or make the appropriate calls separately)+++++++++++
+    # TODO add another method to just give an updated record, circumventing the
+    # db entirely for perf++++++++++++++++++
+    # TODO usually require to specify old specs for all indexes (otherwise they
+    # become dirty), but offer an option to fetch records and generate
+    # intervals, but make it explicit that there will be one interval per key
+    # which is not efficient for many records+++++++++++++++
+    # TODO refresh if too many invalid++++++++++++
     def invalidate_records(
             self, old_index_specs: list[index.Indexes[PrimaryKey].IndexSpec],
             new_index_specs: list[index.Indexes[PrimaryKey].IndexSpec]
@@ -499,6 +546,8 @@ class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
         """
         if index_name in self._dirty_indexes:
             return True
+        # PERF could/should we do something about performance? keep invalid
+        # scores sorted and bisect? or is the overhead not worth it?+++++++++++
         for invalid_interval in self._invalid_intervals[index_name]:
             if interval.intersects(invalid_interval):
                 return True

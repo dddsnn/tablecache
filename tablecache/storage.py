@@ -108,6 +108,8 @@ class StorageRecordsSpec:
     recheck_predicate: tp.RecheckPredicate = always_use_record
 
 
+# TODO could actually add back get_record() and delete_record(), storages have pks again+++++++++++++++++++
+# REFACTOR generic PrimaryKey is not used+++++++++++++++++++
 class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
     """
     Fast storage table.

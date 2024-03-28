@@ -32,6 +32,8 @@ class UnsupportedIndexOperation(Exception):
     """
 
 
+# TODO __repr__ for logging in adjustments (in CachedTable)+++++++++++++
+# TODO also for all subclasses++++++++++++++++
 class Adjustment:
     """
     A specification of an adjustment to be made to the cache.
@@ -77,6 +79,13 @@ class Adjustment:
         been loaded.
         """
         pass
+
+# TODO PrimaryKey necessary?++++++++++++++++++++++++++
+# REFACTOR generic on kind of IndexSpec?++++++++++++++++++++
+# REFACTOR generic on type of record? may actually be possible to allow
+# non-dict-like records with appropriate indexes impls+++++++++++++++++++++
+# TODO allow non-typing.Mapping records (e.g. encoded to bytes to save space)
+# and provide a recipe+++++++++++++++
 
 
 class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
@@ -164,12 +173,15 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
     is called with the name of an index that doesn't exist, a ValueError is
     raised.
     """
+    # TODO should add useful reprs for subclassed Adjustment and IndexSpec+++++++++
     class IndexSpec:
         """Specification of a set of records in an index."""
 
         def __init__(self, index_name: str) -> None:
             self.index_name = index_name
+        # TODO useful __repr__(), and log this thing in cache++++++++++++++++++++++++
 
+    # # TODO useful __repr__()+++++++++++++
     @abc.abstractmethod
     def storage_records_spec(
             self, spec: IndexSpec) -> storage.StorageRecordsSpec:

@@ -1,0 +1,10 @@
+
+# TODO switch to native storage, but provide a redis example+++++++++
+# TODO example with getting multiple+++++++++++
+# TODO example with multicolumn pk+++++++
+# TODO example with recheck predicate++++++++++
+# TODO example with multiple indexes where one is meant for adjusting and one
+# for accessing (i.e. with UnsupportedIndexOpertation)+++++++++++++++
+# TODO example with adjusting, explain that long adjusts don't block read
+# operations and provide a consistent view of the old version+++++++++++++
+# TODO example with composite primary key++++++++++++

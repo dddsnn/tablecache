@@ -3,8 +3,9 @@
 Simple cache for unwieldily joined relations.
 
 ## Copyright and license
+TODO update copyright anywhere relevant++++++++++++++
 
-Copyright 2023 Marc Lehmann
+Copyright 2023, 2024 Marc Lehmann
 
 This file is part of tablecache.
 
@@ -20,6 +21,9 @@ PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License along
 with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+## Installation
+TODO possible extras+++++++++
+
 ## Purpose
 
 tablecache is a small library that caches tables in a slow database (or, more
@@ -28,12 +32,14 @@ likely, big joins of many tables) in a faster storage.
 Suppose you have a relational database that's nice and normalized (many
 tables), but you also need fast access to data resulting from joining a lot of
 these tables to display somewhere.
-
+TODO++++++++++++++++++++++++++++
 tablecache can take your big query, and put the denormalized results in faster
 storage. When data is updated in the DB, the corresponding key in cache can be
 invalidated to be refreshed on the next request. The cache supports getting
 individual records by primary key, as well as getting an entire subset of all
 records defined via a custom `Subset` class (see below).
+
+TODO non-goals+++++++++++++++
 
 ## Limitations
 
@@ -44,7 +50,16 @@ The library assumes that the query to be cached has a (single) column acting as
 primary key, i.e. one which uniquely identifies a row in the result set of the
 query.
 
+pk can be any python object, but must have __eq__ and __hash__++++++++++
+
+when invalidating, indexes may become dirty, i.e. can't be queried anymore
+without doing a full refresh first. must provide appropriate score hints to
+prevent that++++++++++++
+
 ## Usage
+
+TODO explain db vs "in storage"+++++++++++
+TODO explain when to use adjust vs. invalidate in order to load new records
 
 The main components when using the library are a DB table abstraction
 (`PostgresTable`), a storage table abstraction (`RedisTable`), and a
@@ -54,7 +69,7 @@ The storage needs to encode and decode the data (to/from bytes). This is done
 via codecs. Some basic ones are provided (`tablecache.*Codec`).
 
 Records in the `CachedTable` can be accessed individually by primary key using
-`get_record()`, or as part of a subset via `get_record_subset()` (see below for
+`get_record()`, or as part of a subset via `get_records()` (see below for
 `Subset`). If a record doesn't exist in fast storage, it is transparently
 fetched from the DB. Note though that, if only some records in a subset are in
 storage, all are queried from the DB.
@@ -120,3 +135,5 @@ former doesn't need a separate implementation as it's just a superclass.
 ## Logging
 
 The library logs messages with logger names in the `tablecache` namespace.
+
+## Metrics

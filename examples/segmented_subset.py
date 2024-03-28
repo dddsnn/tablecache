@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -19,10 +19,7 @@ import asyncio
 import collections.abc as ca
 import contextlib
 import datetime
-import math
 import numbers
-import pathlib
-import sys
 import typing as t
 
 import asyncpg
@@ -31,14 +28,15 @@ import redis.asyncio as redis
 import tablecache as tc
 import tablecache.types as tp
 
-sys.path.append(str(pathlib.Path(__file__).parent.parent))
-
+# TODO use (device_id,ts) as pk here to demonstrate multicolumn pks++++++++
 
 # This example builds on custom_subset.py, but here each row of data has a
 # device ID, and we want to be able to quickly query data from a time range,
 # but only for a specific device. Since the Redis backend requires that each
 # record have exactly one (float) score, our CachedSubset implementation has to
 # munge both device ID and timestamp into one number.
+
+
 async def main():
     base_query_string = 'SELECT * FROM device_data'
     # The query_subset_string needs to have parameters $1 etc. that match the
@@ -54,11 +52,11 @@ async def main():
         min_size=0, max_size=1,
         dsn='postgres://postgres:@localhost:5432/postgres')
     redis_conn = redis.Redis()
-    db_table = tc.PostgresTable(
+    db_access = tc.PostgresTable(
         postgres_pool, query_subset_string, query_pks_string)
     table = tc.CachedTable(
         DeviceTsSubset,
-        db_table,
+        db_access,
         primary_key_name='data_id',
         attribute_codecs={
             'data_id': tc.IntAsStringCodec(),
@@ -216,6 +214,7 @@ class DeviceTsSubset(tc.CachedSubset):
     # track of which devices even exist, so when we have to generate the
     # score_intervals property, we don't have to go through intervals for all
     # possible device IDs, but only those that actually exist.
+    # TODO in adjustment++++++++++++
     @t.override
     def observe(self, record: tp.Record) -> None:
         self._observed_scores = self._observed_scores or {}
@@ -226,11 +225,8 @@ class DeviceTsSubset(tc.CachedSubset):
             self._observed_scores[device_id] = tc.Interval(
                 min(current.ge, score), max(current.lt, score))
         except KeyError:
-            # This is the first record we're observing for this device. We're
-            # adding the smallest possible bit to the upper bound, so the
-            # interval isn't empty.
-            self._observed_scores[device_id] = tc.Interval(
-                score, math.nextafter(score, math.inf))
+            self._observed_scores[device_id] = tc.Interval.only_containing(
+                score)
 
     # Adjusting the interval in this example only supports pruning from the
     # left side (extending to the right would be possible though). There is
