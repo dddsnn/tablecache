@@ -26,6 +26,8 @@ transparently fetched from the underlying database instead. Cache entries that
 become invalid must be marked as invalid, but are then refreshed automatically.
 """
 
+__version__ = '4.0.0rc0'
+
 from tablecache.cache import CachedTable
 from tablecache.db import DbAccess, DbRecordsSpec, QueryArgsDbRecordsSpec
 from tablecache.index import (

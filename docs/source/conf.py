@@ -2,10 +2,14 @@ import pathlib
 import sys
 sys.path.insert(0, pathlib.Path(__file__).parents[2].resolve().as_posix())
 
+from tablecache import __version__ as tablecache_version  # noqa
+
+
 project = 'tablecache'
-copyright = '2024, Marc Lehmann'
+copyright = '2023, 2024, Marc Lehmann'
 author = 'Marc Lehmann'
-release = '4.0.0-pre'
+version = tablecache_version
+release = tablecache_version
 
 extensions = [
     'sphinx.ext.autodoc',

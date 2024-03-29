@@ -19,6 +19,8 @@ import itertools as it
 import pathlib
 import setuptools
 
+from tablecache import __version__ as tablecache_version
+
 requirements_path = (pathlib.Path(__file__).parent / 'requirements').absolute()
 requirements = {}
 for requirements_file in requirements_path.glob('*.txt'):
@@ -35,7 +37,7 @@ with (pathlib.Path(__file__).parent / 'README.md').absolute().open() as f:
     readme = f.read()
 
 setuptools.setup(
-    name='tablecache', version='3.2.0',
+    name='tablecache', version=tablecache_version,
     description='Simple cache for unwieldily joined relations.',
     long_description_content_type='text/markdown', long_description=readme,
     author="Marc Lehmann", author_email="marc.lehmann@gmx.de",

@@ -153,10 +153,10 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     async def get_records(
             self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
         async with self._scratch_merge_read_lock.reader_lock:
-            async for record in self._get_records_locked(records_spec):
+            for record in self._get_records_locked(records_spec):
                 yield record
 
-    async def _get_records_locked(self, records_spec):
+    def _get_records_locked(self, records_spec):
         if self._include_scratch_records:
             records = it.chain(
                 *[self._get_records_from_indexes(records_spec, indexes)

@@ -67,7 +67,7 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     """
 
     def __init__(
-            self, indexes: index.Indexes, db_access: db.DbAccess,
+            self, indexes: index.Indexes[PrimaryKey], db_access: db.DbAccess,
             storage_table: storage.StorageTable) -> None:
         """
         :param indexes: An Indexes instance that is used to translate query
