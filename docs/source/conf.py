@@ -23,6 +23,13 @@ exclude_patterns = []
 html_theme = 'alabaster'
 html_static_path = []
 
+autodoc_mock_imports = [
+    'aiorwlock',
+    'asyncpg',
+    'redis',
+    'sortedcontainers',
+]
+
 intersphinx_mapping = {
     'asyncpg': ('https://magicstack.github.io/asyncpg/current', None),
     'sortedcontainers': ('https://grantjenks.com/docs/sortedcontainers', None),
