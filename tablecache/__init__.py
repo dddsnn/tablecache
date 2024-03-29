@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -14,6 +14,17 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
+
+"""
+Simple cache for unwieldily joined relations.
+
+``tablecache`` is a small library that caches tables in a slow database (or,
+more likely, big joins of many tables) in a faster storage. It allows you to
+define ways to index the data and then query ranges of records performantly.
+Not all records have to be loaded into the cache, and ones that aren't are
+transparently fetched from the underlying database instead. Cache entries that
+become invalid must be marked as invalid, but are then refreshed automatically.
+"""
 
 from tablecache.cache import CachedTable
 from tablecache.db import DbAccess, DbRecordsSpec, QueryArgsDbRecordsSpec

@@ -15,6 +15,13 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+"""
+This submodule provides the :py:class:`.PostgresAccess`, an implementation
+of :py:class:`.DbAccess` for Postgres. It uses the :external:py:mod:`asyncpg`
+library, which gets pulled in as a dependency when the ``postgres`` extra is
+selected.
+"""
+
 try:
     import asyncpg
 except ImportError as e:

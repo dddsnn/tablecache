@@ -15,6 +15,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+"""
+The :py:class:`DbAccess` is the abstract base for access to a database. It's a
+very simple interface, able to get records based on a :py:class:`DbRecordsSpec`.
+"""
+
 import abc
 import dataclasses as dc
 
@@ -28,6 +33,7 @@ class DbRecordsSpec:
 
 @dc.dataclass(frozen=True)
 class QueryArgsDbRecordsSpec(DbRecordsSpec):
+    """A specification of DB records via a query and args."""
     query: str
     args: tuple
 

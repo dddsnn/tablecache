@@ -1,12 +1,12 @@
 # tablecache
 
-Simple cache for unwieldily joined relations.
+```{eval-rst}
+.. automodule:: tablecache
+```
 
 ## Copyright and license
 
 Copyright 2023, 2024 Marc Lehmann
-
-This file is part of tablecache.
 
 tablecache is free software: you can redistribute it and/or modify it under the
 terms of the GNU Affero General Public License as published by the Free
@@ -19,3 +19,26 @@ PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License along
 with tablecache. If not, see <https://www.gnu.org/licenses/>.
+
+```{toctree}
+---
+maxdepth: 2
+caption: Contents
+---
+overview
+tc_index
+cache
+db
+storage
+types
+```
+
+```{toctree}
+---
+maxdepth: 2
+caption: Extras
+---
+extras/postgres
+extras/local
+extras/redis
+```

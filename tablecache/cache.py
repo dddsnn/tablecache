@@ -15,6 +15,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+"""
+The :py:class:`CachedTable` is the main point of interaction, providing
+transparent access to the records of a table (or a join of tables, or any
+result set). It gets these records either from a :py:class:`.DbAccess`, or
+preferrably a fast :py:class:`.StorageTable`. Access to records in both is tied
+together by an :py:class:`.Indexes` instance.
+"""
+
 import asyncio
 import logging
 import typing as t

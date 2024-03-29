@@ -15,6 +15,28 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+"""
+The :py:class:`StorageTable` is the abstract base for access to a records
+storage. Storage always means a place to put cached records from which they can
+be fetched again quickly.
+
+Performance is achieved by associating each record with one or more scores, and
+having the :py:class:`StorageTable` be able to quickly fetch records by a range
+of scores. The :py:class:`Interval` defines such a range, and the
+:py:class:`StorageRecordsSpec` specifies a set of records in storage via any
+number of them. Additionally, it has a :py:attr:`recheck_predicate`, which can
+be used to filter out records that aren't wanted.
+
+Each :py:class:`StorageTable` provides a scratch space, which is a place to
+stage write operations that shouldn't take effect immediately. This is used by
+the :py:class:`.CachedTable` during adjustments (i.e. when expiring old and
+loading new records). The :py:class:`.CachedTable` is meant to provide a
+consistent view of the records, and locking everything isn't an option since
+adjustments may take a long time. The scratch space allows it to get all
+changes ready without affecting reads. Then, the prepared scratch space can be
+merged, which should be implemented to be very fast.
+"""
+
 import abc
 import dataclasses as dc
 import itertools as it
@@ -126,7 +148,7 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
     that updates provide little disruption.
 
     The behavior of the regular write operations (put_record() and
-    delete_record{,s}()) is not necessarily well-defined when they occur
+    delete_records()) is not necessarily well-defined when they occur
     concurrently (i.e. from separate tasks). When in doubt, locking should be
     used, or the scratch space, which is guaranteed to behave in the presence
     of multiple tasks.

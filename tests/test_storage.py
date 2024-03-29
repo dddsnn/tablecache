@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2023, 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #

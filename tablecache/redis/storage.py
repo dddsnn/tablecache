@@ -15,19 +15,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
-"""
-This module contains the RedisTable, a StorageTable implementation that stores
-its data in a Redis instance.
-
-While this seemed like a good idea a while ago, with changes in the library's
-design concerning indexing, this implementation may be slower than the local
-storage. Supporting multiple indexes requires at least one round trip to get
-the relevant primary keys of records (one per score interval in the records
-spec), then another to actually get the records. Deletions actually have to
-fetch all records first in order to clean up the indexes, then delete one by
-one.
-"""
-
 import asyncio
 import collections.abc as ca
 import struct

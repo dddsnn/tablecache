@@ -15,6 +15,17 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+"""
+In order to access records both in DB and storage, an implementation of
+:py:class:`Indexes` is needed. An :py:class:`Indexes` instance can take a
+specification of a set of records in the form of an
+:py:class:`Indexes.IndexSpec` and turn it into a specification to access those
+records either in the DB or in storage.
+
+An :py:class:`Indexes` instance also keeps track of which records are even
+cached at the moment, and maintains its constituent indexes.
+"""
+
 import abc
 import math
 import numbers
