@@ -17,6 +17,7 @@
 
 import asyncio
 import collections.abc as ca
+import operator as op
 import struct
 import typing as t
 
@@ -44,20 +45,24 @@ aiorwlock._WriterLock = CompatibleWriterLock
 type AttributeCodecs = ca.Mapping[str, codec.Codec]
 
 
+def _identity(x):
+    return x
+
+
 class RedisCodingError(Exception):
     """
     Raised when any error relating to en- or decoding occurs.
     """
 
 
-class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
+class RedisTable[Record, PrimaryKey: tp.PrimaryKey](
+        storage.StorageTable[Record]):
     """
     A table stored in Redis.
 
-    Enables storage and retrieval of records in Redis. Records must be
-    dict-like, with string keys. Each record must have a primary key which
-    uniquely identifies it within the table. Only attributes for which a codec
-    is specified are stored.
+    Enables storage and retrieval of records in Redis. Each record must have a
+    primary key which uniquely identifies it within the table. Only attributes
+    for which a codec is specified are stored.
 
     Each record is also associated with one or more index scores, one for each
     of the given index names. Defining score functions allow queries for
@@ -95,9 +100,11 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     def __init__(
             self, conn: redis.Redis, *, table_name: str,
-            record_scorer: index.RecordScorer[PrimaryKey],
+            record_scorer: index.RecordScorer[Record, PrimaryKey],
             primary_key_codec: codec.Codec[PrimaryKey],
-            attribute_codecs: AttributeCodecs) -> None:
+            attribute_codecs: AttributeCodecs,
+            attribute_extractor: ca.Callable[[Record], t.Any] = op.getitem,
+            record_factory: ca.Callable[[dict], Record] = _identity) -> None:
         """
         :param conn: An async Redis connection. The connection will not be
             closed and needs to be cleaned up from the outside.
@@ -115,6 +122,11 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
             Must map attribute names (strings) to :py:class:`Codec` instances
             that are able to en-/decode the corresponding values. Only
             attributes present here are stored.
+        :param attribute_extractor: A function extracting an attribute from a
+            record by name. The default works when records are dicts.
+        :param record_factory: A function that takes a dictionary mapping
+            attribute names to values and returns a Record. The default works
+            when records are dicts.
         :raise ValueError: If ``attribute_codecs`` is invalid.
         """
         if any(not isinstance(attribute_name, str)
@@ -124,7 +136,8 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
         self._table_name = table_name
         self._record_scorer = record_scorer
         self._primary_key_codec = primary_key_codec
-        self._row_codec = RowCodec(attribute_codecs)
+        self._row_codec = RowCodec(
+            attribute_codecs, attribute_extractor, record_factory)
         self._rwlock = aiorwlock.RWLock()
         self._scratch_space = ScratchSpace()
         self._scratch_condition = asyncio.Condition(self._rwlock.writer_lock)
@@ -140,7 +153,7 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
         await self._conn.delete(f'{self._table_name}:s')
 
     @t.override
-    async def put_record(self, record: tp.Record) -> None:
+    async def put_record(self, record: Record) -> None:
         """
         Store a record.
 
@@ -264,7 +277,8 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def get_records(
-            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         async with self._rwlock.reader_lock:
             async for _, decoded_record in self._get_records_locked(
                     records_spec):
@@ -301,7 +315,8 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def delete_records(
-            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
                 self._scratch_space.is_clear)
@@ -316,7 +331,7 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
             yield decoded_record
 
     @t.override
-    async def scratch_put_record(self, record: tp.Record) -> None:
+    async def scratch_put_record(self, record: Record) -> None:
         """
         Add a record to scratch space.
 
@@ -346,7 +361,8 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
     @t.override
     async def scratch_discard_records(
-            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         """
         Mark a set of records to be deleted in scratch space.
 
@@ -461,7 +477,7 @@ class AttributeIdMap:
         return self._data[attribute_id]
 
 
-class RowCodec:
+class RowCodec[Record]:
     """
     Codec for a complete set of attributes.
 
@@ -473,11 +489,17 @@ class RowCodec:
 
     def __init__(
             self, attribute_codecs: AttributeCodecs,
+            attribute_extractor: ca.Callable[[Record], t.Any],
+            record_factory: ca.Callable[[dict], Record],
             num_bytes_attribute_length: int = 2,
             num_bytes_generation: int = 4) -> None:
         """
         :param attribute_codecs: A dictionary mapping attribute names to
             codecs. Only record attributes contained here will be encoded.
+        :param attribute_extractor: A function extracting an attribute from a
+            record by name.
+        :param record_factory: A function that takes a dictionary mapping
+            attribute names to values and returns a Record.
         :param num_bytes_attribute_length: The number of bytes with which the
             length of each attribute is encoded. This value sets the limit for
             the maximum allowable encoded attribute size (to 1 less than the
@@ -486,12 +508,14 @@ class RowCodec:
             record's generation. This limits the maximum number of generations
         """
         self._attribute_codecs = AttributeIdMap(attribute_codecs)
+        self._attribute_extractor = attribute_extractor
+        self._record_factory = record_factory
         self.num_bytes_attribute_length = num_bytes_attribute_length
         self.max_attribute_length = 2**(num_bytes_attribute_length * 8) - 1
         self.num_bytes_generation = num_bytes_generation
         self.max_generation = 2**(num_bytes_generation * 8) - 1
 
-    def encode(self, record: tp.Record, generation: int) -> bytes:
+    def encode(self, record: Record, generation: int) -> bytes:
         """
         Encode a record.
 
@@ -521,7 +545,7 @@ class RowCodec:
 
     def _encode_attribute(self, record, attribute_name, codec):
         try:
-            attribute = record[attribute_name]
+            attribute = self._attribute_extractor(record, attribute_name)
         except KeyError as e:
             raise ValueError(f'Attribute missing from {record}.') from e
         try:
@@ -539,7 +563,7 @@ class RowCodec:
                 f'Encoding of {attribute_name} is too long.')
         return encoded_attribute
 
-    def decode(self, encoded_record: bytes) -> tuple[tp.Record, int]:
+    def decode(self, encoded_record: bytes) -> tuple[Record, int]:
         """
         Decode an encoded record.
 
@@ -554,7 +578,7 @@ class RowCodec:
         """
         if not isinstance(encoded_record, bytes):
             raise ValueError('Encoded record must be bytes.')
-        decoded_record = {}
+        record_dict = {}
         reader = BytesReader(encoded_record)
         try:
             generation = int.from_bytes(reader.read(self.num_bytes_generation))
@@ -563,16 +587,16 @@ class RowCodec:
         while reader.bytes_remaining:
             attribute_name, decoded_attribute = self._decode_next_attribute(
                 reader)
-            if attribute_name in decoded_record:
+            if attribute_name in record_dict:
                 raise RedisCodingError(
                     f'{attribute_name} contained twice in {encoded_record}.')
-            decoded_record[attribute_name] = decoded_attribute
+            record_dict[attribute_name] = decoded_attribute
         needed_attributes = self._attribute_codecs.attribute_names
-        present_attributes = frozenset(decoded_record)
+        present_attributes = frozenset(record_dict)
         if (missing := needed_attributes - present_attributes):
             raise RedisCodingError(
                 f'Attributes {missing} missing in {encoded_record}.')
-        return decoded_record, generation
+        return self._record_factory(record_dict), generation
 
     def _decode_next_attribute(self, reader):
         try:

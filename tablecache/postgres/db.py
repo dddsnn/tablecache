@@ -21,10 +21,12 @@ import typing as t
 import asyncpg
 
 import tablecache.db as db
-import tablecache.types as tp
 
 
-class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
+type RecordParser = ca.Callable[[asyncpg.Record], t.Any]
+
+
+class PostgresAccess(db.DbAccess[asyncpg.Record, db.QueryArgsDbRecordsSpec]):
     """
     Postgres access.
 
@@ -37,7 +39,7 @@ class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
 
     def __init__(
             self,
-            record_parser: t.Optional[ca.Callable[[tp.Record], t.Any]] = None,
+            record_parser: t.Optional[RecordParser] = None,
             **pool_kwargs: t.Any) -> None:
         """
         :param record_parser: An optional function that is applied to each
@@ -68,7 +70,8 @@ class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
 
     @t.override
     async def get_records(
-            self, records_spec: db.QueryArgsDbRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: db.QueryArgsDbRecordsSpec
+    ) -> ca.AsyncIterator[asyncpg.Record]:
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(
                     records_spec.query, *records_spec.args):

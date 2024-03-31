@@ -38,6 +38,7 @@ merged, which should be implemented to be very fast.
 """
 
 import abc
+import collections.abc as ca
 import dataclasses as dc
 import itertools as it
 import math
@@ -99,7 +100,7 @@ class Interval:
 
 
 @dc.dataclass(frozen=True)
-class StorageRecordsSpec:
+class StorageRecordsSpec[Record]:
     """
     A specification of records in storage.
 
@@ -127,10 +128,10 @@ class StorageRecordsSpec:
 
     index_name: str
     score_intervals: list[Interval]
-    recheck_predicate: tp.RecheckPredicate = always_use_record
+    recheck_predicate: tp.RecheckPredicate[Record] = always_use_record
 
 
-class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
+class StorageTable[Record](abc.ABC):
     """
     Fast storage table.
 
@@ -159,7 +160,7 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def put_record(self, record: tp.Record) -> None:
+    async def put_record(self, record: Record) -> None:
         """
         Store a record.
 
@@ -172,7 +173,8 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def get_records(
-            self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         """
         Get multiple records.
 
@@ -192,7 +194,8 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def delete_records(
-            self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         """
         Delete multiple records.
 
@@ -209,7 +212,7 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    async def scratch_put_record(self, record: tp.Record) -> None:
+    async def scratch_put_record(self, record: Record) -> None:
         """
         Add a record to scratch space.
 
@@ -222,7 +225,8 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
     @abc.abstractmethod
     async def scratch_discard_records(
-            self, records_spec: StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         """
         Mark a set of records to be deleted in scratch space.
 

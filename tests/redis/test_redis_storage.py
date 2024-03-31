@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import dataclasses as dc
 import functools as ft
 import operator as op
 import unittest.mock as um
@@ -1050,6 +1051,59 @@ class TestRedisTable:
                 has_entries(pk=1), has_entries(pk=3, s='s3'),
                 has_entries(pk=5), has_entries(pk=6)))
 
+    async def test_works_with_non_dict_records(self, conn):
+        class AttributeRecordRecordScorer:
+            @property
+            def index_names(self):
+                return frozenset(['primary_key'])
+
+            def score(self, index_name, record):
+                return hash((record.pk1, record.pk2))
+
+            def primary_key(self, record):
+                return (record.pk1, record.pk2)
+
+        @dc.dataclass
+        class Record:
+            pk1: int
+            pk2: str
+            s: str
+
+        class PkTupleCodec(tcr.Codec):
+            def __init__(self):
+                self._pk1_codec = tcr.SignedInt64Codec()
+                self._pk2_codec = tcr.StringCodec()
+
+            def encode(self, pk_tuple):
+                pk1, pk2 = pk_tuple
+                return (self._pk1_codec.encode(pk1) +
+                        self._pk2_codec.encode(pk2))
+
+            def decode(self, bs):
+                pk1 = self._pk1_codec.decode(bs[:8])
+                pk2 = self._pk2_codec.decode(bs[8:])
+                return (pk1, pk2)
+
+        attribute_codecs = {
+            'pk1': tcr.IntAsStringCodec(), 'pk2': tcr.StringCodec(),
+            's': tcr.StringCodec()}
+        table = tcr.RedisTable(
+            conn, table_name='table',
+            record_scorer=AttributeRecordRecordScorer(),
+            primary_key_codec=PkTupleCodec(),
+            attribute_codecs=attribute_codecs,
+            attribute_extractor=getattr,
+            record_factory=lambda d: Record(**d))
+        await table.put_record(Record(1, 'x', 's1'))
+        await table.put_record(Record(2, 'y', 's2'))
+        assert_that(
+            await collect_async_iter(
+                table.get_records(tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.everything()]))),
+            contains_inanyorder(
+                has_properties(pk1=1, pk2='x', s='s1'),
+                has_properties(pk1=2, pk2='y', s='s2')))
+
 
 class TestAttributeIdMap:
     def test_on_empty(self):
@@ -1103,6 +1157,8 @@ class TestRowCodec:
             kwargs.setdefault(
                 'attribute_codecs',
                 {'i': tcr.IntAsStringCodec(), 's': tcr.StringCodec()})
+            kwargs.setdefault('attribute_extractor', op.getitem)
+            kwargs.setdefault('record_factory', lambda x: x)
             return storage.RowCodec(**kwargs)
 
         return factory
@@ -1252,6 +1308,20 @@ class TestRowCodec:
         false_encoded = encoded[:after_s2_id + 1]
         with pytest.raises(tcr.RedisCodingError):
             codec.decode(false_encoded)
+
+    def test_encode_decode_works_with_non_dict_records(self, make_codec):
+        @dc.dataclass
+        class Record:
+            i: int
+            s: str
+        codec = make_codec(
+            attribute_extractor=lambda r, n: r.i + 1 if n == 'i' else r.s,
+            record_factory=lambda d: Record(**d))
+        encoded = bytes(codec.encode(Record(i=1, s='s1'), 3))
+        decoded, generation = codec.decode(encoded)
+        assert_that(
+            decoded, all_of(instance_of(Record), has_properties(i=2, s='s1')))
+        assert generation == 3
 
 
 class TestBytesReader:

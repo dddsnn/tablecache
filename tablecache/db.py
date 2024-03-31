@@ -22,9 +22,8 @@ very simple interface, able to get records based on a
 """
 
 import abc
+import collections.abc as ca
 import dataclasses as dc
-
-import tablecache.types as tp
 
 
 @dc.dataclass(frozen=True)
@@ -39,7 +38,7 @@ class QueryArgsDbRecordsSpec(DbRecordsSpec):
     args: tuple
 
 
-class DbAccess[RecordsSpec](abc.ABC):
+class DbAccess[Record, RecordsSpec](abc.ABC):
     """
     A DB access abstraction.
 
@@ -47,7 +46,8 @@ class DbAccess[RecordsSpec](abc.ABC):
     is up to the concrete implementation.
     """
     @abc.abstractmethod
-    async def get_records(self, records_spec: RecordsSpec) -> tp.AsyncRecords:
+    async def get_records(
+            self, records_spec: RecordsSpec) -> ca.AsyncIterable[Record]:
         """
         Asynchronously iterate over a subset of records.
 
@@ -58,7 +58,7 @@ class DbAccess[RecordsSpec](abc.ABC):
         """
         raise NotImplementedError
 
-    async def get_record(self, records_spec: RecordsSpec) -> tp.Record:
+    async def get_record(self, records_spec: RecordsSpec) -> Record:
         """
         Fetch a single record.
 

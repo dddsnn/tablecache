@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import dataclasses as dc
 import operator as op
 
 from hamcrest import *
@@ -943,3 +944,33 @@ class TestLocalTable:
             contains_inanyorder(
                 has_entries(pk1=0, pk2='1', s='e'),
                 has_entries(pk1=0, pk2='4', s='f')))
+
+    async def test_works_with_non_dict_records(self):
+        class AttributeRecordRecordScorer:
+            @property
+            def index_names(self):
+                return frozenset(['primary_key'])
+
+            def score(self, index_name, record):
+                return hash((record.pk1, record.pk2))
+
+            def primary_key(self, record):
+                return (record.pk1, record.pk2)
+
+        @dc.dataclass
+        class Record:
+            pk1: int
+            pk2: str
+            s: str
+
+        table = tcl.LocalStorageTable(
+            record_scorer=AttributeRecordRecordScorer())
+        await table.put_record(Record(1, 'x', 's1'))
+        await table.put_record(Record(2, 'y', 's2'))
+        assert_that(
+            await collect_async_iter(
+                table.get_records(tc.StorageRecordsSpec(
+                    'primary_key', [tc.Interval.everything()]))),
+            contains_inanyorder(
+                has_properties(pk1=1, pk2='x', s='s1'),
+                has_properties(pk1=2, pk2='y', s='s2')))

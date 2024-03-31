@@ -19,6 +19,7 @@ import asyncio
 import collections.abc as ca
 import itertools as it
 import numbers
+import operator as op
 import queue
 import unittest.mock as um
 import threading
@@ -44,7 +45,8 @@ class SpyIndexes(tc.PrimaryKeyIndexes):
                     self.all_primary_keys == other.all_primary_keys)
 
     def __init__(self):
-        super().__init__('pk', 'query_all_pks', 'query_some_pks')
+        super().__init__(
+            op.itemgetter('pk'), 'query_all_pks', 'query_some_pks')
         self.prepare_adjustment_mock = um.Mock(return_values=[])
         self.commit_adjustment_mock = um.Mock()
         self.adjustments = []
@@ -63,8 +65,8 @@ class SpyIndexes(tc.PrimaryKeyIndexes):
         return result
 
 
-class MultiIndexes(tc.Indexes[int]):
-    class IndexSpec(tc.Indexes[int].IndexSpec):
+class MultiIndexes(tc.Indexes[dict, int]):
+    class IndexSpec(tc.Indexes[dict, int].IndexSpec):
         def __init__(
                 self, index_name, *primary_keys, all_primary_keys=False,
                 min=None, max=None):
@@ -531,7 +533,8 @@ class TestCachedTable:
             self, make_tables, db_access):
         class RecheckOnlyIndexes(tc.PrimaryKeyIndexes):
             def __init__(self):
-                super().__init__('pk', 'query_all_pks', 'query_some_pks')
+                super().__init__(
+                    op.itemgetter('pk'), 'query_all_pks', 'query_some_pks')
 
             def score(self, index_name, record):
                 return 0

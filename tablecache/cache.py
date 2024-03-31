@@ -24,6 +24,7 @@ together by an :py:class:`.Indexes` instance.
 """
 
 import asyncio
+import collections.abc as ca
 import logging
 import typing as t
 
@@ -35,7 +36,7 @@ import tablecache.types as tp
 _logger = logging.getLogger(__name__)
 
 
-class CachedTable[PrimaryKey: tp.PrimaryKey]:
+class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
     """
     A cached table.
 
@@ -69,8 +70,9 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     """
 
     def __init__(
-            self, indexes: index.Indexes[PrimaryKey], db_access: db.DbAccess,
-            storage_table: storage.StorageTable) -> None:
+        self, indexes: index.Indexes[Record, PrimaryKey],
+            db_access: db.DbAccess, storage_table: storage.StorageTable[Record]
+    ) -> None:
         """
         :param indexes: An :py:class:`Indexes` instance that is used to
             translate query arguments into ways of loading actual records, as
@@ -216,8 +218,7 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             _logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
 
-    async def get_first_record(
-            self, *args: t.Any, **kwargs: t.Any) -> tp.Record:
+    async def get_first_record(self, *args: t.Any, **kwargs: t.Any) -> Record:
         """
         Get a single record.
 
@@ -238,7 +239,7 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             await records.aclose()
 
     async def get_records(
-            self, *args: t.Any, **kwargs: t.Any) -> tp.AsyncRecords:
+            self, *args: t.Any, **kwargs: t.Any) -> ca.AsyncIterable[Record]:
         """
         Asynchronously iterate over a set of records.
 
@@ -297,8 +298,9 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         return True
 
     def invalidate_records(
-            self, old_index_specs: list[index.Indexes[PrimaryKey].IndexSpec],
-            new_index_specs: list[index.Indexes[PrimaryKey].IndexSpec]
+            self,
+            old_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec],
+            new_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec]
     ) -> None:
         """
         Mark records in storage as invalid.
@@ -429,7 +431,7 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
             f'records across {len(old_and_new_specs)} index spec pairs.')
 
 
-class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
+class InvalidRecordRepository[Record, PrimaryKey: tp.PrimaryKey]:
     """
     A repository of invalid records.
 
@@ -437,7 +439,7 @@ class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
     invalid, along with index specs to do the eventual refresh with.
     """
 
-    def __init__(self, indexes: index.Indexes[PrimaryKey]) -> None:
+    def __init__(self, indexes: index.Indexes[Record, PrimaryKey]) -> None:
         self._indexes = indexes
         self.clear()
 
@@ -447,9 +449,9 @@ class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
     def flag_invalid(
         self,
         old_index_specs:
-            t.Mapping[str, index.Indexes[PrimaryKey].IndexSpec],
+            t.Mapping[str, index.Indexes[Record, PrimaryKey].IndexSpec],
         new_index_specs:
-            t.Mapping[str, index.Indexes[PrimaryKey].IndexSpec],
+            t.Mapping[str, index.Indexes[Record, PrimaryKey].IndexSpec],
         old_index_for_refresh: str, new_index_for_refresh: str
     ) -> None:
         """
@@ -498,8 +500,8 @@ class InvalidRecordRepository[PrimaryKey: tp.PrimaryKey]:
                 records_spec.score_intervals)
 
     def specs_for_refresh(self) -> list[tuple[
-            index.Indexes[PrimaryKey].IndexSpec,
-            index.Indexes[PrimaryKey].IndexSpec]]:
+            index.Indexes[Record, PrimaryKey].IndexSpec,
+            index.Indexes[Record, PrimaryKey].IndexSpec]]:
         """
         Get index specs to do a refresh with.
 

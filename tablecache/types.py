@@ -17,10 +17,7 @@
 
 import collections.abc as ca
 import numbers
-import typing as t
 
 type PrimaryKey = ca.Hashable
 type Score = numbers.Real
-type Record = ca.Mapping[str, t.Any]
-type AsyncRecords = ca.AsyncIterator[Record]
-type RecheckPredicate = ca.Callable[[Record], bool]
+type RecheckPredicate[Record] = ca.Callable[[Record], bool]

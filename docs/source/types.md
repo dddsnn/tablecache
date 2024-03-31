@@ -16,21 +16,7 @@ type: numbers.Real
 Base type of possible scores.
 ```
 
-```{py:data} Record
----
-type: collections.abc.Mapping[str, t.Any]
----
-Base record type.
-```
-
-```{py:data} AsyncRecords
----
-type: collections.abc.AsyncIterator[Record]
----
-Asynchronous iterator over Records.
-```
-
-```{py:data} RecheckPredicate
+```{py:data} RecheckPredicate[Record]
 ---
 type: collections.abc.Callable[[Record], bool]
 ---

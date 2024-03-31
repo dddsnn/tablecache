@@ -15,6 +15,8 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
+import operator as op
+
 from hamcrest import *
 import pytest
 
@@ -25,7 +27,7 @@ from tests.helpers import is_interval_containing
 class TestAllIndexes:
     @pytest.fixture
     def indexes(self):
-        return tc.AllIndexes(('pk1', 'pk2'), 'query_all')
+        return tc.AllIndexes(op.itemgetter('pk1', 'pk2'), 'query_all')
 
     def test_index_names(self, indexes):
         assert indexes.index_names == frozenset(['all'])
@@ -65,7 +67,8 @@ class TestAllIndexes:
 class TestPrimaryKeyIndexes:
     @pytest.fixture
     def indexes(self):
-        return tc.PrimaryKeyIndexes('pk', 'query_all', 'query_some')
+        return tc.PrimaryKeyIndexes(
+            op.itemgetter('pk'), 'query_all', 'query_some')
 
     def test_index_names(self, indexes):
         assert indexes.index_names == frozenset(['primary_key'])
@@ -253,7 +256,7 @@ class TestPrimaryKeyIndexes:
 class TestPrimaryKeyRangeIndexes:
     @pytest.fixture
     def indexes(self):
-        return tc.PrimaryKeyRangeIndexes('pk', 'query_range')
+        return tc.PrimaryKeyRangeIndexes(op.itemgetter('pk'), 'query_range')
 
     def test_index_names(self, indexes):
         assert indexes.index_names == frozenset(['primary_key'])

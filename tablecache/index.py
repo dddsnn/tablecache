@@ -27,9 +27,9 @@ cached at the moment, and maintains its constituent indexes.
 """
 
 import abc
+import collections.abc as ca
 import math
 import numbers
-import operator as op
 import typing as t
 
 import tablecache.db as db
@@ -43,7 +43,7 @@ class UnsupportedIndexOperation(Exception):
     """
 
 
-class Adjustment:
+class Adjustment[Record]:
     """
     A specification of an adjustment to be made to the cache.
 
@@ -62,7 +62,7 @@ class Adjustment:
     """
 
     def __init__(
-        self, expire_spec: t.Optional[storage.StorageRecordsSpec],
+        self, expire_spec: t.Optional[storage.StorageRecordsSpec[Record]],
             load_spec: t.Optional[db.DbRecordsSpec]) -> None:
         """
         :param expire_spec: Specification of records that should be expired.
@@ -73,7 +73,7 @@ class Adjustment:
         self.expire_spec = expire_spec
         self.load_spec = load_spec
 
-    def observe_expired(self, record):
+    def observe_expired(self, record: Record) -> None:
         """
         Observe a record being expired.
 
@@ -85,7 +85,7 @@ class Adjustment:
         """
         pass
 
-    def observe_loaded(self, record):
+    def observe_loaded(self, record: Record) -> None:
         """
         Observe a record being loaded.
 
@@ -100,7 +100,7 @@ class Adjustment:
         pass
 
 
-class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
+class RecordScorer[Record, PrimaryKey: tp.PrimaryKey](abc.ABC):
     """
     Score calculator for a set of indexes.
 
@@ -129,7 +129,7 @@ class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def score(self, index_name: str, record: tp.Record) -> tp.Score:
+    def score(self, index_name: str, record: Record) -> tp.Score:
         """
         Calculate a record's score for an index.
 
@@ -140,7 +140,7 @@ class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def primary_key(self, record: tp.Record) -> PrimaryKey:
+    def primary_key(self, record: Record) -> PrimaryKey:
         """
         Extract the primary key from a record.
 
@@ -150,7 +150,8 @@ class RecordScorer[PrimaryKey: tp.PrimaryKey](abc.ABC):
         raise NotImplementedError
 
 
-class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
+class Indexes[Record, PrimaryKey: tp.PrimaryKey](
+        RecordScorer[Record, PrimaryKey]):
     """
     A set of indexes used to access storage and DB tables.
 
@@ -199,7 +200,7 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
 
     @abc.abstractmethod
     def storage_records_spec(
-            self, spec: IndexSpec) -> storage.StorageRecordsSpec:
+            self, spec: IndexSpec) -> storage.StorageRecordsSpec[Record]:
         """
         Specify records in storage based on an index.
 
@@ -219,7 +220,7 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def prepare_adjustment(self, spec: IndexSpec) -> Adjustment:
+    def prepare_adjustment(self, spec: IndexSpec) -> Adjustment[Record]:
         """
         Prepare an adjustment of which records are covered by the indexes.
 
@@ -247,7 +248,7 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def commit_adjustment(self, adjustment: Adjustment) -> None:
+    def commit_adjustment(self, adjustment: Adjustment[Record]) -> None:
         """
         Commits a prepared adjustment.
 
@@ -301,7 +302,7 @@ class Indexes[PrimaryKey: tp.PrimaryKey](RecordScorer[PrimaryKey]):
         raise NotImplementedError
 
 
-class AllIndexes(Indexes[tp.PrimaryKey]):
+class AllIndexes[Record](Indexes[Record, tp.PrimaryKey]):
     """
     Very simple indexes loading everything.
 
@@ -310,11 +311,11 @@ class AllIndexes(Indexes[tp.PrimaryKey]):
     ``recheck_predicate`` as a filter, but it is only used in
     :py:meth:`storage_records_spec`.
     """
-    class IndexSpec(Indexes[tp.PrimaryKey].IndexSpec):
+    class IndexSpec(Indexes[Record, tp.PrimaryKey].IndexSpec):
         def __init__(
                 self, index_name: str,
-                recheck_predicate: tp.RecheckPredicate =
-                storage.StorageRecordsSpec.always_use_record) -> None:
+                recheck_predicate: tp.RecheckPredicate[Record] =
+                storage.StorageRecordsSpec[Record].always_use_record) -> None:
             """
             :param recheck_predicate: A predicate used to filter records.
             """
@@ -327,14 +328,14 @@ class AllIndexes(Indexes[tp.PrimaryKey]):
                 f'{self.recheck_predicate}')
 
     def __init__(
-            self, primary_key_attrs: tuple[str, ...], query_all_string: str
-    ) -> None:
+            self, primary_key_extractor: ca.Callable[[Record], tp.PrimaryKey],
+            query_all_string: str) -> None:
         """
-        :param primary_key_attrs: Tuple of attribute name that make up the
-            primary key.
+        :param primary_key_extractor: A function extracting the primary key
+            from a record.
         :param query_all_string: A string to query all records from the DB.
         """
-        self._primary_key_extractor = op.itemgetter(*primary_key_attrs)
+        self._primary_key_extractor = primary_key_extractor
         self._query_all_string = query_all_string
 
     @t.override
@@ -343,19 +344,16 @@ class AllIndexes(Indexes[tp.PrimaryKey]):
         return frozenset(['all'])
 
     @t.override
-    def score(self, index_name: str, record: tp.Record) -> tp.Score:
+    def score(self, index_name: str, record: Record) -> tp.Score:
         return 0
 
     @t.override
-    def primary_key(self, record: tp.Record) -> t.Any:
-        try:
-            return self._primary_key_extractor(record)
-        except KeyError:
-            raise ValueError('Missing primary key.')
+    def primary_key(self, record: Record) -> tp.PrimaryKey:
+        return self._primary_key_extractor(record)
 
     @t.override
     def storage_records_spec(
-            self, spec: IndexSpec) -> storage.StorageRecordsSpec:
+            self, spec: IndexSpec) -> storage.StorageRecordsSpec[Record]:
         return storage.StorageRecordsSpec(
             'all', [storage.Interval.everything()], spec.recheck_predicate)
 
@@ -365,11 +363,11 @@ class AllIndexes(Indexes[tp.PrimaryKey]):
 
     @t.override
     def prepare_adjustment(
-            self, spec: IndexSpec) -> Adjustment:
+            self, spec: IndexSpec) -> Adjustment[Record]:
         return Adjustment(None, self.db_records_spec(self.IndexSpec('all')))
 
     @t.override
-    def commit_adjustment(self, adjustment: Adjustment) -> None:
+    def commit_adjustment(self, adjustment: Adjustment[Record]) -> None:
         pass
 
     @t.override
@@ -377,7 +375,7 @@ class AllIndexes(Indexes[tp.PrimaryKey]):
         return True
 
 
-class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
+class PrimaryKeyIndexes[Record](Indexes[Record, tp.PrimaryKey]):
     """
     Simple indexes for only selected primary keys.
 
@@ -395,7 +393,7 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
     - When loading select keys, all of them are stored in a set, which can get
       big.
     """
-    class IndexSpec(Indexes[tp.PrimaryKey].IndexSpec):
+    class IndexSpec(Indexes[Record, tp.PrimaryKey].IndexSpec):
         def __init__(
                 self, index_name: str, *primary_keys: tp.PrimaryKey,
                 all_primary_keys: bool = False):
@@ -423,9 +421,9 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
                 'IndexSpec specifying records with primary keys '
                 f'{self.primary_keys}')
 
-    class Adjustment(Adjustment):
+    class Adjustment(Adjustment[Record]):
         def __init__(
-            self, expire_spec: t.Optional[storage.StorageRecordsSpec],
+            self, expire_spec: t.Optional[storage.StorageRecordsSpec[Record]],
             load_spec: t.Optional[db.DbRecordsSpec],
                 primary_keys: set[tp.PrimaryKey], cover_all: bool) -> None:
             super().__init__(expire_spec, load_spec)
@@ -433,10 +431,11 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
             self.cover_all = cover_all
 
     def __init__(
-            self, primary_key_name: str, query_all_string: str,
-            query_some_string: str) -> None:
+        self, primary_key_extractor: ca.Callable[[Record], tp.PrimaryKey],
+            query_all_string: str, query_some_string: str) -> None:
         """
-        :param primary_key_name: Name of the primary key attribute.
+        :param primary_key_extractor: A function extracting the primary key
+            from a record.
         :query_all_string: A query string used to query all records in the DB.
             Will be used without parameters.
         :query_some_string: A query string used to query only a selection of
@@ -444,7 +443,7 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
             tuple of the primary key. Essentially, the query will have to
             include something like ``WHERE primary_key = ANY($1)``.
         """
-        self._primary_key_name = primary_key_name
+        self._primary_key_extractor = primary_key_extractor
         self._query_all_string = query_all_string
         self._query_some_string = query_some_string
         self._covers_all = False
@@ -456,21 +455,18 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
         return frozenset(['primary_key'])
 
     @t.override
-    def score(self, index_name: str, record: tp.Record) -> tp.Score:
+    def score(self, index_name: str, record: Record) -> tp.Score:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
         return hash(self.primary_key(record))
 
     @t.override
-    def primary_key(self, record: tp.Record) -> t.Any:
-        try:
-            return record[self._primary_key_name]
-        except KeyError:
-            raise ValueError('Missing primary key.')
+    def primary_key(self, record: Record) -> tp.PrimaryKey:
+        return self._primary_key_extractor(record)
 
     @t.override
     def storage_records_spec(
-            self, spec: IndexSpec) -> storage.StorageRecordsSpec:
+            self, spec: IndexSpec) -> storage.StorageRecordsSpec[Record]:
         if spec.all_primary_keys:
             intervals = [storage.Interval.everything()]
             recheck_predicate = storage.StorageRecordsSpec.always_use_record
@@ -495,7 +491,7 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
             self._query_some_string, (spec.primary_keys,))
 
     @t.override
-    def prepare_adjustment(self, spec: IndexSpec) -> Adjustment:
+    def prepare_adjustment(self, spec: IndexSpec) -> Adjustment[Record]:
         if spec.all_primary_keys:
             expire_spec = None
         elif not self._covers_all:
@@ -520,7 +516,7 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
             spec.all_primary_keys)
 
     @t.override
-    def commit_adjustment(self, adjustment: Adjustment) -> None:
+    def commit_adjustment(self, adjustment: Adjustment[Record]) -> None:
         self._primary_keys = adjustment.primary_keys
         self._covers_all = adjustment.cover_all
 
@@ -533,7 +529,7 @@ class PrimaryKeyIndexes(Indexes[tp.PrimaryKey]):
         return all(pk in self._primary_keys for pk in spec.primary_keys)
 
 
-class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
+class PrimaryKeyRangeIndexes[Record](Indexes[Record, numbers.Real]):
     """
     Simple indexes for a range of primary keys.
 
@@ -547,7 +543,7 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
     current data and load the entire requested data set, even if they overlap
     substantially.
     """
-    class IndexSpec(Indexes[numbers.Real].IndexSpec):
+    class IndexSpec(Indexes[Record, numbers.Real].IndexSpec):
         def __init__(
                 self, index_name: str, *, ge: numbers.Real, lt: numbers.Real):
             """
@@ -567,24 +563,28 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
                 'IndexSpec specifying records with primary keys in '
                 f'{self.interval}')
 
-    class Adjustment(Adjustment):
+    class Adjustment(Adjustment[Record]):
         def __init__(
-                self, expire_spec: t.Optional[storage.StorageRecordsSpec],
+                self,
+                expire_spec: t.Optional[storage.StorageRecordsSpec[Record]],
                 load_spec: t.Optional[db.DbRecordsSpec],
                 interval: storage.Interval) -> None:
             super().__init__(expire_spec, load_spec)
             self.interval = interval
 
-    def __init__(self, primary_key_name: str, query_range_string: str) -> None:
+    def __init__(
+        self, primary_key_extractor: ca.Callable[[Record], tp.PrimaryKey],
+            query_range_string: str) -> None:
         """
-        :param primary_key_name: Name of the primary key.
+        :param primary_key_extractor: A function extracting the primary key
+            from a record.
         :query_range_string: A query string used to query a range of records in
             the DB. Will be used with 2 parameters, the lower inclusive bound
             and the upper exclusive bound. That means the query will likely
             have to contain something like ``WHERE primary_key >= $1 AND
             primary_key < $2``.
         """
-        self._primary_key_name = primary_key_name
+        self._primary_key_extractor = primary_key_extractor
         self._query_range_string = query_range_string
         self._interval = storage.Interval(0, 0)
 
@@ -594,21 +594,18 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
         return frozenset(['primary_key'])
 
     @t.override
-    def score(self, index_name: str, record: tp.Record) -> tp.Score:
+    def score(self, index_name: str, record: Record) -> tp.Score:
         if index_name != 'primary_key':
             raise ValueError('Only the primary_key index exists.')
         return self.primary_key(record)
 
     @t.override
-    def primary_key(self, record: tp.Record) -> numbers.Real:
-        try:
-            return record[self._primary_key_name]
-        except KeyError:
-            raise ValueError('Missing primary key.')
+    def primary_key(self, record: Record) -> numbers.Real:
+        return self._primary_key_extractor(record)
 
     @t.override
     def storage_records_spec(
-            self, spec: IndexSpec) -> storage.StorageRecordsSpec:
+            self, spec: IndexSpec) -> storage.StorageRecordsSpec[Record]:
         return storage.StorageRecordsSpec('primary_key', [spec.interval])
 
     @t.override
@@ -618,14 +615,14 @@ class PrimaryKeyRangeIndexes(Indexes[numbers.Real]):
             self._query_range_string, (spec.interval.ge, spec.interval.lt))
 
     @t.override
-    def prepare_adjustment(self, spec: IndexSpec) -> Adjustment:
+    def prepare_adjustment(self, spec: IndexSpec) -> Adjustment[Record]:
         expire_spec = storage.StorageRecordsSpec(
             'primary_key', [self._interval])
         load_spec = self.db_records_spec(spec)
         return self.Adjustment(expire_spec, load_spec, spec.interval)
 
     @t.override
-    def commit_adjustment(self, adjustment: Adjustment) -> None:
+    def commit_adjustment(self, adjustment: Adjustment[Record]) -> None:
         self._interval = adjustment.interval
 
     @t.override

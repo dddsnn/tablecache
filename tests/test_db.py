@@ -24,7 +24,7 @@ import tablecache as tc
 class TestDbAccess:
     @pytest.fixture
     def access(self):
-        class MockAccess(tc.DbAccess[set[int]]):
+        class MockAccess(tc.DbAccess[dict, set[int]]):
             def __init__(self):
                 self.records = {}
 

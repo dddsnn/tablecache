@@ -16,6 +16,7 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
+import collections.abc as ca
 import itertools as it
 import operator as op
 import typing as t
@@ -32,8 +33,8 @@ import tablecache.types as tp
 def _always_true(*args, **kwargs): return True
 
 
-class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
-        storage.StorageTable[PrimaryKey]):
+class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
+        storage.StorageTable[Record]):
     """
     A StorageTable that stores its data in native Python data structures.
 
@@ -70,7 +71,7 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     """
 
     def __init__(
-            self, record_scorer: index.RecordScorer[PrimaryKey], *,
+            self, record_scorer: index.RecordScorer[Record, PrimaryKey], *,
             table_name: str = None) -> None:
         """
         :param record_scorer: A RecordScorer used to calculate a record's
@@ -115,7 +116,7 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         self._reset_record_storage()
 
     @t.override
-    async def put_record(self, record: tp.Record) -> None:
+    async def put_record(self, record: Record) -> None:
         """
         Store a record.
 
@@ -153,7 +154,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
 
     @t.override
     async def get_records(
-            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         async with self._scratch_merge_read_lock.reader_lock:
             for record in self._get_records_locked(records_spec):
                 yield record
@@ -193,7 +195,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
 
     @t.override
     async def delete_records(
-            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         """
         Delete multiple records.
 
@@ -237,7 +240,7 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
                 not self._scratch_records_to_delete)
 
     @t.override
-    async def scratch_put_record(self, record: tp.Record) -> None:
+    async def scratch_put_record(self, record: Record) -> None:
         """
         Add a record to scratch space.
 
@@ -254,7 +257,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
 
     @t.override
     async def scratch_discard_records(
-            self, records_spec: storage.StorageRecordsSpec) -> tp.AsyncRecords:
+            self, records_spec: storage.StorageRecordsSpec[Record]
+    ) -> ca.AsyncIterable[Record]:
         """
         Mark a set of records to be deleted in scratch space.
 

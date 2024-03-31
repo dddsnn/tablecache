@@ -39,9 +39,4 @@ from tablecache.index import (
     RecordScorer,
     UnsupportedIndexOperation)
 from tablecache.storage import Interval, StorageRecordsSpec, StorageTable
-from tablecache.types import (
-    AsyncRecords,
-    PrimaryKey,
-    RecheckPredicate,
-    Record,
-    Score)
+from tablecache.types import PrimaryKey, RecheckPredicate, Score
