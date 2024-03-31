@@ -17,7 +17,8 @@
 
 """
 The :py:class:`DbAccess` is the abstract base for access to a database. It's a
-very simple interface, able to get records based on a :py:class:`DbRecordsSpec`.
+very simple interface, able to get records based on a
+:py:class:`DbRecordsSpec`.
 """
 
 import abc
@@ -28,7 +29,7 @@ import tablecache.types as tp
 
 @dc.dataclass(frozen=True)
 class DbRecordsSpec:
-    """A specification of records in the DB."""
+    """Base type for a specification of records in the DB."""
 
 
 @dc.dataclass(frozen=True)
@@ -51,6 +52,9 @@ class DbAccess[RecordsSpec](abc.ABC):
         Asynchronously iterate over a subset of records.
 
         Fetches records matching the given spec and yields them.
+
+        :param records_spec: A specification of records.
+        :return: The requested records, as an asynchronous iterator.
         """
         raise NotImplementedError
 
@@ -58,10 +62,11 @@ class DbAccess[RecordsSpec](abc.ABC):
         """
         Fetch a single record.
 
-        This is just a convenience shortcut around get_records().
+        This is just a convenience shortcut around :py:meth:`get_records`.
 
         If more than one record matches the spec, one of them is returned, but
-        there is no guarantee which. Raises a KeyError if no record matches.
+        there is no guarantee which.
+        :raise KeyError: If no record matches.
         """
         try:
             return await anext(self.get_records(records_spec))

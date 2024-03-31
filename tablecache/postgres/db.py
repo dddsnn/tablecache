@@ -32,20 +32,22 @@ class PostgresAccess(db.DbAccess[db.QueryArgsDbRecordsSpec]):
     contain a query and arguments.
 
     Creates an asyncpg.pool.Pool connection pool on construction which is
-    opened/closed on __aenter__() and __aexit__().
+    opened/closed on :py:meth:`__aenter__()` and :py:meth:`__aexit__()`.
     """
 
     def __init__(
-            self, record_parser: ca.Callable[[tp.Record], t.Any] = None,
+            self,
+            record_parser: t.Optional[ca.Callable[[tp.Record], t.Any]] = None,
             **pool_kwargs: t.Any) -> None:
         """
         :param record_parser: An optional function that is applied to each
             record before it is returned. The default is to return the record
             as-is.
         :param pool_kwargs: Arguments that will be passed to
-            asyncpg.create_pool() to create the connection pool. The pool is
-            only created, not connected. Arguments min_size=0 and max_size=1
-            are added unless otherwise specified.
+            :external:py:func:`asyncpg.create_pool <asyncpg.pool.create_pool>`
+            to create the connection pool. The pool is only created, not
+            connected. Arguments ``min_size=0`` and ``max_size=1`` are added
+            unless otherwise specified.
         """
         self._record_parser = record_parser or self._identity_parser
         pool_kwargs.setdefault('min_size', 0)

@@ -7,4 +7,5 @@
 ```{eval-rst}
 .. autoclass:: tablecache.postgres.PostgresAccess
     :members:
+    :show-inheritance:
 ```

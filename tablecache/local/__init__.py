@@ -18,9 +18,10 @@
 """
 This submodule provides the :py:class:`.LocalStorageTable`, an implementation
 of :py:class:`.StorageTable` that stores its records in local Python data
-structures. It uses the :external:py:mod:`sortedcontainers
-<sortedcontainers.sortedlist>` library for its indexes, which is installed as a
-dependency when the ``local`` extra is selected.
+structures. It uses the
+:external:py:mod:`sortedcontainers <sortedcontainers.sortedlist>`
+library for its indexes, which is installed as a dependency when the ``local``
+extra is selected.
 """
 
 try:

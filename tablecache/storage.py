@@ -52,8 +52,8 @@ class Interval:
     """
     A number interval.
 
-    Represents an interval of the shape [ge,lt[, i.e. with a closed lower and
-    open upper bound.
+    Represents an interval of the shape ``[ge,lt[``, i.e. with a closed lower
+    and open upper bound.
     """
     ge: tp.Score
     lt: tp.Score
@@ -147,8 +147,8 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
     implementation of the merge operation is expected to be relatively fast so
     that updates provide little disruption.
 
-    The behavior of the regular write operations (put_record() and
-    delete_records()) is not necessarily well-defined when they occur
+    The behavior of the regular write operations (:py:meth:`put_record` and
+    :py:meth:`delete_records`) is not necessarily well-defined when they occur
     concurrently (i.e. from separate tasks). When in doubt, locking should be
     used, or the scratch space, which is guaranteed to behave in the presence
     of multiple tasks.
@@ -165,7 +165,8 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
 
         If a record with the same primary key already exists, it is replaced.
 
-        May raise an exception if the record is invalid in some way.
+        :param record: The record to add.
+        :raise: If the record is invalid in some way.
         """
         raise NotImplementedError
 
@@ -175,15 +176,17 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         """
         Get multiple records.
 
-        Asynchronously iterates over all records that match the recods spec.
+        Asynchronously iterates over all records that match the records spec.
         That's all records that have a score in the specified index that is
         contained in one of the specified intervals, and additionally match the
         recheck predicate.
 
-        Records are guaranteed to be unique as long as the record_spec's
+        Records are guaranteed to be unique as long as the record spec's
         intervals don't overlap (as per their contract).
 
-        No particular order is guaranteed.
+        :param records_spec: A specification of the records to get.
+        :return: The requested records as an asynchronous iterator, in no
+            particular order.
         """
         raise NotImplementedError
 
@@ -194,10 +197,14 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         Delete multiple records.
 
         Deletes exactly those records that would have been returned by
-        get_records() when called with the same argument.
+        :py:meth:`get_records` when called with the same argument.
 
         Asynchronously iterates over the records that are deleted as they exist
         in storage. Must be fully consumed to finish deletion.
+
+        :param records_spec: A specification of the records to delete.
+        :return: The records as they are deleted as an asynchronous iterator,
+            in no particular order.
         """
         raise NotImplementedError
 
@@ -207,7 +214,9 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         Add a record to scratch space.
 
         Records in scratch space have no effect on get operations until they
-        are merged via scratch_merge().
+        are merged via :py:meth:`scratch_merge`.
+
+        :param record: The record to add to scratch space.
         """
         raise NotImplementedError
 
@@ -218,14 +227,20 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         Mark a set of records to be deleted in scratch space.
 
         Records marked for deletion have no effect on get operations until they
-        are merged via scratch_merge().
+        are merged via :py:meth:`scratch_merge`.
 
-        This can be undone by adding the record again via scratch_put_record().
+        This can be undone by adding the record again via
+        :py:meth:`scratch_put_record`.
 
         Asynchronously iterates over the records that are marked for discarding
         as they exist in storage. These records will continue to be available
         until scratch space is merged. Must be fully consumed to finish the
         operation.
+
+        :param records_spec: A specification of the records to mark for
+            discarding.
+        :return: The records marked for discarding as an asynchronous iterator,
+            in no particular order.
         """
         raise NotImplementedError
 
@@ -234,9 +249,10 @@ class StorageTable[PrimaryKey: tp.PrimaryKey](abc.ABC):
         """
         Merge scratch space.
 
-        Merge records added to scratch space via scratch_put_record() or marked
-        for deletion via scratch_discard_records() so that these changes are
-        reflected in get_record() and get_records().
+        Merge records added to scratch space via :py:meth:`scratch_put_record`
+        or marked for deletion via :py:meth:`scratch_discard_records` so that
+        these changes are reflected in :py:meth:`get_record` and
+        :py:meth:`get_records`.
 
         This method is not async, as the switchover is meant to be fast.
         However, implementations may start background tasks to handle some

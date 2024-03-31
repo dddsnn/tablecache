@@ -1,5 +1,7 @@
 # Types
 
+These are some globally useful type aliases.
+
 ```{py:data} PrimaryKey
 ---
 type: collections.abc.Hashable

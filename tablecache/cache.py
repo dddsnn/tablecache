@@ -42,39 +42,41 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
     Caches a (sub-)set of records that can only be accessed relatively slowly
     (DB) in a relatively fast storage. Not thread-safe.
 
-    Serves sets of records that can be specified as arguments to an Indexes
-    instance. Transparently serves them from fast storage if available, or from
-    the DB otherwise. The cache has to be loaded with load() to add the desired
-    records to storage. Read access is blocked until this completes. A
-    convenience function that returns a single record is available.
+    Serves sets of records that can be specified as arguments to an
+    :py:class:`Indexes` instance. Transparently serves them from fast storage
+    if available, or from the DB otherwise. The cache has to be loaded with
+    :py:meth:`load` to add the desired records to storage. Read access is
+    blocked until this completes. A convenience method
+    :py:meth:`get_first_record` that returns a single record is available.
 
     Most methods for which records need to be specified can either be called
-    with an IndexSpec appropriate to the cache's Indexes instance, or more
-    conveniently with args and kwargs that will be passed to the Indexes
-    IndexSpec innerclass in order to construct an
-    IndexSpec (the exception to this is invalidate_records(), which needs
-    multiple IndexSpecs).
+    with an :py:class:`IndexSpec <Indexes.IndexSpec>` appropriate to the
+    cache's :py:class:`Indexes` instance, or more conveniently with ``args``
+    and ``kwargs`` that will be passed to the :py:class:`Indexes.IndexSpec`
+    inner class in order to construct one (the exception to this is
+    :py:meth:`invalidate_records`, which needs multiple :py:class:`IndexSpec
+    <Indexes.IndexSpec>` s).
 
     The DB state is not reflected automatically. If one or more records in the
-    DB change (or are deleted or newly added), invalidate_records() needs to be
-    called for the cache to reflect that. This doesn't trigger an immediate
-    refresh, but it guarantees that the updated record is loaded from the DB
-    before it is served the next time.
+    DB change (or are deleted or newly added), :py:meth:`invalidate_records`
+    needs to be called for the cache to reflect that. This doesn't trigger an
+    immediate refresh, but it guarantees that the updated record is loaded from
+    the DB before it is served the next time.
 
     Which subset of the records in DB is cached can be changed by calling
-    adjust(). This operation can load new records and also expire ones no
-    longer needed.
+    :py:meth:`adjust`. This operation can load new records and also expire ones
+    no longer needed.
     """
 
     def __init__(
             self, indexes: index.Indexes[PrimaryKey], db_access: db.DbAccess,
             storage_table: storage.StorageTable) -> None:
         """
-        :param indexes: An Indexes instance that is used to translate query
-            arguments into ways of loading actual records, as well as keeping
-            track of which records are in storage.
-        :param db_access: The DB access.
-        :param storage_table: The storage table.
+        :param indexes: An :py:class:`Indexes` instance that is used to
+            translate query arguments into ways of loading actual records, as
+            well as keeping track of which records are in storage.
+        :param db_access: The DB access used as the underlying source of truth.
+        :param storage_table: The storage table used to cache records.
         """
         self._indexes = indexes
         self._db_access = db_access
@@ -96,19 +98,22 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         """
         Clear storage and load all relevant data from the DB into storage.
 
-        Takes either a single IndexSpec instance or args and kwargs to
-        construct one.
+        Takes either a single :py:class:`IndexSpec <Indexes.IndexSpec>`
+        instance or args and kwargs to construct one.
 
-        This is very similar to adjust(), except that the storage is cleared
-        first, a ValueError is raised if the cache was already loaded, and the
-        whole operation doesn't take place in scratch space.
+        This is very similar to :py:meth:`adjust`, except that the storage is
+        cleared first, a :py:exc:`ValueError` is raised if the cache was
+        already loaded, and the whole operation doesn't take place in scratch
+        space.
 
-        Like adjust(), calls the cache's indexes' prepare_adjustment() to
-        determine which records need to be loaded, and then commit_adjustment()
-        when they have. Additionally, for each loaded record the adjustment's
-        observe_loaded() is called.
+        Like :py:meth:`adjust`, calls the cache's indexes'
+        :py:meth:`prepare_adjustment <Indexes.prepare_adjustment>` to determine
+        which records need to be loaded, and then
+        :py:meth:`commit_adjustment <Indexes.commit_adjustment>` when they
+        have. Additionally, for each loaded record the adjustment's
+        :py:meth:`observe_loaded <Adjustment.observe_loaded>` is called.
 
-        Raises a ValueError if the specified index doesn't support adjusting.
+        :raise ValueError: If the specified index doesn't support adjusting.
         """
         index_spec = self._make_index_spec(*args, **kwargs)
         if self._loaded_event.is_set():
@@ -178,32 +183,31 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         """
         Adjust the set of records in storage.
 
-        Takes either a single IndexSpec instance or args and kwargs to
-        construct one.
+        Takes either a single :py:class:`IndexSpec <Indexes.IndexSpec>`
+        instance or args and kwargs to construct one.
 
         Expires records from storage and loads new ones from the DB in order to
         attain the state specified via the index spec. Uses the storage's
         scratch space to provide a consistent view of the storage without
-        blocking read operations. At all points before this method returns read
-        operations reflect the state before the adjustment, and at all points
-        after they reflect the state after.
+        blocking read operations. At all points before this method returns,
+        read operations reflect the state before the adjustment, and at all
+        points after they reflect the state after.
 
-        Calls the cache's indexes' prepare_adjustment() for specs on the
-        records that should be expired and new ones to load. These are then
+        Calls the cache's indexes'
+        :py:meth:`prepare_adjustment <Indexes.prepare_adjustment>` for specs on
+        the records that should be expired and new ones to load. These are then
         staged in the storage's scratch space. For each record that is expired
-        or loaded, the adjustment's observe_expired() or observe_loaded() is
-        called. Finally, the scratch space is merged, the indexes'
-        commit_adjustment() is called
+        or loaded, the adjustment's
+        :py:meth:`observe_expired <Adjustment.observe_expired>` or
+        :py:meth:`observe_loaded <Adjustment.observe_loaded>` is called.
+        Finally, the scratch space is merged, and the indexes'
+        :py:meth:`prepare_adjustment <Indexes.commit_adjustment>` is called.
 
-        Note that, since observe() is called at the very end, a full list of
-        all added records needs to be stored temporarily. This may consume a
-        significant amount of extra memory with large adjustments.
+        Only one adjustment or refresh (via :py:meth:`refresh_invalid`) can be
+        happening at once. Other ones are locked until previous ones complete.
+        Before the adjustment, any invalid records are refreshed.
 
-        Only one adjustment or refresh (via refresh_invalid()) can be happening
-        at once. Other ones are locked until previous ones complete. Before the
-        adjustment, any invalid records are refreshed.
-
-        Raises a ValueError if the specified index doesn't support adjusting.
+        :raise ValueError: If the specified index doesn't support adjusting.
         """
         index_spec = self._make_index_spec(*args, **kwargs)
         await self.loaded()
@@ -217,13 +221,13 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         """
         Get a single record.
 
-        This is a convenience function around get_records(). It returns the
-        first record get_records() would have with the same arguments.
+        This is a convenience function around :py:meth:`get_records`. It
+        returns the first record it would have with the same arguments.
 
         Note that records don't have a defined order, so this should only be
         used if exactly 0 or 1 record is expected to be returned.
 
-        Raises a KeyError if no such record exists.
+        :raise KeyError: If no such record exists.
         """
         records = self.get_records(*args, **kwargs)
         try:
@@ -238,22 +242,25 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         """
         Asynchronously iterate over a set of records.
 
-        Takes either a single IndexSpec instance or args and kwargs to
-        construct one.
+        Takes either a single :py:class:`IndexSpec <Indexes.IndexSpec>`
+        instance or args and kwargs to construct one.
 
-        Asynchronously iterates over the set of records specified via the index
-        spec. Records are taken from fast storage if the index covers the
-        requested set of records and all of them are valid.
+        Asynchronously iterates over the set of records specified via ``spec``.
+        Records are taken from fast storage if the index covers the requested
+        set of records and all of them are valid.
 
         A record can become invalid if it is marked as such by a call to
-        invalidate_record(), or if any record (no matter which one) is marked
-        as invalid without providing scores for the index that is used to query
-        here. The index may also not support a coverage check at all, in which
-        case a ValueError is raised.
+        :py:meth:`invalidate_record`, or if any record (no matter which one) is
+        marked as invalid without providing scores for the index that is used
+        to query here.
 
         Otherwise, records are taken from the (relatively slower) DB. This
         implies that querying a set of records that isn't covered (even if just
         by a little bit) is expensive.
+
+        :return: The requested records as an asynchronous iterator.
+        :raise ValueError: If the requested index doesn't support
+            :py:meth:`covers <Indexes.covers>`.
         """
         index_spec = self._make_index_spec(*args, **kwargs)
         await self.loaded()
@@ -297,8 +304,8 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         Mark records in storage as invalid.
 
         All records that are currently in storage and match any index spec in
-        old_index_specs or new_index_specs are marked as invalid. This means
-        that before any future request for any of these records, they are
+        ``old_index_specs`` or ``new_index_specs`` are marked as invalid. This
+        means that before any future request for any of these records, they are
         guaranteed to be refreshed (i.e. fetched from the DB) first. This
         guarantee holds for read operations that start after this method
         returns. Reads that have already started (in a different task) may
@@ -307,21 +314,22 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         refreshed as well, though).
 
         During a refresh, all records matching the first index spec in
-        old_index_specs are deleted, then records are loaded again using the
-        first index spec in new_index_specs. It is valid (and perfectly
-        reasonable) if old_index_specs == new_index_specs.
+        ``old_index_specs`` are deleted, then records are loaded again using
+        the first index spec in ``new_index_specs``. It is valid (and perfectly
+        reasonable for many setups) if old_index_specs == new_index_specs.
 
         All index specs in both lists should specify the same set of records,
-        only for different indexes. Having the first element in new_index_specs
-        specify a proper superset of records to that in old_index_specs is
-        possible. Some of the new records will simply be loaded unnecessarily
-        (but records can't exist twice, since they'e unique by their primary
-        key). However, specifying fewer records in new_index_specs will cause
-        records to be lost.
+        only for different indexes. Having the first element in
+        ``new_index_specs`` specify a proper superset of records to that in
+        ``old_index_specs`` is possible. Some of the new records will simply be
+        loaded unnecessarily (but records can't exist twice, since they'e
+        unique by their primary key). However, specifying fewer records in
+        ``new_index_specs`` will cause records to be lost.
 
         Each index must only be specified once in each list. All indexes for
         which an index spec is given must support coverage checks and certainly
-        cover that index spec (i.e. covers() returns True).
+        cover that index spec (i.e. :py:meth:`covers <Indexes.covers>` returns
+        ``True``).
 
         Not all indexes must be represented in the index spec lists, but those
         that aren't are marked as dirty. Any reads against a dirty index will
@@ -333,12 +341,19 @@ class CachedTable[PrimaryKey: tp.PrimaryKey]:
         This method can be used to load new records, as long as they are
         covered by all given indexes.
 
-        Raises a ValueError if the table is not yet loaded, an index is
-        specified more than once, or one of the index specs lists is empty.
+        Note: records that are updated or deleted during a refresh are not
+        observed in an adjustment (i.e. :py:meth:`Adjustment.observe_expired`,
+        :py:meth:`Adjustment.observe_loaded`). If this is needed,
+        :py:meth:`adjust` must be used instead.
 
-        Implementation note: records that are updated or deleted during a
-        refresh are not observed in an adjustment (i.e. observe_expired(),
-        observe_loaded()). If this is needed, adjust() must be used instead.
+        :param old_index_specs: Specifications of the sets of records that
+            should be invalidated, using their old (i.e. now possibly invalid)
+            scores. Must not be empty, and may contain a specification for any
+            available index.
+        :param new_index_specs: Like ``old_index_specs``, but specifying the
+            same records by their new (possibly updated) scores.
+        :raise ValueError: If the table is not yet loaded, an index is
+            specified more than once, or one of the index specs lists is empty.
         """
         if not self._loaded_event.is_set():
             raise ValueError('Table is not yet loaded.')

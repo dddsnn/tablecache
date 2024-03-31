@@ -7,4 +7,5 @@
 ```{eval-rst}
 .. autoclass:: tablecache.local.LocalStorageTable
     :members:
+    :show-inheritance:
 ```

@@ -30,16 +30,28 @@ class Codec[T](abc.ABC):
 
     A codec can encode certain values to bytes, then decode those back to the
     original value.
-
-    If an input value for encoding or decoding is unsuitable in any way, a
-    ValueError is raised.
     """
+
     @abc.abstractmethod
     def encode(self, value: T) -> bytes:
+        """
+        Encode the value to bytes.
+
+        :param value: The value to encode.
+        :return: A representation of the input value as bytes.
+        :raise ValueError: If the input value is invalid and can't be encoded.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     def decode(self, bs: bytes) -> T:
+        """
+        Decode the bytes to a value.
+
+        :param bs: A :py:class:`bytes` object containing an encoded value.
+        :return: The decoded value
+        :raise ValueError: If the input is invalid and can't be decoded.
+        """
         raise NotImplementedError
 
 
@@ -52,6 +64,9 @@ class Nullable[T](Codec[t.Optional[T]]):
     """
 
     def __init__(self, value_codec: Codec[T]):
+        """
+        :param value_codec: Wrapped codec to encode and decode values.
+        """
         self._value_codec = value_codec
 
     @t.override
@@ -77,6 +92,9 @@ class Array[T](Codec[list[T]]):
     """
 
     def __init__(self, value_codec: Codec[T]):
+        """
+        :param value_codec: Wrapped codec to encode and decode array values.
+        """
         self._value_codec = value_codec
         self._length_codec = UnsignedInt16Codec()
 
@@ -121,7 +139,7 @@ class BoolCodec(Codec[bool]):
 
 
 class StringCodec(Codec[str]):
-    """Simple str<->bytest codec (UTF-8)."""
+    """Simple str<->bytes codec (UTF-8)."""
     @t.override
     def encode(self, value: str) -> bytes:
         if not isinstance(value, str):
@@ -236,8 +254,8 @@ class EncodedFloatCodec(EncodedNumberCodec[numbers.Real]):
 
     Infinities and NaNs are handled. Signalling NaNs mostly work, with the
     exception that the most significant bit of the signalling part is always 1
-    (i.e. single-precision NaNs always start with 7fc or ffc, and double
-    precision with 7ff8 or fff8).
+    (i.e. single-precision NaNs always start with ``7fc`` or ``ffc``, and
+    double precision with ``7ff8`` or ``fff8``).
     """
 
 

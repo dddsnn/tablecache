@@ -21,20 +21,24 @@
 
 ```{eval-rst}
 .. autoclass:: tablecache.Indexes
+    :show-inheritance:
     :members:
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.AllIndexes
-    :members:
+    :members: IndexSpec
+    :exclude-members: __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.PrimaryKeyIndexes
-    :members:
+    :members: IndexSpec
+    :exclude-members: __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.PrimaryKeyRangeIndexes
-    :members:
+    :members: IndexSpec
+    :exclude-members: __new__
 ```

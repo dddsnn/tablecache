@@ -64,12 +64,12 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
     multiple records via intervals of scores. Scores must be 64-bit floats (or
     other numbers that can be represented as 64-bit floats).
 
-    Records are stored in a Redis hash with key <table_name>:r, using their
+    Records are stored in a Redis hash with key ``<table_name>:r``, using their
     primary key encoded via the given primary key codec. Another hash
-    <table_name>:s contains scratch records that aren't merged yet. Each index
-    is stored as a Redis sorted set with the key <table_name>:i:<index_name>.
-    These store store, for their respective index score, the primary key for
-    the record.
+    ``<table_name>:s`` contains scratch records that aren't merged yet. Each
+    index is stored as a Redis sorted set with the key
+    ``<table_name>:i:<index_name>``. These store, for their respective index
+    score, the primary key for the record.
 
     Index scores need not be unique, so each index score may map to multiple
     primary keys. All of the corresponding records need to be checked (the
@@ -77,10 +77,11 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
     can be costly if lots of records have equal index scores.
 
     While scratch space is in use (i.e. in between the first call to
-    scratch_{put,discard}_record() and the corresponding scratch_merge()),
-    regular write operations (put_record() and delete_records()) are locked.
-    Merging scratch space starts a background task that cleans up data in
-    Redis. During this operation, further scratch activity is locked.
+    :py:meth:`scratch_put_record` or :py:meth:`scratch_discard_records` and the
+    corresponding :py:meth:`scratch_merge`), regular write operations
+    (:py:meth:`put_record` and :py:meth:`delete_records`) are locked. Merging
+    scratch space starts a background task that cleans up data in Redis. During
+    this operation, further scratch activity is locked.
 
     The implementation of the scratch space requires a generation count to be
     stored with each record, which are used to exclude records in scratch space
@@ -106,13 +107,15 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
             scores for all the indexes that need to be represented in storage.
             The score function must not raise exceptions, or the storage may be
             left in an undefined state.
-        :param primary_key_codec: A Codec suitable to encode return values of
-            the record_scorer's primary_key() method. Encoded primary keys are
-            used as keys in the Redis hash.
+        :param primary_key_codec: A :py:class:`Codec` suitable to encode return
+            values of the ``record_scorer``'s
+            :py:meth:`primary_key <.RecordScorer.primary_key>` method. Encoded
+            primary keys are used as keys in the Redis hash.
         :param attribute_codecs: A dictionary of codecs for record attributes.
-            Must map attribute names (strings) to Codec instances that are able
-            to en-/decode the corresponding values. Only attributes present
-            here are stored.
+            Must map attribute names (strings) to :py:class:`Codec` instances
+            that are able to en-/decode the corresponding values. Only
+            attributes present here are stored.
+        :raise ValueError: If ``attribute_codecs`` is invalid.
         """
         if any(not isinstance(attribute_name, str)
                for attribute_name in attribute_codecs):
@@ -145,10 +148,10 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
         Redis. Other attributes that may be present are silently ignored. If a
         record with the same primary key exists, it is overwritten.
 
-        Raises a ValueError if any attribute is missing from the record.
-
-        Raises a RedisCodingError if any attribute encode to something other
-        than bytes, or any error occurs during encoding.
+        :param record: The record to add.
+        :raise ValueError: If any attribute is missing from the record.
+        :raise RedisCodingError: If any attribute encode to something other
+            than bytes, or any error occurs during encoding.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
@@ -318,6 +321,8 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
         Add a record to scratch space.
 
         Regular write operations are locked until scratch space is merged.
+
+        :param record: The record to add to scratch space.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
@@ -354,6 +359,11 @@ class RedisTable[PrimaryKey: tp.PrimaryKey](storage.StorageTable[PrimaryKey]):
 
         Marking records for deletion requires a bit of internal state, which
         may get large with large numbers of records.
+
+        :param records_spec: A specification of the records to mark for
+            discarding.
+        :return: The records marked for discarding as an asynchronous iterator,
+            in no particular order.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(

@@ -37,11 +37,11 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     """
     A StorageTable that stores its data in native Python data structures.
 
-    This implementation of StorageTable uses SortedKeyLists from the
-    sortedcontainers library to enable fast access to records via their scores.
-    Using native data structures has the advantage that each index can store
-    direct references to all records, so there is no additional redirection
-    necessary when getting records via indexes.
+    This implementation of :py:class:`.StorageTable` uses
+    :external:py:class:`sortedcontainers.SortedKeyList` s to enable fast access
+    to records via their scores. Using native data structures has the advantage
+    that each index can store direct references to all records, so there is no
+    additional redirection necessary when getting records via indexes.
 
     Records inserted into the table are stored as-is, without any explicit
     validation. As long as it's possible to calculate their scores and extract
@@ -54,18 +54,18 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
     that changes its score for any index, that index becomes inconsistent and
     the record may not be returned in a read operation when it should be.
 
-    Regular write operations (put_record(), delete_records()) are blocked while
-    scratch space is active (i.e. between the first call to
-    scratch_put_record() or scratch_discard_records() and the subsequent call
-    to scratch_merge()). They will resume once the merge completes. The merge
-    is done in a background task, which shuffles some data around. While this
-    task runs, scratch operations are blocked.
+    Regular write operations (:py:meth:`put_record`, :py:meth:`delete_records`)
+    are blocked while scratch space is active (i.e. between the first call to
+    :py:meth:`scratch_put_record` or :py:meth:`scratch_discard_records` and the
+    subsequent call to :py:meth:`scratch_merge`). They will resume once the
+    merge completes. The merge is done in a background task, which shuffles
+    some data around. While this task runs, scratch operations are blocked.
 
     Read operations are generally prioritized over write operations.
-    get_records() is never blocked entirely, although it may need to wait
-    momentarily to take away a lock from an ongoing merge operation.
+    :py:meth:`get_records` is never blocked entirely, although it may need to
+    wait momentarily to take away a lock from an ongoing merge operation.
     Asynchronous write operations that can take a while (the scratch merge task
-    in particular) regularly yield back to the event loop when it is safe to
+    in particular) regularly yield back to the event loop when it is safe, to
     allow read operations to jump in.
     """
 
@@ -121,6 +121,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
 
         This operation will block while scratch space is active and resume
         after the scratch merge finishes.
+
+        :param record: The record to add.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
@@ -201,12 +203,16 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         This operation will block while scratch space is active and resume
         after the scratch merge finishes.
 
-        Internally, first finds all records matching the records spec, then
+        Internally, first finds all records matching ``records_spec``, then
         deletes them. If another task adds a record after that first step, this
         record will not be deleted by this operation. Similarly, if another
         task deletes one of the records after that first step, this operation
         will attempt to delete it again. This won't fail, but it will inflate
         the number of records that is returned.
+
+        :param records_spec: A specification of the records to delete.
+        :return: The records as they are deleted as an asynchronous iterator,
+            in no particular order.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
@@ -236,6 +242,8 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         Add a record to scratch space.
 
         This operation will block while a merge background task is running.
+
+        :param record: The record to add to scratch space.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(
@@ -257,6 +265,11 @@ class LocalStorageTable[PrimaryKey: tp.PrimaryKey](
         operation.
 
         This operation will block while a merge background task is running.
+
+        :param records_spec: A specification of the records to mark for
+            discarding.
+        :return: The records marked for discarding as an asynchronous iterator,
+            in no particular order.
         """
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(

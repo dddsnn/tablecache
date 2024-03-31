@@ -22,6 +22,7 @@ them.
 ```{eval-rst}
 .. autoclass:: tablecache.redis.RedisTable
     :members:
+    :show-inheritance:
 ```
 
 ## Codecs
@@ -33,90 +34,90 @@ them.
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.Nullable
-    :members:
+    :exclude-members: __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.Array
-    :members:
+    :exclude-members: __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.BoolCodec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.StringCodec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.IntAsStringCodec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.FloatAsStringCodec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.SignedInt8Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.SignedInt16Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.SignedInt32Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.SignedInt64Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.UnsignedInt8Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.UnsignedInt16Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.UnsignedInt32Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.UnsignedInt64Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.Float32Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.Float64Codec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.UuidCodec
-    :members:
+    :exclude-members: __init__, __new__
 ```
 
 ```{eval-rst}
 .. autoclass:: tablecache.redis.UtcDatetimeCodec
-    :members:
+    :exclude-members: __init__, __new__
 ```
