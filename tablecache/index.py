@@ -55,14 +55,14 @@ class Adjustment[Record]:
     either to None signals that no records should be expired or loaded,
     respectively.
 
-    The observe_expired() and observe_loaded() methods are callbacks that
-    should be called with expired and loaded records as the adjustment is
-    applied. This may be used to maintain information about which records exist
-    for the index.
+    The :py:meth:`observe_expired` and :py:meth:`observe_loaded` methods are
+    callbacks that should be called with expired and loaded records as the
+    adjustment is applied. This may be used to maintain information about which
+    records exist for the index.
     """
 
     def __init__(
-        self, expire_spec: t.Optional[storage.StorageRecordsSpec[Record]],
+            self, expire_spec: t.Optional[storage.StorageRecordsSpec[Record]],
             load_spec: t.Optional[db.DbRecordsSpec]) -> None:
         """
         :param expire_spec: Specification of records that should be expired.
