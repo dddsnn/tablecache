@@ -37,6 +37,9 @@ class QueryArgsDbRecordsSpec(DbRecordsSpec):
     query: str
     args: tuple
 
+    def __repr__(self) -> str:
+        return f'a query with arguments {self.args}'
+
 
 class DbAccess[Record, RecordsSpec](abc.ABC):
     """

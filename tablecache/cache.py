@@ -33,8 +33,6 @@ import tablecache.index as index
 import tablecache.storage as storage
 import tablecache.types as tp
 
-_logger = logging.getLogger(__name__)
-
 
 class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
     """
@@ -71,7 +69,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
 
     def __init__(
         self, indexes: index.Indexes[Record, PrimaryKey],
-            db_access: db.DbAccess, storage_table: storage.StorageTable[Record]
+        db_access: db.DbAccess,
+        storage_table: storage.StorageTable[Record], *, table_name: str = None
     ) -> None:
         """
         :param indexes: An :py:class:`Indexes` instance that is used to
@@ -79,6 +78,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             well as keeping track of which records are in storage.
         :param db_access: The DB access used as the underlying source of truth.
         :param storage_table: The storage table used to cache records.
+        :param table_name: A name for the table. Purely informational, used in
+            logs.
         """
         self._indexes = indexes
         self._db_access = db_access
@@ -86,6 +87,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         self._invalid_record_repo = InvalidRecordRepository(indexes)
         self._loaded_event = asyncio.Event()
         self._scratch_space_lock = asyncio.Lock()
+        name_info = f' ({table_name})' if table_name else ''
+        self._logger = logging.getLogger('tablecache.CachedTable' + name_info)
 
     async def loaded(self):
         """
@@ -121,18 +124,17 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         if self._loaded_event.is_set():
             raise ValueError(
                 'Already loaded. Use adjust() to change cached records.')
-        _logger.info(
-            f'Clearing and loading {self._indexes} of table '
-            f'{self._storage_table}.')
+        self._logger.info(
+            f'Clearing and loading {self._storage_table} with {index_spec}.')
         await self._storage_table.clear()
         num_deleted, num_loaded = await self._adjust_plain(index_spec)
         self._loaded_event.set()
         if num_deleted:
-            _logger.warning(
+            self._logger.warning(
                 f'Deleted {num_deleted} records during loading, after '
                 'clearing the table (this is likely a benign defect in the '
                 'Indexes implementation).')
-        _logger.info(f'Loaded {num_loaded} records.')
+        self._logger.info(f'Loaded {num_loaded} records.')
 
     def _make_index_spec(self, *args, **kwargs):
         if len(args) == 1 and isinstance(args[0], self._indexes.IndexSpec):
@@ -164,6 +166,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             adjustment, put, delete)
         if use_scratch:
             self._storage_table.scratch_merge()
+        self._logger.info(f'Applying {adjustment}.')
         self._indexes.commit_adjustment(adjustment)
         return num_deleted, num_loaded
 
@@ -213,9 +216,10 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         """
         index_spec = self._make_index_spec(*args, **kwargs)
         await self.loaded()
+        self._logger.info(f'Preparing adjustment to {index_spec}.')
         num_deleted, num_loaded = await self._adjust_in_scratch(index_spec)
         if num_deleted or num_loaded:
-            _logger.info(
+            self._logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
 
     async def get_first_record(self, *args: t.Any, **kwargs: t.Any) -> Record:
@@ -411,7 +415,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         # while we were waiting on the lock.
         if not self._invalid_record_repo:
             return
-        _logger.info(
+        self._logger.info(
             f'Refreshing {len(self._invalid_record_repo)} invalid index '
             'specs.')
         num_deleted = num_loaded = 0
@@ -426,7 +430,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
                 num_loaded += 1
         self._storage_table.scratch_merge()
         self._invalid_record_repo.clear()
-        _logger.info(
+        self._logger.info(
             f'Refresh done. Deleted {num_deleted} and loaded {num_loaded} '
             f'records across {len(old_and_new_specs)} index spec pairs.')
 

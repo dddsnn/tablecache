@@ -91,13 +91,8 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         self._reset_record_storage()
 
     def __repr__(self) -> str:
-        num_records = len(self._records)
-        num_scratch_add = len(self._scratch_records)
-        num_scratch_delete = len(self._scratch_records_to_delete)
         return (
-            f'Local table {self._table_name} with {num_records} records '
-            f'(scratch space: {num_scratch_add} to add, {num_scratch_delete} '
-            'to delete)')
+            f'Local table {self._table_name} ({len(self._records)} records)')
 
     def _reset_record_storage(self):
         self._records = {}

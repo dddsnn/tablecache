@@ -59,6 +59,9 @@ class Adjustment[Record]:
     callbacks that should be called with expired and loaded records as the
     adjustment is applied. This may be used to maintain information about which
     records exist for the index.
+
+    Subclasses should define a :py:meth:`__repr__` which describes the changes
+    to be made. This will be used in logging.
     """
 
     def __init__(
@@ -72,6 +75,11 @@ class Adjustment[Record]:
         """
         self.expire_spec = expire_spec
         self.load_spec = load_spec
+
+    def __repr__(self) -> str:
+        return (
+            f'adjustment expiring {self.expire_spec} and loading '
+            f'{self.load_spec}')
 
     def observe_expired(self, record: Record) -> None:
         """
@@ -184,6 +192,8 @@ class Indexes[Record, PrimaryKey: tp.PrimaryKey](
     may define their own :py:class:`IndexSpec`, but these must be inner classes
     and subclasses of :py:class:`IndexSpec` (i.e.
     ``issubclass(MyIndexesImplementation.IndexSpec, Indexes.IndexSpec)``).
+    These should also include a :py:meth:`__repr__` which describes which
+    records are specified. This will be used in logging.
 
     The methods involving index state, :py:meth:`covers` and
     :py:meth:`prepare_adjustment`, may not be supported for every index. E.g.,
@@ -322,10 +332,8 @@ class AllIndexes[Record](Indexes[Record, tp.PrimaryKey]):
             self.index_name = index_name
             self.recheck_predicate = recheck_predicate
 
-        def __repr__(self):
-            return (
-                'IndexSpec specifying all records matching '
-                f'{self.recheck_predicate}')
+        def __repr__(self) -> str:
+            return f'all records matching {self.recheck_predicate}'
 
     def __init__(
             self, primary_key_extractor: ca.Callable[[Record], tp.PrimaryKey],
@@ -414,12 +422,10 @@ class PrimaryKeyIndexes[Record](Indexes[Record, tp.PrimaryKey]):
             self.primary_keys = primary_keys
             self.all_primary_keys = all_primary_keys
 
-        def __repr__(self):
+        def __repr__(self) -> str:
             if self.all_primary_keys:
-                return 'IndexSpec specifying all records'
-            return (
-                'IndexSpec specifying records with primary keys '
-                f'{self.primary_keys}')
+                return 'all records'
+            return f'records with primary keys {self.primary_keys}'
 
     class Adjustment(Adjustment[Record]):
         def __init__(
@@ -429,6 +435,16 @@ class PrimaryKeyIndexes[Record](Indexes[Record, tp.PrimaryKey]):
             super().__init__(expire_spec, load_spec)
             self.primary_keys = primary_keys
             self.cover_all = cover_all
+
+        def __repr__(self) -> str:
+            if self.cover_all:
+                load_info = 'all records'
+            else:
+                load_info = (
+                    f'records with primary keys in {self._primary_keys}')
+            return (
+                f'adjustment expiring {self.expire_spec} and loading '
+                f'{load_info}')
 
     def __init__(
         self, primary_key_extractor: ca.Callable[[Record], tp.PrimaryKey],
@@ -556,12 +572,10 @@ class PrimaryKeyRangeIndexes[Record](Indexes[Record, numbers.Real]):
             super().__init__(index_name)
             self.interval = storage.Interval(ge, lt)
 
-        def __repr__(self):
+        def __repr__(self) -> str:
             if self.all_primary_keys:
-                return 'IndexSpec specifying all records'
-            return (
-                'IndexSpec specifying records with primary keys in '
-                f'{self.interval}')
+                return 'all records'
+            return f'records with primary keys in {self.interval}'
 
     class Adjustment(Adjustment[Record]):
         def __init__(
@@ -571,6 +585,11 @@ class PrimaryKeyRangeIndexes[Record](Indexes[Record, numbers.Real]):
                 interval: storage.Interval) -> None:
             super().__init__(expire_spec, load_spec)
             self.interval = interval
+
+        def __repr__(self) -> str:
+            return (
+                f'adjustment expiring {self.expire_spec} and loading records '
+                f'with primary keys in {self.interval}')
 
     def __init__(
         self, primary_key_extractor: ca.Callable[[Record], tp.PrimaryKey],

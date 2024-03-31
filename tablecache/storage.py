@@ -53,7 +53,7 @@ class Interval:
     """
     A number interval.
 
-    Represents an interval of the shape ``[ge,lt[``, i.e. with a closed lower
+    Represents an interval of the shape ``[ge,lt)``, i.e. with a closed lower
     and open upper bound.
     """
     ge: tp.Score
@@ -63,8 +63,8 @@ class Interval:
         if self.ge > self.lt:
             raise ValueError('Bounds are not in order.')
 
-    def __repr__(self):
-        return f'Interval [{self.ge}, {self.lt}['
+    def __repr__(self) -> str:
+        return f'Interval [{self.ge}, {self.lt})'
 
     @staticmethod
     def everything() -> t.Self:
@@ -116,6 +116,7 @@ class StorageRecordsSpec[Record]:
 
     The score intervals must not overlap.
     """
+
     @staticmethod
     def always_use_record(_):
         return True
@@ -125,6 +126,11 @@ class StorageRecordsSpec[Record]:
                 sorted(self.score_intervals, key=op.attrgetter('ge'))):
             if left.lt > right.ge:
                 raise ValueError('Intervals overlap.')
+
+    def __repr__(self) -> str:
+        return (
+            f'records with {self.index_name} scores in {self.score_intervals} '
+            f'matching {self.recheck_predicate.__name__}')
 
     index_name: str
     score_intervals: list[Interval]
