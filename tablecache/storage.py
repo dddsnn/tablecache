@@ -160,6 +160,11 @@ class StorageTable[Record](abc.ABC):
     used, or the scratch space, which is guaranteed to behave in the presence
     of multiple tasks.
     """
+    @property
+    @abc.abstractmethod
+    def name(self) -> str:
+        """A name for the table."""
+
     @abc.abstractmethod
     async def clear(self) -> None:
         """Delete all data belonging to this table."""

@@ -143,7 +143,12 @@ class RedisTable[Record, PrimaryKey: tp.PrimaryKey](
         self._scratch_condition = asyncio.Condition(self._rwlock.writer_lock)
 
     def __repr__(self) -> str:
-        return f'Redis table {self._table_name}'
+        return f'Redis table {self.name}'
+
+    @t.override
+    @property
+    def name(self) -> str:
+        return self._table_name
 
     @t.override
     async def clear(self) -> None:

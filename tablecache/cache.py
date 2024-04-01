@@ -68,18 +68,15 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
     """
 
     def __init__(
-        self, indexes: index.Indexes[Record, PrimaryKey],
-        db_access: db.DbAccess,
-        storage_table: storage.StorageTable[Record], *, table_name: str = None
-    ) -> None:
+            self, indexes: index.Indexes[Record, PrimaryKey],
+            db_access: db.DbAccess,
+            storage_table: storage.StorageTable[Record]) -> None:
         """
         :param indexes: An :py:class:`Indexes` instance that is used to
             translate query arguments into ways of loading actual records, as
             well as keeping track of which records are in storage.
         :param db_access: The DB access used as the underlying source of truth.
         :param storage_table: The storage table used to cache records.
-        :param table_name: A name for the table. Purely informational, used in
-            logs.
         """
         self._indexes = indexes
         self._db_access = db_access
@@ -87,8 +84,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         self._invalid_record_repo = InvalidRecordRepository(indexes)
         self._loaded_event = asyncio.Event()
         self._scratch_space_lock = asyncio.Lock()
-        name_info = f' ({table_name})' if table_name else ''
-        self._logger = logging.getLogger('tablecache.CachedTable' + name_info)
+        self._logger = logging.getLogger(
+            f'tablecache.CachedTable({storage_table.name})')
 
     async def loaded(self):
         """

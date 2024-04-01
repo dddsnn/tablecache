@@ -245,6 +245,10 @@ class MockStorageTable(tc.StorageTable):
     def _merge_continue(self):
         self._merge_continue_event.set()
 
+    @property
+    def name(self):
+        return 'mock_table'
+
     async def clear(self):
         self.records = {}
         self._indexes = {}

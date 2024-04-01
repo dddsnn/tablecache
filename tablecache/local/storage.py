@@ -91,8 +91,7 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         self._reset_record_storage()
 
     def __repr__(self) -> str:
-        return (
-            f'Local table {self._table_name} ({len(self._records)} records)')
+        return f'Local table {self.name} ({len(self._records)} records)'
 
     def _reset_record_storage(self):
         self._records = {}
@@ -105,6 +104,11 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         return {
             index_name: sortedcontainers.SortedKeyList(key=op.itemgetter(0))
             for index_name in self._record_scorer.index_names}
+
+    @t.override
+    @property
+    def name(self) -> str:
+        return self._table_name
 
     @t.override
     async def clear(self) -> None:
