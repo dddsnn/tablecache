@@ -195,12 +195,16 @@ class Indexes[Record, PrimaryKey: tp.PrimaryKey](
     These should also include a :py:meth:`__repr__` which describes which
     records are specified. This will be used in logging.
 
-    The methods involving index state, :py:meth:`covers` and
-    :py:meth:`prepare_adjustment`, may not be supported for every index. E.g.,
-    an index may only be meant for querying (i.e. support :py:meth:`covers`),
-    but not for adjusting the indexes. In that case, these methods raise an
-    :py:exc:`UnsupportedIndexOperation`. If any method is called with the name
-    of an index that doesn't exist, a :py:exc:`ValueError` is raised.
+    Some methods (:py:meth:`covers`, :py:meth:`prepare_adjustment`, and
+    :py:meth:`storage_records_spec`) may not be supported for every index.
+    E.g., an index may only be meant for querying (i.e. support
+    :py:meth:`covers` and :py:meth:`storage_records_spec`), but not for
+    adjusting the indexes. In that case, these methods raise an
+    :py:exc:`UnsupportedIndexOperation`. However, if :py:meth:`covers` is
+    supported, so is :py:meth:`storage_records_spec`.
+
+    If any method is called with the name of an index that doesn't exist, a
+    :py:exc:`ValueError` is raised.
     """
     class IndexSpec:
         """Specification of a set of records in an index."""
@@ -214,6 +218,8 @@ class Indexes[Record, PrimaryKey: tp.PrimaryKey](
         """
         Specify records in storage based on an index.
 
+        :raise UnsupportedIndexOperation: If the given index doesn't support
+            getting records from storage.
         :return: A specification of the set of records in storage that matches
             ``spec``.
         """
