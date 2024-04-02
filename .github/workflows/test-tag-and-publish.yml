@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install setuptools
+        run: pip install setuptools
       - name: Determine version
         run: echo "$(python setup.py --version)"
   test:
