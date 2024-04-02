@@ -1,4 +1,4 @@
-# Copyright 2023 Marc Lehmann
+# Copyright 2024 Marc Lehmann
 
 # This file is part of tablecache.
 #
@@ -16,27 +16,32 @@
 # along with tablecache. If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
-import contextlib
-import pathlib
-import sys
+import logging
+import operator as op
 
 import asyncpg
-import redis.asyncio as redis
 
 import tablecache as tc
+import tablecache.postgres as tcpg
+import tablecache.local as tcl
 
-sys.path.append(str(pathlib.Path(__file__).parent.parent))
+POSTGRES_DSN = 'postgres://postgres:@localhost:5432/postgres'
+
+# In this basic example, we have 2 Postgres tables that are joined together
+# (see setup_example_db() below). We want to store the result of the join in a
+# fast storage.
 
 
-# In this basic example, we have 2 Postgres tables that are joined together,
-# where the join has a unique key. We want to store the result of the join in a
-# fast storage (Redis).
 async def main():
-    # We define 2 query strings: one that queries for a subset of the join (in
-    # our case the entire result set), and one that filters out rows with
-    # specific primary keys. These query strings are passed into a
-    # PostgresTable to represent our access to the data.
-    query_subset_string = '''
+    # We define 2 query strings: one that returns the entire join, and one that
+    # filters for rows with specific primary keys. We give these query strings
+    # to a PrimaryKeyIndexes instance, which abstracts access to DB and
+    # storage. PrimaryKeyIndexes is a simple implementation of the abstract
+    # Indexes which is likely not useful in practice but good for
+    # demonstration. It allows us to load and query either everything, or
+    # specific primary keys. See the other examples for more useful indexes
+    # implementations.
+    query_all_string = '''
         SELECT
             uc.*, u.name AS user_name, u.nickname AS user_nickname,
             c.name AS city_name
@@ -44,75 +49,93 @@ async def main():
             users u
             JOIN users_cities uc USING (user_id)
             JOIN cities c USING (city_id)'''
-    query_pks_string = f'{query_subset_string} WHERE uc.user_id = ANY ($1)'
-    postgres_pool = asyncpg.create_pool(
-        min_size=0, max_size=1,
-        dsn='postgres://postgres:@localhost:5432/postgres')
-    redis_conn = redis.Redis()
-    db_table = tc.PostgresTable(
-        postgres_pool, query_subset_string, query_pks_string)
-    # We specify a CachedTable which will create a RedisTable that can accept
-    # records of the shape in our Postgres table. We need to give it a
-    # CachedSubset subclass that it uses to query both Postgres and Redis. The
-    # choice of All here loads everything, but doesn't allow meaningful queries
-    # for ranges of values (only queries for individual records by primary
-    # key). See the advanced examples for more options. (N.B. The
-    # with_primary_key classmethod actually returns a subclass with the
-    # primary_key_name class member set).
-    #
-    # Then, in addition to the DB table, we need to specify parameters to
-    # create the RedisTable. These are a name for the table in (used to create
-    # a namespace), the name of the primary key column, as well as a dictionary
-    # of codecs for the attributes. Each key in it must be a column of the
-    # table, and each value must be a codec (basic ones available in
-    # tablecache.codec) which is capable of encoding the corresponding value to
-    # bytes. The special Nullable codec can wrap another codec and enable null
-    # values (by themselves, normal codecs can't store nulls). Note that only
-    # attributes for which a codec has been specified are cached.
-    table = tc.CachedTable(
-        tc.All.with_primary_key('user_id'),
-        db_table,
-        primary_key_name='user_id',
-        attribute_codecs={
-            'user_id': tc.IntAsStringCodec(),
-            'user_name': tc.StringCodec(),
-            'user_nickname': tc.Nullable(tc.StringCodec()),
-            'city_name': tc.StringCodec(), },
-        redis_conn=redis_conn,
-        redis_table_name='users_cities',
-    )
-    async with contextlib.AsyncExitStack() as stack:
-        await stack.enter_async_context(postgres_pool)
-        await setup_example_dbs(redis_conn, postgres_pool)
-        await table.load()
-        # After loading the CachedTable, we can query it, hitting the cache
-        # rather than the DB.
-        print(f'User 1 in Redis: {await table.get_record(1)}')
-        print(f'User 2 in Redis: {await table.get_record(2)}')
+    query_some_string = f'{query_all_string} WHERE uc.user_id = ANY ($1)'
+    indexes = tc.PrimaryKeyIndexes(
+        op.itemgetter('user_id'), query_all_string, query_some_string)
+    # We create a PostgresAccess (an implementation of the abstract DbAccess),
+    # a LocalStorageTable (an implementation of the abstract StorageTable which
+    # stores its data locally in Python data structures). Then we create a
+    # CachedTable with DB access, storage, and the indexes to tie them
+    # together. The table_name argument to LocalStorageTable is optional.
+    db_access = tcpg.PostgresAccess(dsn=POSTGRES_DSN)
+    storage_table = tcl.LocalStorageTable(indexes, table_name='users')
+    table = tc.CachedTable(indexes, db_access, storage_table)
+    async with db_access, asyncpg.create_pool(POSTGRES_DSN) as postgres_pool:
+        await setup_example_db(postgres_pool)
+        # We load data into the cache using the name of an index and arguments
+        # specific to it. The PrimaryKeyIndexes have only the primary_key
+        # index, and here we want to load everything. The arguments we pass
+        # here are actually directly converted into a
+        # PrimaryKeyIndexes.IndexSpec object, which we could also pass
+        # directly. The same holds for some other methods in the CachedTable.
+        await table.load('primary_key', all_primary_keys=True)
+        # Since we've awaited load(), the table is now ready to use and we can
+        # query it, hitting the cache rather than the DB. If we had started the
+        # load in a background task, we could have used CachedTable.loaded() to
+        # wait until it's ready (e.g. in a readiness check). Since we're
+        # already loaded, this will return immediately.
+        await table.loaded()
+        print('Users with primary key 1 and 2:')
+        async for user in table.get_records('primary_key', 1, 2):
+            # We're querying the cache for records with primary keys 1 and 2
+            # (the arguments are again turned into an IndexSpec which we could
+            # have passed directly). Note that these are asyncpg.Record
+            # objects. That's because the DB access returns those, and the
+            # local storage just adds them to its data structures as-is. If we
+            # wanted regular dicts, we could use the record_parser argument to
+            # PostgresAccess.
+            print(user)
+        try:
+            # In addition to the get_records() asynchronous generator, there is
+            # also a get_first_record() convenience method that takes the same
+            # arguments as get_records() would, and simply returns the first
+            # record. If there isn't one, as is the case here, it raises a
+            # KeyError. Since we loaded all records in the beginning, our
+            # PrimaryKeyIndexes know that if this key isn't found in storage,
+            # it's also not in the DB, so this doesn't cause the DB to be hit.
+            print('Trying to find user with primary key 3:')
+            await table.get_first_record('primary_key', 3)
+        except KeyError:
+            print('No user with primary key 3 exists.')
         # When data in the DB changes, the cache will still return the old
-        # record. Once we invalidate it (by primary key), the cache will
-        # refresh that record on the next request.
+        # record. We need to invalidate it using invalidate_records(), which
+        # can get a bit complicated in the general case. But here we can simply
+        # pass an IndexSpec that gets the record we've updated. We need to pass
+        # this twice (each in a list with one element). After we've invalidated
+        # the record, the cache makes sure that the next time we query that
+        # primary key, it is fetched from the DB first.
         await postgres_pool.execute(
-            'UPDATE users SET name=$1 WHERE user_id=$2', 'New Name', 1)
-        print(f'User 1 still with old name: {await table.get_record(1)}')
-        await table.invalidate_record(1)
-        print(f'User 1 with new name: {await table.get_record(1)}')
-        # We can also invalidate primary keys that didn't exist in cache at all
-        # yet. This will cause them to be loaded.
-        await postgres_pool.execute(
-            '''
+            'UPDATE users SET name = $1 WHERE user_id = $2', 'New Name', 1)
+        print('User 1 has changed in the DB, but not yet in cache:')
+        print(await table.get_first_record('primary_key', 1))
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 1)],
+            [indexes.IndexSpec('primary_key', 1)])
+        print('After invalidating, a refresh is triggered to update user 1:')
+        print(await table.get_first_record('primary_key', 1))
+        # We can also invalidate records that were added to the DB after the
+        # cache was loaded, which will cause them to be added to storage. This
+        # works in our case, but there is another way of loading new records
+        # (using adjust()) that may be preferable since it allows us to observe
+        # every new record that was added. See the other examples.
+        await postgres_pool.execute('''
             INSERT INTO users(user_id, name) VALUES(3, 'User 3');
             INSERT INTO users_cities(user_id, city_id)
             SELECT 3, city_id FROM cities LIMIT 1''')
-        await table.invalidate_record(3)
-        print(f'Newly inserted user 3: {await table.get_record(3)}')
-    await redis_conn.close()
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 3)],
+            [indexes.IndexSpec('primary_key', 3)])
+        # Normally, a refresh is triggered only when a read request for invalid
+        # data comes in. But we can also trigger one manually to serve requests
+        # from storage immediately.
+        print('Manually triggering a refresh.')
+        await table.refresh_invalid()
+        print('Newly inserted user 3:')
+        print(await table.get_first_record('primary_key', 3))
 
 
-async def setup_example_dbs(redis_conn, postgres_pool):
-    await redis_conn.flushall()
-    await postgres_pool.execute(
-        '''
+async def setup_example_db(postgres_pool):
+    await postgres_pool.execute('''
         DROP SCHEMA public CASCADE;
         CREATE SCHEMA public;
         CREATE TABLE users (
@@ -141,4 +164,5 @@ async def setup_example_dbs(redis_conn, postgres_pool):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())

@@ -42,3 +42,14 @@ extras/postgres
 extras/local
 extras/redis
 ```
+
+```{toctree}
+---
+maxdepth: 2
+caption: Examples
+---
+examples/basic
+examples/time_range
+examples/segmented_index
+examples/redis_storage
+```
