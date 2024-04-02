@@ -41,6 +41,8 @@ setuptools.setup(
     description='Simple cache for unwieldily joined relations.',
     long_description_content_type='text/markdown', long_description=readme,
     author="Marc Lehmann", author_email="marc.lehmann@gmx.de",
-    url='https://github.com/dddsnn/tablecache', python_requires='>=3.12',
-    install_requires=requirements['base'], extras_require=extras_requirements,
-    license='AGPL-3.0-or-later')
+    project_urls={
+        'Github': 'https://github.com/dddsnn/tablecache',
+        'Documentation': 'https://tablecache.readthedocs.io'},
+    python_requires='>=3.12', install_requires=requirements['base'],
+    extras_require=extras_requirements, license='AGPL-3.0-or-later')
