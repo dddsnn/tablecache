@@ -19,3 +19,8 @@ PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License along
 with tablecache. If not, see <https://www.gnu.org/licenses/>.
+
+## Documentation
+
+For documentation, please see
+[readthedocs](https://tablecache.readthedocs.io/).

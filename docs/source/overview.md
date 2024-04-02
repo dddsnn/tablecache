@@ -34,8 +34,9 @@ only you could easily materialize the join and then index that directly.
 
 `tablecache` can take your big query and put the denormalized results, or a
 subset of them, in faster storage. You can define one or more ways to index
-these records. The classic example is timestamped data, where you want to keep
-the past n days in cache, and be able to quickly get records from a time range.
+these records for fast access to whole ranges of them. The classic example is
+timestamped data, where you want to keep the past few days in cache, and be
+able to quickly get records from a time range.
 
 The contents of the cache can be adjusted, i.e. old ones expired and new ones
 loaded. Any records not cached will be transparently fetched from the DB, so
@@ -78,8 +79,8 @@ and keeping track of invalid records.
 
 Each record must be uniquely identifiable by a primary key. These can be
 anything hashable though and are calculated in the user-supplied implementation
-of {py:meth}`.Indexes.primary_key`, so multicolumn primary keys are possible by
-e.g. returning tuples.
+of {py:meth}`Indexes.primary_key() <.RecordScorer.primary_key>`, so multicolumn
+primary keys are possible by e.g. returning tuples.
 
 Indexing is done by associating each record with one or more scores (one per
 index) and storing them in a sorted data structure that makes it fast
@@ -87,13 +88,12 @@ to access ranges of scores. Sets of records can be accessed quickly if they
 have similar scores, e.g. it's possible to index a timestamp and then get all
 records in a time range. Indexing more than one attribute is also possible by
 interleaving scores, but requires some tweaking. However, only one index can be
-used to get records, multiple ones can't be combined in a single fetch
-operation.
+used per read operation, you cannot combine multiple ones.
 
 Currently, everything `tablecache` does is single-threaded and not thread-safe.
 This implies that each instance of {py:class}`.CachedTable` owns its storage
 exclusively, and multiple instances will each need their own copy of the data.
-A feature where one instance manages the storage, while others access it
+A feature where one instance manages the storage while others access it
 read-only as read replicas is feasible, but not supported.
 
 `tablecache` is designed with `asyncio` in mind. Using traditional blocking IO
@@ -114,6 +114,9 @@ Then you can {py:meth}`.CachedTable.load` your table,
 {py:meth}`.CachedTable.invalidate_records` to inform the cache of changes in
 the underlying data.
 
+See also the {doc}`examples <examples/basic>` for a guide on how to put this all
+together.
+
 ### Indexes
 
 Your {py:class}`.Indexes` implementation is where you define your indexes and
@@ -126,12 +129,12 @@ You need to define
   one of your indexes. Must be a subclass of {py:class}`.Indexes.IndexSpec` and
   an inner class of your {py:class}`.Indexes`. You need to add all the data
   required for a query.
-- {py:attr}`.Indexes.index_names`: A property returning a set of available
-  index names.
-- {py:meth}`.Indexes.score`: A method that calculates the score of a record for
-  a given index.
-- {py:meth}`.Indexes.primary_key`: A method that extracts the primary key
-  from a record.
+- {py:attr}`Indexes.index_names <.RecordScorer.index_names>`: A property
+  returning a set of available index names.
+- {py:meth}`Indexes.score() <.RecordScorer.score>`: A method that calculates
+  the score of a record for a given index.
+- {py:meth}`Indexes.primary_key() <.RecordScorer.primary_key>`: A method that
+  extracts the primary key from a record.
 - {py:meth}`.Indexes.storage_records_spec`: A method that takes an
   {py:class}`IndexSpec <.Indexes.IndexSpec>` and returns a
   {py:class}`.StorageRecordsSpec`, a way to specify a set of records in

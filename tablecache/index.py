@@ -132,7 +132,7 @@ class RecordScorer[Record, PrimaryKey: tp.PrimaryKey](abc.ABC):
         Return names of all indexes.
 
         These are the names of all the indexes for which scores can be
-        calculated. Always contains at least ``primary_key``.
+        calculated. Never empty.
         """
         raise NotImplementedError
 
@@ -312,7 +312,7 @@ class Indexes[Record, PrimaryKey: tp.PrimaryKey](
 
         :param spec: A specification of the set of records that should be
             checked.
-        :raise UnsupportedIndexOperation: if the given index doesn't support
+        :raise UnsupportedIndexOperation: If the given index doesn't support
             checking coverage.
         """
         raise NotImplementedError
