@@ -250,10 +250,10 @@ async def main():
         table.invalidate_records(
             [indexes.IndexSpec('time', '2023-01-07', '2023-01-08')],
             [indexes.IndexSpec('time', '2023-01-07', '2023-01-08')],
-            refresh_automatically=False)
+            force_refresh_on_next_read=False)
         print(
             'Record 4 still with the old data with '
-            'refresh_automatically=False:')
+            'force_refresh_on_next_read=False:')
         await print_records(table, 'time', '2023-01-04', '2023-01-08')
         print('Record 4 updated after manual refresh:')
         await table.refresh_invalid()

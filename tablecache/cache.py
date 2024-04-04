@@ -331,7 +331,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             self,
             old_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec],
             new_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec],
-            *, refresh_automatically: bool = True
+            *, force_refresh_on_next_read: bool = True
     ) -> None:
         """
         Mark records in storage as invalid.
@@ -339,7 +339,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         All records that are currently in storage and match any index spec in
         ``old_index_specs`` or ``new_index_specs`` are marked as invalid. This
         stores the information necessary to do a refresh (i.e. fetch from the
-        DB) of these records. If refresh_automatically is True, any future
+        DB) of these records. If force_refresh_on_next_read is True, any future
         request for any of these records is guaranteed to trigger a refresh
         first. This guarantee holds for read operations that start after this
         method returns. Reads that have already started (in a different task)
@@ -386,11 +386,11 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             available index.
         :param new_index_specs: Like ``old_index_specs``, but specifying the
             same records by their new (possibly updated) scores.
-        :param refresh_automatically: Whether to do an automatic refresh before
-            the next read for any of the invalidated records. The refresh is
-            executed lazily when the read arrives, not immediately. If False,
-            the invalid records will continue to be served from storage. A
-            manual refresh must be performed (using
+        :param force_refresh_on_next_read: Whether to do an automatic refresh
+            before the next read for any of the invalidated records. The
+            refresh is executed lazily when the read arrives, not immediately.
+            If False, the invalid records will continue to be served from
+            storage. A manual refresh must be performed (using
             :py:meth:`refresh_invalid`).
         :raise ValueError: If the table is not yet loaded, an index is
             specified more than once, or one of the index specs lists is empty.
@@ -407,7 +407,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         self._invalid_record_repo.flag_invalid(
             old_specs_by_name, new_specs_by_name, old_index_for_refresh,
             new_index_for_refresh,
-            consider_in_intersects_check=refresh_automatically)
+            consider_in_intersects_check=force_refresh_on_next_read)
 
     def _parse_index_specs_for_invalidation(self, index_specs):
         first_index_name = None

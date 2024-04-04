@@ -1107,7 +1107,7 @@ class TestCachedTable:
         table.invalidate_records(
             [indexes.IndexSpec('x_range', min=12, max=14)],
             [indexes.IndexSpec('x_range', min=102, max=104)],
-            refresh_automatically=False)
+            force_refresh_on_next_read=False)
         assert_that(
             await collect_async_iter(
                 table.get_records('x_range', min=11, max=14)),
@@ -1132,7 +1132,7 @@ class TestCachedTable:
         table.invalidate_records(
             [indexes.IndexSpec('x_range', min=12, max=14)],
             [indexes.IndexSpec('x_range', min=102, max=104)],
-            refresh_automatically=False)
+            force_refresh_on_next_read=False)
         await table.refresh_invalid()
         assert_that(
             await collect_async_iter(
