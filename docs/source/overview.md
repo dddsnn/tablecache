@@ -20,6 +20,8 @@ storage access, so you probably want at least 2 of these.
   structures (i.e. in Python)
 - `redis`: Adds submodule {py:mod}`.redis` which provides a
   {py:class}`.StorageTable` implementation storing records in Redis
+- `prometheus`: Write metrics using
+  [prometheus_client](https://prometheus.github.io/client_python/).
 - `test`: extra dependencies for testing `tablecache`
 - `dev`: extra dependencies for developing `tablecache`
 - `docs`: extra dependencies to build this documentation
@@ -272,4 +274,43 @@ will be lost.
 
 ## Logging
 
-The library logs messages with logger names in the `tablecache` namespace.
+The library logs messages with logger names in the `tablecache` namespace (i.e.
+with logger names matching `tablecache.*`). These inform mostly about a table
+being loaded, adjusted, or refreshed.
+
+## Metrics
+
+If the `prometheus` extra is selected, metrics are written using the
+[prometheus_client](https://prometheus.github.io/client_python/) library. A
+server to make them accessible has to be started outside the library using e.g.
+
+```python
+prometheus_client.start_http_server(your_prometheus_port)
+```
+
+Metric names are in the `tablecache` namespace, i.e. all match `tablecache_*`.
+The {py:class}`.CachedTable` writes the following metrics:
+
+- `tablecache_cached_table_reads_total`: Total number of reads on the table.
+  Labels:
+  - `table_name`
+  - `type`: One of `cache_miss` (read from DB), `cache_hit` (read from
+    storage), or `cache_hit_with_refresh` (read from storage, but a refresh
+    from DB was triggered before)
+- `tablecache_cached_table_refreshes_total`: Total number of refreshes on the
+  table. Labels: `table_name`.
+- `tablecache_cached_table_adjustments_total`: Total number of adjustments on
+  the table. Labels: `table_name`.
+- `tablecache_cached_table_adjustment_expired_total`: Total number of records
+  that were expired during adjustments on the table. Labels: `table_name`.
+- `tablecache_cached_table_adjustment_loaded_total`: Total number of records
+  that were loaded during adjustments on the table. Labels: `table_name`.
+
+The {py:class}`.LocalStorageTable` writes the following metrics:
+
+- `tablecache_local_table_records_total`: The number of records currently in
+  storage. Labels:
+  - `table_name`
+  - `type`: One of `regular` (normal records that are accessible), `scratch`
+    (scratch records that are not merged yet), or `scratch_delete` (records
+    that exist but have been marked for deletion in scratch space).

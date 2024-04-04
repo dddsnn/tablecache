@@ -26,6 +26,7 @@ import aiorwlock
 import sortedcontainers
 
 import tablecache.index as index
+import tablecache.metrics as metrics
 import tablecache.storage as storage
 import tablecache.types as tp
 
@@ -88,6 +89,10 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         self._scratch_condition = asyncio.Condition()
         self._scratch_merge_task = None
         self._scratch_merge_read_lock = aiorwlock.RWLock()
+        self._metric_records = metrics.get_gauge(
+            'tablecache_local_table_records_total',
+            'Number of records currently in the table',
+            ['table_name', 'type'])
         self._reset_record_storage()
 
     def __repr__(self) -> str:
@@ -99,6 +104,17 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         self._indexes = self._make_index_dict()
         self._scratch_indexes = self._make_index_dict()
         self._scratch_records_to_delete = {}
+        self._set_records_metrics()
+
+    def _set_records_metrics(self):
+        self._metric_records.labels(
+            table_name=self.name, type='regular').set(len(self._records))
+        self._metric_records.labels(
+            table_name=self.name, type='scratch').set(
+                len(self._scratch_records))
+        self._metric_records.labels(
+            table_name=self.name, type='scratch_delete').set(
+                len(self._scratch_records_to_delete))
 
     def _make_index_dict(self):
         return {
@@ -127,6 +143,7 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         async with self._scratch_condition:
             await self._scratch_condition.wait_for(self._scratch_is_clear)
             self._put_record_to_dicts(record, self._records, self._indexes)
+        self._set_records_metrics()
 
     def _put_record_to_dicts(self, record, records, indexes):
         primary_key = self._record_scorer.primary_key(record)
@@ -225,6 +242,7 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
                     record, self._records, self._indexes)
                 yield record
                 await asyncio.sleep(0)  # Yield to event loop to remain lively.
+        self._set_records_metrics()
 
     @property
     def _include_scratch_records(self):
@@ -253,6 +271,7 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
             primary_key = self._put_record_to_dicts(
                 record, self._scratch_records, self._scratch_indexes)
             self._scratch_records_to_delete.pop(primary_key, None)
+        self._set_records_metrics()
 
     @t.override
     async def scratch_discard_records(
@@ -294,6 +313,7 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
             primary_key = self._record_scorer.primary_key(record)
             self._scratch_records_to_delete[primary_key] = record
             yield record
+        self._set_records_metrics()
 
     @t.override
     def scratch_merge(self) -> None:
@@ -328,3 +348,4 @@ class LocalStorageTable[Record, PrimaryKey: tp.PrimaryKey](
         self._scratch_merge_task = None
         async with self._scratch_condition:
             self._scratch_condition.notify_all()
+        self._set_records_metrics()

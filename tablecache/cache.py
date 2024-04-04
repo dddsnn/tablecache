@@ -30,6 +30,7 @@ import typing as t
 
 import tablecache.db as db
 import tablecache.index as index
+import tablecache.metrics as metrics
 import tablecache.storage as storage
 import tablecache.types as tp
 
@@ -86,6 +87,26 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         self._scratch_space_lock = asyncio.Lock()
         self._logger = logging.getLogger(
             f'tablecache.CachedTable({storage_table.name})')
+        self._metric_reads = metrics.get_counter(
+            'tablecache_cached_table_reads_total',
+            'Number of read operations on the cached table',
+            ['table_name', 'type'])
+        self._metric_refreshes = metrics.get_counter(
+            'tablecache_cached_table_refreshes_total',
+            'Number of refreshes performed on the cached table',
+            ['table_name']).labels(table_name=storage_table.name)
+        self._metric_adjustments = metrics.get_counter(
+            'tablecache_cached_table_adjustments_total',
+            'Number of adjustments performed on the cached table',
+            ['table_name']).labels(table_name=storage_table.name)
+        self._metric_adjustments_expired = metrics.get_counter(
+            'tablecache_cached_table_adjustment_expired_total',
+            'Number of records expired during adjustments on the cached table',
+            ['table_name']).labels(table_name=storage_table.name)
+        self._metric_adjustments_loaded = metrics.get_counter(
+            'tablecache_cached_table_adjustment_loaded_total',
+            'Number of records loaded during adjustments on the cached table',
+            ['table_name']).labels(table_name=storage_table.name)
 
     async def loaded(self):
         """
@@ -165,6 +186,9 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             self._storage_table.scratch_merge()
         self._logger.info(f'Applying {adjustment}.')
         self._indexes.commit_adjustment(adjustment)
+        self._metric_adjustments_expired.inc(num_deleted)
+        self._metric_adjustments_loaded.inc(num_loaded)
+        self._metric_adjustments.inc()
         return num_deleted, num_loaded
 
     async def _apply_adjustment(self, adjustment, put, delete):
@@ -273,12 +297,15 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
                 'Indexes don\'t support coverage check on '
                 f'{index_spec.index_name}.') from e
         if get_from_storage:
-            records = await self._check_and_get_records_from_storage(
-                index_spec)
+            records, read_type = (
+                await self._check_and_get_records_from_storage(index_spec))
         else:
+            read_type = 'cache_miss'
             db_records_spec = self._indexes.db_records_spec(
                 index_spec)
             records = self._db_access.get_records(db_records_spec)
+        self._metric_reads.labels(
+            table_name=self._storage_table.name, type=read_type).inc()
         try:
             async for record in records:
                 yield record
@@ -286,10 +313,12 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             await records.aclose()
 
     async def _check_and_get_records_from_storage(self, index_spec):
+        read_type = 'cache_hit'
         records_spec = self._indexes.storage_records_spec(index_spec)
         if not self._intervals_are_valid(records_spec):
+            read_type = 'cache_hit_with_refresh'
             await self.refresh_invalid()
-        return self._storage_table.get_records(records_spec)
+        return self._storage_table.get_records(records_spec), read_type
 
     def _intervals_are_valid(self, records_spec):
         for interval in records_spec.score_intervals:
@@ -439,6 +468,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         self._logger.info(
             f'Refresh done. Deleted {num_deleted} and loaded {num_loaded} '
             f'records across {len(old_and_new_specs)} index spec pairs.')
+        self._metric_refreshes.inc()
 
 
 class InvalidRecordRepository[Record, PrimaryKey: tp.PrimaryKey]:
