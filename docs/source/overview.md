@@ -196,12 +196,17 @@ can observe all the records that are initially loaded.
 ```
 
 {py:meth}`.CachedTable.invalidate_records` can be used to inform the cache that
-the data in the underlying DB has changed. Records that are invalidated are
-guaranteed to be fetched from the DB before they are returned the next time.
-This refresh is done lazily, i.e. only when a request comes in for a record
-that has been invalidated (requests for records that are still valid are served
-without refresh). However, a refresh can also be triggered manually using
-{py:meth}`.CachedTable.refresh_invalid`.
+the data in the underlying DB has changed. By default, records that are
+invalidated are guaranteed to be fetched from the DB before they are returned
+the next time. This refresh is done lazily, i.e. only when a request comes in
+for a record that has been invalidated (requests for records that are still
+valid are served without refresh). This default behavior can be overridden by
+passing `refresh_automatically=False`, in which case fetches will continue to
+serve the invalid records until a manual refresh is triggered. This can be
+useful when immediate correctness isn't crucial, but avoiding refreshes
+blocking read operations is. Invalid records can be refreshed manually using
+{py:meth}`.CachedTable.refresh_invalid`. This is also possible when
+`refresh_automatically=True`.
 
 {py:meth}`.CachedTable.invalidate_records` is a bit more complex since it takes
 more than one {py:class}`IndexSpec <.Indexes.IndexSpec>`. That's because

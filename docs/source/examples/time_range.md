@@ -9,6 +9,7 @@ demonstrates:
 - how records that aren't in storage will be fetched from the DB
 - how to adjust the data covered by storage
 - how to invalidate records whose scores have changed
+- how to disable automatic refreshes to avoid slowing down reads
 
 The source file can be found in [the repository's `examples` directory](
     https://github.com/dddsnn/tablecache/blob/main/examples/). To run

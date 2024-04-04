@@ -301,19 +301,21 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
     def invalidate_records(
             self,
             old_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec],
-            new_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec]
+            new_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec],
+            *, refresh_automatically: bool = True
     ) -> None:
         """
         Mark records in storage as invalid.
 
         All records that are currently in storage and match any index spec in
         ``old_index_specs`` or ``new_index_specs`` are marked as invalid. This
-        means that before any future request for any of these records, they are
-        guaranteed to be refreshed (i.e. fetched from the DB) first. This
-        guarantee holds for read operations that start after this method
-        returns. Reads that have already started (in a different task) may
-        respect invalidations that happen here, but probably won't. It is valid
-        to specify records that haven't actually changed (they will be
+        stores the information necessary to do a refresh (i.e. fetch from the
+        DB) of these records. If refresh_automatically is True, any future
+        request for any of these records is guaranteed to trigger a refresh
+        first. This guarantee holds for read operations that start after this
+        method returns. Reads that have already started (in a different task)
+        may respect invalidations that happen here, but probably won't. It is
+        valid to specify records that haven't actually changed (they will be
         refreshed as well, though).
 
         During a refresh, all records matching the first index spec in
@@ -355,6 +357,12 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             available index.
         :param new_index_specs: Like ``old_index_specs``, but specifying the
             same records by their new (possibly updated) scores.
+        :param refresh_automatically: Whether to do an automatic refresh before
+            the next read for any of the invalidated records. The refresh is
+            executed lazily when the read arrives, not immediately. If False,
+            the invalid records will continue to be served from storage. A
+            manual refresh must be performed (using
+            :py:meth:`refresh_invalid`).
         :raise ValueError: If the table is not yet loaded, an index is
             specified more than once, or one of the index specs lists is empty.
         """
@@ -369,7 +377,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
                 'At least one old and one new index spec must be given.')
         self._invalid_record_repo.flag_invalid(
             old_specs_by_name, new_specs_by_name, old_index_for_refresh,
-            new_index_for_refresh)
+            new_index_for_refresh,
+            consider_in_intersects_check=refresh_automatically)
 
     def _parse_index_specs_for_invalidation(self, index_specs):
         first_index_name = None
@@ -453,7 +462,8 @@ class InvalidRecordRepository[Record, PrimaryKey: tp.PrimaryKey]:
             t.Mapping[str, index.Indexes[Record, PrimaryKey].IndexSpec],
         new_index_specs:
             t.Mapping[str, index.Indexes[Record, PrimaryKey].IndexSpec],
-        old_index_for_refresh: str, new_index_for_refresh: str
+        old_index_for_refresh: str, new_index_for_refresh: str,
+        consider_in_intersects_check: bool
     ) -> None:
         """
         Flag records as invalid.
@@ -461,21 +471,24 @@ class InvalidRecordRepository[Record, PrimaryKey: tp.PrimaryKey]:
         Takes 2 dictionaries of index specs, one specifying the invalid records
         as they exist in storage now, the other specifying the updated records.
         These may be the same. Each dictionary maps index names to
-        corresponding index specs. All score intervals in the corresponding
-        StorageRecordsSpecs will be considered invalid in
-        interval_intersects_invalid(). Any keys in the dictionaries that aren't
-        names of indexes are ignored.
-
-        Not every index has to be present in the specs, but for the ones that
-        aren't the respective index is marked as dirty. This means that future
-        calls to interval_intersects_invalid() for that index will always
-        return True, since there is no longer a way to know what scores are
-        valid.
+        corresponding index specs. Not every index has to be present in the
+        specs, but missing ones may be marked as dirty. Any keys in the
+        dictionaries that aren't names of indexes are ignored.
 
         One old and one new index spec is stored to be part of
         specs_for_refresh(). Which are chosen must be specified via
         {old,new}_index_for_refresh. These must be keys into the respective
         dictionaries.
+
+        If consider_in_intersects_check is True, all score intervals in the
+        corresponding StorageRecordsSpecs will be considered invalid in
+        interval_intersects_invalid(). Additionally, any indexes that are
+        missing are marked as dirty, i.e. future calls to
+        interval_intersects_invalid() for that index will always return True,
+        since there is no longer a way to know what scores are valid.
+
+        :param consider_in_intersects_check: Whether to consider the records
+            invalid in interval_intersects_invalid().
         """
         if not old_index_specs or not new_index_specs:
             raise ValueError(
@@ -483,9 +496,10 @@ class InvalidRecordRepository[Record, PrimaryKey: tp.PrimaryKey]:
         self._specs_for_refresh.append(
             (old_index_specs[old_index_for_refresh],
              new_index_specs[new_index_for_refresh]))
-        for index_name in self._indexes.index_names:
-            self._record_invalid_intervals(
-                index_name, old_index_specs, new_index_specs)
+        if consider_in_intersects_check:
+            for index_name in self._indexes.index_names:
+                self._record_invalid_intervals(
+                    index_name, old_index_specs, new_index_specs)
 
     def _record_invalid_intervals(
             self, index_name, old_index_specs, new_index_specs):

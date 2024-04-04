@@ -1030,7 +1030,7 @@ class TestCachedTable:
         assert self.table_has_invalid_records(table)
         assert_that(
             await collect_async_iter(
-                table.get_records('x_range', min=11, max=13)),
+                table.get_records('x_range', min=11, max=14)),
             contains_inanyorder(
                 has_entries(pk=1, x=11, source='storage')))
         assert not self.table_has_invalid_records(table)
@@ -1050,9 +1050,10 @@ class TestCachedTable:
         assert self.table_has_invalid_records(table)
         assert_that(
             await collect_async_iter(
-                table.get_records('x_range', min=101, max=103)),
+                table.get_records('x_range', min=101, max=104)),
             contains_inanyorder(
-                has_entries(pk=2, x=102, source='storage')))
+                has_entries(pk=2, x=102, source='storage'),
+                has_entries(pk=3, x=103, source='storage')))
         assert not self.table_has_invalid_records(table)
 
     async def test_doesnt_refresh_after_invalidate_records_on_unaffected_old(
@@ -1093,6 +1094,58 @@ class TestCachedTable:
             await collect_async_iter(
                 table.get_records('x_range', min=104, max=106)), empty())
         assert self.table_has_invalid_records(table)
+
+    async def test_doesnt_refresh_automatically_after_invalidate_records(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('x_range', min=10, max=106)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=102, max=104)],
+            refresh_automatically=False)
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=11, max=14)),
+            contains_inanyorder(
+                has_entries(pk=1, x=11, source='storage'),
+                has_entries(pk=2, x=12, source='storage'),
+                has_entries(pk=3, x=13, source='storage')))
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=101, max=104)), empty())
+        assert self.table_has_invalid_records(table)
+
+    async def test_refreshes_manually_after_non_automatic_invalidate_records(
+            self, make_tables, db_access):
+        indexes = MultiIndexes()
+        table, _ = make_tables(indexes)
+        db_access.records = [{'pk': i, 'x': i + 10} for i in range(6)]
+        await table.load('x_range', min=10, max=106)
+        for i in range(2, 4):
+            db_access.records[i]['x'] = i + 100
+        assert not self.table_has_invalid_records(table)
+        table.invalidate_records(
+            [indexes.IndexSpec('x_range', min=12, max=14)],
+            [indexes.IndexSpec('x_range', min=102, max=104)],
+            refresh_automatically=False)
+        await table.refresh_invalid()
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=11, max=14)),
+            contains_inanyorder(
+                has_entries(pk=1, x=11, source='storage')))
+        assert_that(
+            await collect_async_iter(
+                table.get_records('x_range', min=101, max=104)),
+            contains_inanyorder(
+                has_entries(pk=2, x=102, source='storage'),
+                has_entries(pk=3, x=103, source='storage')))
+        assert not self.table_has_invalid_records(table)
 
     async def test_invalidate_records_tolerates_overspecified_new(
             self, make_tables, db_access):
@@ -1319,7 +1372,7 @@ class TestInvalidRecordRepository:
              'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
             {'primary_key': indexes.IndexSpec('primary_key', 2),
              'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
-            'primary_key', 'primary_key')
+            'primary_key', 'primary_key', True)
         assert not repo.interval_intersects_invalid(
             'primary_key', pk_interval(float('-inf'), 2))
         assert not repo.interval_intersects_invalid(
@@ -1348,7 +1401,7 @@ class TestInvalidRecordRepository:
             repo.flag_invalid(
                 {'primary_key': indexes.IndexSpec('primary_key', 2)},
                 {'primary_key': indexes.IndexSpec('primary_key', 2)},
-                'x_range', 'x_range')
+                'x_range', 'x_range', True)
 
     def test_interval_invalid_on_dirty_index(
             self, repo, indexes, x_range_interval):
@@ -1357,16 +1410,40 @@ class TestInvalidRecordRepository:
         repo.flag_invalid(
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
-            'primary_key', 'primary_key')
+            'primary_key', 'primary_key', True)
         assert repo.interval_intersects_invalid(
             'x_range', x_range_interval(0, 5))
 
-    def test_specs_for_refresh(self, repo, indexes):
+    def test_interval_invalid_without_consider_not_in_intersects(
+            self, repo, indexes):
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2),
+             'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2),
+             'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
+            'primary_key', 'primary_key', False)
+        assert not repo.interval_intersects_invalid(
+            'primary_key', tc.Interval.everything())
+        assert not repo.interval_intersects_invalid(
+            'x_range', tc.Interval.everything())
+
+    def test_interval_invalid_without_consider_doesnt_dirty_index(
+            self, repo, indexes):
+        repo.flag_invalid(
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            {'primary_key': indexes.IndexSpec('primary_key', 2)},
+            'primary_key', 'primary_key', False)
+        assert not repo.interval_intersects_invalid(
+            'x_range', tc.Interval.everything())
+
+    @pytest.mark.parametrize('consider_in_intersects_check', [True, False])
+    def test_specs_for_refresh(
+            self, repo, indexes, consider_in_intersects_check):
         assert_that(repo.specs_for_refresh(), empty())
         repo.flag_invalid(
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
-            'primary_key', 'primary_key')
+            'primary_key', 'primary_key', consider_in_intersects_check)
         assert_that(
             repo.specs_for_refresh(),
             contains_inanyorder(
@@ -1379,7 +1456,7 @@ class TestInvalidRecordRepository:
              'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
             {'primary_key': indexes.IndexSpec('primary_key', 3),
              'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
-            'primary_key', 'x_range')
+            'primary_key', 'x_range', True)
         assert_that(
             repo.specs_for_refresh(),
             contains_inanyorder(
@@ -1397,7 +1474,7 @@ class TestInvalidRecordRepository:
              'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
             {'primary_key': indexes.IndexSpec('primary_key', 2),
              'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
-            'primary_key', 'primary_key')
+            'primary_key', 'primary_key', True)
         assert repo.interval_intersects_invalid(
             'primary_key', tc.Interval.everything())
         assert repo.interval_intersects_invalid(
@@ -1412,26 +1489,28 @@ class TestInvalidRecordRepository:
         repo.flag_invalid(
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
-            'primary_key', 'primary_key')
+            'primary_key', 'primary_key', True)
         assert repo.interval_intersects_invalid(
             'x_range', tc.Interval.everything())
         repo.clear()
         assert not repo.interval_intersects_invalid(
             'x_range', tc.Interval.everything())
 
-    def test_len_is_number_of_specs_for_refresh(self, repo, indexes):
+    @pytest.mark.parametrize('consider_in_intersects_check', [True, False])
+    def test_len_is_number_of_specs_for_refresh(
+            self, repo, indexes, consider_in_intersects_check):
         assert len(repo) == 0
         repo.flag_invalid(
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
             {'primary_key': indexes.IndexSpec('primary_key', 2)},
-            'primary_key', 'primary_key')
+            'primary_key', 'primary_key', consider_in_intersects_check)
         assert len(repo) == 1
         repo.flag_invalid(
             {'primary_key': indexes.IndexSpec('primary_key', 3),
              'x_range': indexes.IndexSpec('x_range', min=10, max=20)},
             {'primary_key': indexes.IndexSpec('primary_key', 3),
              'x_range': indexes.IndexSpec('x_range', min=110, max=120)},
-            'primary_key', 'x_range')
+            'primary_key', 'x_range', consider_in_intersects_check)
         assert len(repo) == 2
         repo.clear()
         assert len(repo) == 0
