@@ -29,4 +29,4 @@ except ImportError as e:
         'Please install tablecache[postgres] to use tablecache.postgres.'
     ) from e
 
-from tablecache.postgres.db import PostgresAccess
+from tablecache.postgres.db import DbRecord, PostgresAccess, RecordsSpec

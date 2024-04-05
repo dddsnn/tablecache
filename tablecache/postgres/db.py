@@ -22,11 +22,11 @@ import asyncpg
 
 import tablecache.db as db
 
+type DbRecord = asyncpg.Record
+type RecordsSpec[Record] = db.QueryArgsDbRecordsSpec[DbRecord, Record]
 
-type RecordParser = ca.Callable[[asyncpg.Record], t.Any]
 
-
-class PostgresAccess(db.DbAccess[asyncpg.Record, db.QueryArgsDbRecordsSpec]):
+class PostgresAccess[Record](db.DbAccess[DbRecord, RecordsSpec[Record]]):
     """
     Postgres access.
 
@@ -39,19 +39,23 @@ class PostgresAccess(db.DbAccess[asyncpg.Record, db.QueryArgsDbRecordsSpec]):
 
     def __init__(
             self,
-            record_parser: t.Optional[RecordParser] = None,
+            record_parser: t.Optional[
+                db.RecordParser[DbRecord, Record]] = None,
             **pool_kwargs: t.Any) -> None:
         """
         :param record_parser: An optional function that is applied to each
-            record before it is returned. The default is to return the record
-            as-is.
+            record before it is returned. This overrides the parser in the
+            records spec.
+
+            .. deprecated:: 4.2
+                Use the record parser in the records spec instead.
         :param pool_kwargs: Arguments that will be passed to
             :external:py:func:`asyncpg.create_pool <asyncpg.pool.create_pool>`
             to create the connection pool. The pool is only created, not
             connected. Arguments ``min_size=0`` and ``max_size=1`` are added
             unless otherwise specified.
         """
-        self._record_parser = record_parser or self._identity_parser
+        self._record_parser = record_parser
         pool_kwargs.setdefault('min_size', 0)
         pool_kwargs.setdefault('max_size', 1)
         self._pool = asyncpg.create_pool(**pool_kwargs)
@@ -64,15 +68,12 @@ class PostgresAccess(db.DbAccess[asyncpg.Record, db.QueryArgsDbRecordsSpec]):
         await self._pool.__aexit__()
         return False
 
-    @staticmethod
-    def _identity_parser(record):
-        return record
-
     @t.override
     async def get_records(
-            self, records_spec: db.QueryArgsDbRecordsSpec
-    ) -> ca.AsyncIterator[asyncpg.Record]:
+            self, records_spec: RecordsSpec[Record]
+    ) -> ca.AsyncIterator[Record]:
+        record_parser = self._record_parser or records_spec.record_parser
         async with self._pool.acquire() as conn, conn.transaction():
             async for record in conn.cursor(
                     records_spec.query, *records_spec.args):
-                yield self._record_parser(record)
+                yield record_parser(record)

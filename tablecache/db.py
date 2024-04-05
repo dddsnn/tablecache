@@ -23,19 +23,40 @@ very simple interface, able to get records based on a
 
 import abc
 import collections.abc as ca
-import dataclasses as dc
+import typing as t
 
 
-@dc.dataclass(frozen=True)
-class DbRecordsSpec:
+type RecordParser[DbRecord, Record] = ca.Callable[[DbRecord], Record]
+
+
+def _identity_parser(record):
+    return record
+
+
+class DbRecordsSpec[DbRecord, Record]:
     """Base type for a specification of records in the DB."""
 
+    def __init__(
+            self, *,
+            record_parser: t.Optional[RecordParser[DbRecord, Record]] = None):
+        """
+        :param record_parser: An optional function that is applied to each
+            record before it is returned. The default is to return the record
+            as-is.
+        """
+        self.record_parser = record_parser or _identity_parser
 
-@dc.dataclass(frozen=True)
-class QueryArgsDbRecordsSpec(DbRecordsSpec):
+
+class QueryArgsDbRecordsSpec[DbRecord, Record](
+        DbRecordsSpec[DbRecord, Record]):
     """A specification of DB records via a query and args."""
-    query: str
-    args: tuple
+
+    def __init__(
+            self, query: str, args: tuple, *,
+            record_parser: t.Optional[RecordParser[DbRecord, Record]] = None):
+        super().__init__(record_parser=record_parser)
+        self.query = query
+        self.args = args
 
     def __repr__(self) -> str:
         return f'a query with arguments {self.args}'

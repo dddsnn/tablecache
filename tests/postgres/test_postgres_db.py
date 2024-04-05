@@ -107,7 +107,7 @@ async def collect_async_iter(i):
 
 
 class TestPostgresAccess:
-    def query_spec(self, *user_ids):
+    def query_spec(self, *user_ids, **kwargs):
         query_string = '''
             SELECT
                 uc.*, u.name AS user_name, u.age AS user_age,
@@ -119,7 +119,8 @@ class TestPostgresAccess:
         if user_ids:
             query_string += ' WHERE uc.user_id IN ({})'.format(
                 ','.join(f'${i}' for i in range(1, len(user_ids) + 1)))
-        return tc.QueryArgsDbRecordsSpec(query_string, tuple(user_ids))
+        return tc.QueryArgsDbRecordsSpec(
+            query_string, tuple(user_ids), **kwargs)
 
     @pytest.fixture
     async def make_access(self, wait_for_postgres, postgres_dsn):
@@ -174,18 +175,38 @@ class TestPostgresAccess:
             contains_inanyorder(
                 has_entries(user_id=2), has_entries(user_id=3)))
 
-    async def test_record_parser(self, make_access, insert_user):
+    async def test_uses_spec_record_parser(self, make_access, insert_user):
         def parse(record):
             record_dict = dict(record)
             record_dict['user_name'] += '_foo'
             record_dict['completely_new_attribute'] = 2
             return record_dict
-        async with make_access(parse) as access:
+        async with make_access() as access:
             await insert_user(1, 'u1', 1, 11, 'c1')
             assert_that(
                 await collect_async_iter(
-                    access.get_records(self.query_spec(1))),
+                    access.get_records(
+                        self.query_spec(1, record_parser=parse))),
                 contains_inanyorder(
                     has_entries(
                         user_id=1, user_name='u1_foo',
                         completely_new_attribute=2)))
+
+    async def test_uses_own_record_parser_over_specs(
+            self, make_access, insert_user):
+        def parse_own(record):
+            record_dict = dict(record)
+            record_dict['user_name'] += '_own'
+            return record_dict
+
+        def parse_spec(record):
+            record_dict = dict(record)
+            record_dict['user_name'] += '_spec'
+            return record_dict
+        async with make_access(parse_own) as access:
+            await insert_user(1, 'u1', 1, 11, 'c1')
+            assert_that(
+                await collect_async_iter(
+                    access.get_records(
+                        self.query_spec(1, record_parser=parse_spec))),
+                contains_inanyorder(has_entries(user_name='u1_own')))

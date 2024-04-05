@@ -4,12 +4,14 @@
 .. automodule:: tablecache.postgres
 ```
 
-```{py:data} RecordParser
+```{py:data} DbRecord
 ---
-type: collections.abc.Callable[[asyncpg.Record], typing.Any]
+type: asyncpg.Record
+```
+
+```{py:data} RecordsSpec[Record]
 ---
-A function parsing an {external:py:class}`asyncpg.Record` into a custom data
-structure.
+type: tablecache.QueryArgsDbRecordsSpec[DbRecord, Record]
 ```
 
 ```{eval-rst}

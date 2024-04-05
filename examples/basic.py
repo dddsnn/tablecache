@@ -82,8 +82,8 @@ async def main():
             # have passed directly). Note that these are asyncpg.Record
             # objects. That's because the DB access returns those, and the
             # local storage just adds them to its data structures as-is. If we
-            # wanted regular dicts, we could use the record_parser argument to
-            # PostgresAccess.
+            # wanted regular dicts, we could use the record_parser argument
+            # when creating DbRecordsSpecs in a custom Indexes implementation.
             print(user)
         try:
             # In addition to the get_records() asynchronous generator, there is
