@@ -847,6 +847,56 @@ class TestCachedTable:
             await table.get_first_record('primary_key', 0),
             has_entries(s='b0', source='db'))
 
+    async def test_adjust_observes_records_from_initial_refresh(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 's': f'a{i}'} for i in range(2)]
+        await table.load('primary_key', *range(2))
+        db_access.records[0]['s'] = 'a0'
+        expected_expired = await collect_async_iter(
+            table.get_records('primary_key', 0))
+        expected_loaded = await collect_async_iter(
+            db_access.get_records(
+                tc.QueryArgsDbRecordsSpec('query_some_pks', ((0,),))))
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 0)],
+            [indexes.IndexSpec('primary_key', 0)])
+        await table.adjust('primary_key', *range(2))
+        assert_that(
+            indexes.adjustments, contains_exactly(
+                anything(),
+                has_properties(
+                    observe_expired=has_properties(
+                        call_args_list=contains_inanyorder(
+                            *[um.call(r) for r in expected_expired])),
+                    observe_loaded=has_properties(
+                        call_args_list=contains_inanyorder(
+                            *[um.call(r) for r in expected_loaded])))))
+
+    async def test_adjust_observes_from_initial_refresh_and_adjust(
+            self, table, db_access, indexes):
+        db_access.records = [{'pk': i, 's': f'a{i}'} for i in range(4)]
+        await table.load('primary_key', *range(2))
+        db_access.records[0]['s'] = 'a0'
+        expected_expired = await collect_async_iter(
+            table.get_records('primary_key', 0))
+        expected_loaded = await collect_async_iter(
+            db_access.get_records(
+                tc.QueryArgsDbRecordsSpec('query_some_pks', ((0, 2, 3),))))
+        table.invalidate_records(
+            [indexes.IndexSpec('primary_key', 0)],
+            [indexes.IndexSpec('primary_key', 0)])
+        await table.adjust('primary_key', *range(4))
+        assert_that(
+            indexes.adjustments, contains_exactly(
+                anything(),
+                has_properties(
+                    observe_expired=has_properties(
+                        call_args_list=contains_inanyorder(
+                            *[um.call(r) for r in expected_expired])),
+                    observe_loaded=has_properties(
+                        call_args_list=contains_inanyorder(
+                            *[um.call(r) for r in expected_loaded])))))
+
     async def test_get_records_by_other_index(
             self, make_tables, db_access):
         table, _ = make_tables(MultiIndexes())

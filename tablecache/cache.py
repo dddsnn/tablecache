@@ -145,7 +145,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         self._logger.info(
             f'Clearing and loading {self._storage_table} with {index_spec}.')
         await self._storage_table.clear()
-        num_deleted, num_loaded = await self._adjust_plain(index_spec)
+        num_deleted, num_loaded = await self._prepare_adjustment_and_then(
+            self._adjust_plain, index_spec)
         self._loaded_event.set()
         if num_deleted:
             self._logger.warning(
@@ -159,21 +160,24 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
             return args[0]
         return self._indexes.IndexSpec(*args, **kwargs)
 
-    async def _adjust_plain(self, index_spec):
-        return await self._adjust(False, index_spec)
-
-    async def _adjust_in_scratch(self, index_spec):
-        async with self._scratch_space_lock:
-            await self._refresh_invalid_locked()
-            return await self._adjust(True, index_spec)
-
-    async def _adjust(self, use_scratch, index_spec):
+    async def _prepare_adjustment_and_then(self, adjustor, index_spec):
         try:
             adjustment = self._indexes.prepare_adjustment(index_spec)
         except index.UnsupportedIndexOperation as e:
             raise ValueError(
                 f'Indexes don\'t support adjusting by {index_spec.index_name}.'
             ) from e
+        return await adjustor(adjustment)
+
+    async def _adjust_plain(self, adjustment):
+        return await self._adjust(False, adjustment)
+
+    async def _adjust_in_scratch(self, adjustment):
+        async with self._scratch_space_lock:
+            await self._refresh_invalid_locked(adjustment)
+            return await self._adjust(True, adjustment)
+
+    async def _adjust(self, use_scratch, adjustment):
         if use_scratch:
             put = self._storage_table.scratch_put_record
             delete = self._storage_table.scratch_discard_records
@@ -231,14 +235,17 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
 
         Only one adjustment or refresh (via :py:meth:`refresh_invalid`) can be
         happening at once. Other ones are locked until previous ones complete.
-        Before the adjustment, any invalid records are refreshed.
+        Before the adjustment, any invalid records are refreshed. During that
+        refresh, any records that are expired or loaded are observed in the
+        same adjustment that is later applied.
 
         :raise ValueError: If the specified index doesn't support adjusting.
         """
         index_spec = self._make_index_spec(*args, **kwargs)
         await self.loaded()
         self._logger.info(f'Preparing adjustment to {index_spec}.')
-        num_deleted, num_loaded = await self._adjust_in_scratch(index_spec)
+        num_deleted, num_loaded = await self._prepare_adjustment_and_then(
+            self._adjust_in_scratch, index_spec)
         if num_deleted or num_loaded:
             self._logger.info(
                 f'Deleted {num_deleted} records and loaded {num_loaded} ones.')
@@ -445,7 +452,7 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         async with self._scratch_space_lock:
             await self._refresh_invalid_locked()
 
-    async def _refresh_invalid_locked(self):
+    async def _refresh_invalid_locked(self, adjustment=None):
         # Checking again avoids a second refresh in case one just happened
         # while we were waiting on the lock.
         if not self._invalid_record_repo:
@@ -456,12 +463,16 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         num_deleted = num_loaded = 0
         old_and_new_specs = self._invalid_record_repo.specs_for_refresh()
         for old_spec, new_spec in old_and_new_specs:
-            async for _ in self._storage_table.scratch_discard_records(
+            async for record in self._storage_table.scratch_discard_records(
                     self._indexes.storage_records_spec(old_spec)):
+                if adjustment:
+                    adjustment.observe_expired(record)
                 num_deleted += 1
             db_records_spec = self._indexes.db_records_spec(new_spec)
             async for record in self._db_access.get_records(db_records_spec):
                 await self._storage_table.scratch_put_record(record)
+                if adjustment:
+                    adjustment.observe_loaded(record)
                 num_loaded += 1
         self._storage_table.scratch_merge()
         self._invalid_record_repo.clear()
