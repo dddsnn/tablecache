@@ -137,6 +137,7 @@ class StorageRecordsSpec[Record]:
     recheck_predicate: tp.RecheckPredicate[Record] = always_use_record
 
 
+# TODO could actually add back get_record() and delete_record(), storages have pks again+++++++++++++++++++
 class StorageTable[Record](abc.ABC):
     """
     Fast storage table.

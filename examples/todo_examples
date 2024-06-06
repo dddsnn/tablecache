@@ -1,0 +1,10 @@
+# TODO example with non-dict record, provice a recipe e.g. for compressed
+bytestring records+++++++++++++++++
+# TODO example with recheck predicate++++++++++
+
+# TODO explain invalidation dirtying indexes (i.e. the time index becoming
+# dirty when we invalidate by time_device)++++++++++++++++
+
+TODO a doc section with recipes:
+- geoindex?
+- non-dict records (compressed to bytestring)

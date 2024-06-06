@@ -306,4 +306,6 @@ class LocalStorageTable(tcl.LocalStorageTable):
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
+    import prometheus_client as pc
+    pc.start_http_server(9050)
     asyncio.run(main())

@@ -35,6 +35,9 @@ import tablecache.storage as storage
 import tablecache.types as tp
 
 
+# TODO check mode: check whether the records of an index spec in storage match
+# those in the db++++++++++++++++=
+# TODO could actually add back get_record() and delete_record(), storages have pks again+++++++++++++++++++
 class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
     """
     A cached table.
@@ -334,6 +337,20 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
                 return False
         return True
 
+    # TODO add an option to state for which indexes new scores don't
+    # change and just use the old ones+++++++++++
+    # TODO currently, we can only ever mark entire intervals
+    # invalid. maybe add invalidate_delete() to explicitly state a few
+    # records that have been deleted, similarly invalidate_add() or
+    # something, and invalidate_change(). in these the user would have to
+    # make sure that nothing else changes (or make the appropriate calls separately)+++++++++++
+    # TODO add another method to just give an updated record, circumventing the
+    # db entirely for perf++++++++++++++++++
+    # TODO implement interval merging for invalid storage specs, i.e. if one
+    # invalid spec has an interval that completely contains the one of another,
+    # we can ignore the second one (if they have the same index of course).
+    # then clients can pass one big interval that contains all previous ones before calling refresh, and the db
+    # will only be hit once+++++++++++++
     def invalidate_records(
             self,
             old_index_specs: list[index.Indexes[Record, PrimaryKey].IndexSpec],
@@ -452,6 +469,8 @@ class CachedTable[Record, PrimaryKey: tp.PrimaryKey]:
         async with self._scratch_space_lock:
             await self._refresh_invalid_locked()
 
+    # TODO undo scratch stuff on errors e.g. in db_access.get_records()+++++++
+    # TODO also in other places+++++++++++++++
     async def _refresh_invalid_locked(self, adjustment=None):
         # Checking again avoids a second refresh in case one just happened
         # while we were waiting on the lock.
@@ -580,6 +599,8 @@ class InvalidRecordRepository[Record, PrimaryKey: tp.PrimaryKey]:
         """
         if index_name in self._dirty_indexes:
             return True
+        # PERF could/should we do something about performance? keep invalid
+        # scores sorted and bisect? or is the overhead not worth it?+++++++++++
         for invalid_interval in self._invalid_intervals[index_name]:
             if interval.intersects(invalid_interval):
                 return True
