@@ -41,6 +41,7 @@ class PostgresAccess[Record](db.DbAccess[DbRecord, RecordsSpec[Record]]):
             self,
             record_parser: t.Optional[
                 db.RecordParser[DbRecord, Record]] = None,
+            cursor_prefetch: int = 1000,
             **pool_kwargs: t.Any) -> None:
         """
         :param record_parser: An optional function that is applied to each
@@ -49,6 +50,10 @@ class PostgresAccess[Record](db.DbAccess[DbRecord, RecordsSpec[Record]]):
 
             .. deprecated:: 4.2
                 Use the record parser in the records spec instead.
+        :param cursor_prefetch: The number of rows to fetch at once using the
+            cursor. Will be used as
+            :external:py:meth:`asyncpg.Connection.cursor
+            <asyncpg.connection.Connection.cursor>`'s `prefetch` argument.
         :param pool_kwargs: Arguments that will be passed to
             :external:py:func:`asyncpg.create_pool <asyncpg.pool.create_pool>`
             to create the connection pool. The pool is only created, not
@@ -56,6 +61,7 @@ class PostgresAccess[Record](db.DbAccess[DbRecord, RecordsSpec[Record]]):
             unless otherwise specified.
         """
         self._record_parser = record_parser
+        self.cursor_prefetch = cursor_prefetch
         pool_kwargs.setdefault('min_size', 0)
         pool_kwargs.setdefault('max_size', 1)
         self._pool = asyncpg.create_pool(**pool_kwargs)
@@ -74,6 +80,8 @@ class PostgresAccess[Record](db.DbAccess[DbRecord, RecordsSpec[Record]]):
     ) -> ca.AsyncIterator[Record]:
         record_parser = self._record_parser or records_spec.record_parser
         async with self._pool.acquire() as conn, conn.transaction():
-            async for record in conn.cursor(
-                    records_spec.query, *records_spec.args):
+            cursor = conn.cursor(
+                records_spec.query, *records_spec.args,
+                prefetch=self.cursor_prefetch)
+            async for record in cursor:
                 yield record_parser(record)
